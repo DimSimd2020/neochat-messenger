@@ -97,6 +97,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 /// Switches between onboarding and the main tabs.
 final class RootViewController: UIViewController {
     private var current: UIViewController?
+    private var updateBanner: UIView?
+    private var lastUpdateCheck = Date.distantPast
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -111,7 +113,51 @@ final class RootViewController: UIViewController {
                 self?.toast(ev.str("message"))
             }
         }
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.checkUpdate()
+        }
         start()
+    }
+
+    /// iOS cannot install an unsigned build itself: the banner opens the IPA link in Safari
+    /// so it can be installed with Scarlet. Checked at most every 6 hours.
+    private func checkUpdate() {
+        guard updateBanner == nil, Date().timeIntervalSince(lastUpdateCheck) > 6 * 3600,
+              let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return }
+        lastUpdateCheck = Date()
+        Core.shared.call("check_update", ["platform": "ios", "version": version]) { [weak self] r in
+            guard case .success(let v) = r, let o = v as? JSON, o.bool("available"), let url = URL(string: o.str("url")) else { return }
+            self?.showUpdateBanner(o.str("version"), url)
+        }
+    }
+
+    private func showUpdateBanner(_ version: String, _ url: URL) {
+        guard updateBanner == nil else { return }
+        let bar = UIView()
+        bar.glass(20, strong: true)
+        let text = label("Доступна версия \(version)", 15, .semibold)
+        let open = PillButton("Скачать")
+        open.addAction(UIAction { _ in UIApplication.shared.open(url) }, for: .touchUpInside)
+        let row = UIStackView(arrangedSubviews: [text, open])
+        row.alignment = .center
+        row.spacing = 12
+        row.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(row)
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(bar)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 18),
+            row.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            row.topAnchor.constraint(equalTo: bar.topAnchor, constant: 8),
+            row.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -8),
+            bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            bar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            bar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+        ])
+        updateBanner = bar
+        UIAccessibility.post(notification: .announcement, argument: "Доступна версия \(version)")
+        bar.alpha = 0
+        UIView.animate(withDuration: Theme.ms(0.22)) { bar.alpha = 1 }
     }
 
     func start() {
@@ -140,6 +186,7 @@ final class RootViewController: UIViewController {
         view.addSubview(vc.view)
         vc.didMove(toParent: self)
         current = vc
+        if let b = updateBanner { view.bringSubviewToFront(b) }
         vc.view.alpha = 0
         UIView.animate(withDuration: Theme.ms(0.22), animations: { vc.view.alpha = 1 }) { _ in
             old?.willMove(toParent: nil)

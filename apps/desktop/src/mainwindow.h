@@ -49,6 +49,7 @@ private:
     void toast(const QString &text);
     void notify(const QJsonObject &ev);
     DialogHost host();
+    void checkUpdate();
 
     QStackedWidget *m_stack;
     Onboarding *m_onboarding;
@@ -61,6 +62,8 @@ private:
     QWidget *m_placeholder;
     ConversationHeader *m_header;
     NoticeBar *m_notice;
+    NoticeBar *m_updateBar;
+    QString m_updatePath;
     ui::SearchField *m_search;
     QWidget *m_searchWrap;
     MessageView *m_view;

@@ -12,12 +12,14 @@
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDir>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QMenu>
 #include <QMimeDatabase>
 #include <QPainter>
+#include <QProcess>
 #include <QScreen>
 #include <QSettings>
 #include <QShortcut>
@@ -250,8 +252,30 @@ MainWindow::MainWindow()
 {
     setWindowTitle(QStringLiteral("NeoChat"));
     setMinimumSize(480, 600);
+    auto *central = new QWidget;
+    auto *centralLay = new QVBoxLayout(central);
+    centralLay->setContentsMargins(0, 0, 0, 0);
+    centralLay->setSpacing(0);
+    m_updateBar = new NoticeBar(central);
     m_stack = new QStackedWidget;
-    setCentralWidget(m_stack);
+    centralLay->addWidget(m_updateBar);
+    centralLay->addWidget(m_stack, 1);
+    setCentralWidget(central);
+    connect(m_updateBar->action, &QAbstractButton::clicked, this, [this] {
+        // msiexec replaces the running build; the installer starts NeoChat again (LAUNCHAPP).
+        if (m_updatePath.isEmpty()
+            || !QProcess::startDetached("msiexec", {"/i", QDir::toNativeSeparators(m_updatePath), "/passive", "LAUNCHAPP=1"})) {
+            toast(QStringLiteral("Не удалось запустить установку обновления"));
+            return;
+        }
+        QApplication::quit();
+    });
+    // First check shortly after start, then every 6 hours.
+    auto *updateTimer = new QTimer(this);
+    updateTimer->setInterval(6 * 60 * 60 * 1000);
+    connect(updateTimer, &QTimer::timeout, this, &MainWindow::checkUpdate);
+    updateTimer->start();
+    QTimer::singleShot(10 * 1000, this, &MainWindow::checkUpdate);
 
     m_onboarding = new Onboarding;
     m_stack->addWidget(m_onboarding);
@@ -441,6 +465,24 @@ DialogHost MainWindow::host()
     };
     h.enterSendsChanged = [this](bool on) { m_composer->setEnterSends(on); };
     return h;
+}
+
+void MainWindow::checkUpdate()
+{
+    if (!m_updatePath.isEmpty())
+        return;
+    const QJsonObject p{{"platform", "windows"}, {"version", QStringLiteral(NEOCHAT_VERSION)}};
+    Core::instance()->call("check_update", p, this, [this, p](const QJsonValue &v, const CoreError &e) {
+        if (!e.ok() || !v.toObject().value("available").toBool())
+            return;
+        Core::instance()->call("download_update", p, this, [this](const QJsonValue &v, const CoreError &e) {
+            if (!e.ok())
+                return;
+            m_updatePath = v.toObject().value("path").toString();
+            m_updateBar->set(QStringLiteral("Обновление %1 готово к установке").arg(v.toObject().value("version").toString()),
+                             QStringLiteral("Перезапустить"));
+        });
+    });
 }
 
 void MainWindow::start()

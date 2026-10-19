@@ -65,6 +65,9 @@ func (s *Server) routes() {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
 
+	m.HandleFunc("GET /v1/app/manifest", s.handleUpdateManifest)
+	m.HandleFunc("GET /v1/app/files/{name}", s.handleUpdateFile)
+
 	m.HandleFunc("POST /v1/accounts", s.handleRegister)
 	m.HandleFunc("POST /v1/accounts/recover", s.handleRecover)
 	m.HandleFunc("POST /v1/sessions", s.handleLogin)

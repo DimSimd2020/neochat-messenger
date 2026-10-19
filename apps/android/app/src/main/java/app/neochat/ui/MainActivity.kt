@@ -8,13 +8,17 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
+import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import app.neochat.FilesProvider
 import app.neochat.Notifier
 import app.neochat.core.CoreClient
 import org.json.JSONObject
+import java.io.File
 
 /** Screens get the system bar and keyboard insets and may react to back. */
 interface Screen {
@@ -43,6 +47,8 @@ class MainActivity : Activity(), Sheet.Host {
     private var current: Screen? = null
     private var pendingConversation: String? = null
     private val listener: (JSONObject) -> Unit = { onEvent(it) }
+    private var updateBanner: View? = null
+    private var lastUpdateCheck = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -253,6 +259,56 @@ class MainActivity : Activity(), Sheet.Host {
     override fun onResume() {
         super.onResume()
         chat?.onResumed()
+        // At most every 6 hours; the download runs in the background.
+        val now = System.currentTimeMillis()
+        if (now - lastUpdateCheck > 6 * 60 * 60 * 1000L) {
+            lastUpdateCheck = now
+            checkUpdate()
+        }
+    }
+
+    private fun checkUpdate() {
+        if (updateBanner != null) return
+        val version = packageManager.getPackageInfo(packageName, 0).versionName ?: return
+        val p = JSONObject().put("platform", "android").put("version", version)
+        CoreClient.call("check_update", p) { v, e ->
+            if (e != null || (v as? JSONObject)?.optBoolean("available") != true) return@call
+            CoreClient.call("download_update", p) { r, err ->
+                val o = r as? JSONObject
+                if (err == null && o != null && updateBanner == null) showUpdateBanner(o.str("version"), File(o.str("path")))
+            }
+        }
+    }
+
+    private fun showUpdateBanner(version: String, apk: File) {
+        val bar = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            background = GlassDrawable(this@MainActivity, GlassDrawable.Kind.STRONG, dpf(20))
+            setPadding(dp(18), dp(8), dp(8), dp(8))
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        bar.addView(label("Обновление $version готово", 14.5f, 600), lp(0, WRAP, 1f))
+        val install = PillButton(this, "Установить")
+        install.setOnClickListener { installUpdate(apk) }
+        bar.addView(install, lp(WRAP, WRAP))
+        overlay.addView(bar, flp(MATCH, WRAP, Gravity.TOP).apply { setMargins(dp(12), top + dp(8), dp(12), 0) })
+        updateBanner = bar
+        if (!Theme.reducedMotion) {
+            bar.alpha = 0f
+            bar.translationY = -dpf(12)
+            bar.animate().alpha(1f).translationY(0f).setDuration(220).setInterpolator(Theme.surfaceCurve).start()
+        }
+    }
+
+    private fun installUpdate(apk: File) {
+        val i = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(FilesProvider.uriFor(this, apk), "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            startActivity(i)
+        } catch (_: android.content.ActivityNotFoundException) {
+            toast("Не удалось открыть установщик")
+        }
     }
 
     override fun pushBack(handler: () -> Boolean) {

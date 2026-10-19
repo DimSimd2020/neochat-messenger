@@ -14,6 +14,7 @@ mod keys;
 mod outbox;
 mod store;
 mod sync;
+mod update;
 mod views;
 
 pub mod ffi;

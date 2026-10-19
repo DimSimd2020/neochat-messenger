@@ -26,7 +26,7 @@ pub const STATE_OFFLINE: u8 = 0;
 pub const STATE_CONNECTING: u8 = 1;
 pub const STATE_ONLINE: u8 = 2;
 /// Built-in server; never shown to people. Callers may override it with "server" (tests).
-const DEFAULT_SERVER: &str = "https://r1270286.s2566.vm.mydomain.zone:8443";
+pub const DEFAULT_SERVER: &str = "https://r1270286.s2566.vm.mydomain.zone:8443";
 
 pub struct Inner {
     pub db: Mutex<Db>,
@@ -244,6 +244,8 @@ impl Inner {
             "qr_login_approve" => self.qr_login_approve(p),
             "account_settings" => self.authed("GET", "/v1/accounts/current/settings", None),
             "set_profile" => self.set_profile(p),
+            "check_update" => self.check_update(p),
+            "download_update" => self.download_update(p),
             "set_two_factor" => self
                 .authed("PUT", "/v1/accounts/current/settings", Some(&json!({"two_factor": p["enabled"].as_bool().unwrap_or(false)})))
                 .map(|_| Value::Null),

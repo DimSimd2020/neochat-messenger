@@ -12,19 +12,17 @@ import java.io.File
 import java.io.FileNotFoundException
 
 /**
- * Read-only access for other apps to files the core decrypted into its tmp folder,
- * granted per intent. Nothing outside that folder is reachable.
+ * Read-only access for other apps to files the core decrypted into its tmp folder and to
+ * downloaded app updates, granted per intent. Nothing outside those folders is reachable.
  */
 class FilesProvider : ContentProvider() {
     override fun onCreate() = true
 
-    private fun root(ctx: Context) = File(ctx.filesDir, "core/tmp").canonicalFile
-
     private fun resolve(uri: Uri): File {
         val ctx = context ?: throw FileNotFoundException()
         val rel = uri.path?.removePrefix("/") ?: throw FileNotFoundException()
-        val f = File(root(ctx), rel).canonicalFile
-        if (!f.path.startsWith(root(ctx).path + File.separator) || !f.isFile) throw FileNotFoundException()
+        val f = File(core(ctx), rel).canonicalFile
+        if (ROOTS.none { f.path.startsWith(File(core(ctx), it).canonicalPath + File.separator) } || !f.isFile) throw FileNotFoundException()
         return f
     }
 
@@ -47,8 +45,11 @@ class FilesProvider : ContentProvider() {
     override fun update(uri: Uri, values: ContentValues?, selection: String?, args: Array<out String>?) = 0
 
     companion object {
+        private val ROOTS = listOf("tmp", "updates")
+        private fun core(ctx: Context) = File(ctx.filesDir, "core").canonicalFile
+
         fun uriFor(ctx: Context, f: File): Uri {
-            val rel = f.canonicalFile.relativeTo(File(ctx.filesDir, "core/tmp").canonicalFile).invariantSeparatorsPath
+            val rel = f.canonicalFile.relativeTo(core(ctx)).invariantSeparatorsPath
             return Uri.Builder().scheme("content").authority("app.neochat.files").path(rel).build()
         }
     }

@@ -45,8 +45,13 @@
     <!-- Finish page: launch the app when the box stays checked. -->
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Открыть NeoChat" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
-    <SetProperty Id="WixShellExecTarget" Value="[INSTALLFOLDER]neochat.exe" After="CostFinalize" Sequence="ui" />
+    <SetProperty Id="WixShellExecTarget" Value="[INSTALLFOLDER]neochat.exe" After="CostFinalize" Sequence="both" />
     <CustomAction Id="LaunchApplication" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" />
+    <!-- The in-app updater runs `msiexec /i ... /passive LAUNCHAPP=1`: start the new build when done. -->
+    <CustomAction Id="RelaunchAfterUpdate" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RelaunchAfterUpdate" After="InstallFinalize" Condition="LAUNCHAPP = 1 AND NOT REMOVE" />
+    </InstallExecuteSequence>
 
     <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" />
     <WixVariable Id="WixUIDialogBmp" Value="dialog.bmp" />
