@@ -302,3 +302,21 @@ fn profile_name_nickname_and_number() {
     let c = other.call("list_contacts", json!({}))[0].clone();
     assert_eq!(c["display_name"], "Дима");
 }
+
+#[test]
+fn published_update_is_signed_and_downloads() {
+    if env().is_none() {
+        return;
+    }
+    // Uses the default server; skipped while nothing is published there.
+    let c = Client::new();
+    let p = json!({"platform": "android", "version": "0.0.1"});
+    let check = c.call("check_update", p.clone());
+    if check["available"] != json!(true) {
+        return;
+    }
+    let got = c.call("download_update", p);
+    assert_eq!(got["version"], check["version"]);
+    assert_eq!(std::fs::metadata(got["path"].as_str().unwrap()).unwrap().len(), check["size"].as_u64().unwrap());
+    assert_eq!(c.call("check_update", json!({"platform": "android", "version": check["version"]}))["available"], json!(false));
+}
