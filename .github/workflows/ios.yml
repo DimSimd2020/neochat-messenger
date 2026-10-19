@@ -5,6 +5,11 @@ on:
     paths: ["core/**", "apps/ios/**", ".github/workflows/ios.yml"]
   workflow_dispatch:
 
+# A newer push supersedes the running build instead of queueing behind it.
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ipa:
     runs-on: macos-15
@@ -69,7 +74,9 @@ jobs:
           retention-days: 30
 
   # Runs the app on an iOS Simulator and registers a fresh account on the production server.
+  # Manual only (Actions → iOS → Run workflow): it needs a second macOS runner.
   simulator:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 60
     steps:
