@@ -205,7 +205,7 @@ final class ChatsViewController: ListViewController {
     }
 
     private func applyFilter() {
-        let rows = all.filter { filter == 0 || ($0.str("kind") == (filter == 1 ? "direct" : "group")) }
+        let rows = all.filter { filter == 0 || (filter == 1 ? $0.str("kind") == "direct" : ["group", "channel"].contains($0.str("kind"))) }
         apply(rows, empty: all.isEmpty && query.isEmpty ? "Чатов пока нет. Начните переписку с человеком по его имени пользователя." : "Ничего не нашли")
     }
 

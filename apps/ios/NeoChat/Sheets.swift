@@ -35,6 +35,18 @@ class SheetViewController: UIViewController {
     func heading(_ t: String) { stack.addArrangedSubview(label(t, 17, .semibold)) }
     func clear() { stack.arrangedSubviews.forEach { $0.removeFromSuperview() } }
 
+    func switchRow(_ text: String, on: Bool, _ change: @escaping (Bool) -> Void) -> UIStackView {
+        let s = UISwitch()
+        s.isOn = on
+        s.onTintColor = Theme.action
+        s.accessibilityLabel = text
+        s.addAction(UIAction { _ in change(s.isOn) }, for: .valueChanged)
+        let row = UIStackView(arrangedSubviews: [label(text, 16), s])
+        row.alignment = .center
+        row.spacing = 12
+        return row
+    }
+
     func personRow(_ name: String, _ sub: String, seed: String, subColor: UIColor = Theme.muted, action: (() -> Void)? = nil) -> UIView {
         let av = AvatarView(size: 44)
         av.set(name, seed: seed)
@@ -121,10 +133,12 @@ final class RecentCallsViewController: SheetViewController {
 }
 
 final class NewChatViewController: SheetViewController {
-    private var group = false
+    private var group = false // group or channel: several people are picked
+    private var channel = false
     private var selected: [String] = []
-    private let mode = UISegmentedControl(items: ["Личный", "Группа"])
+    private let mode = UISegmentedControl(items: ["Личный", "Группа", "Канал"])
     private let titleField = Field("Название группы")
+    private let aboutField = Field("Описание (необязательно)")
     private let list = UIStackView()
     private let create = PillButton("Создать группу")
 
@@ -132,7 +146,7 @@ final class NewChatViewController: SheetViewController {
         super.viewDidLoad()
         title = "Новый чат"
         mode.selectedSegmentIndex = 0
-        mode.addAction(UIAction { [weak self] _ in self?.setGroup(self?.mode.selectedSegmentIndex == 1) }, for: .valueChanged)
+        mode.addAction(UIAction { [weak self] _ in self?.setMode(self?.mode.selectedSegmentIndex ?? 0) }, for: .valueChanged)
         stack.addArrangedSubview(mode)
         let addContact = LinkButton("Новый контакт")
         addContact.contentHorizontalAlignment = .leading
@@ -144,6 +158,8 @@ final class NewChatViewController: SheetViewController {
         stack.addArrangedSubview(addContact)
         titleField.isHidden = true
         stack.addArrangedSubview(titleField)
+        aboutField.isHidden = true
+        stack.addArrangedSubview(aboutField)
         list.axis = .vertical
         stack.addArrangedSubview(list)
         create.isHidden = true
@@ -152,12 +168,23 @@ final class NewChatViewController: SheetViewController {
         reload()
     }
 
-    private func setGroup(_ g: Bool) {
-        group = g
-        title = g ? "Новая группа" : "Новый чат"
-        titleField.isHidden = !g
-        create.isHidden = !g
+    /// 0 — direct chat, 1 — group, 2 — channel.
+    private func setMode(_ m: Int) {
+        group = m != 0
+        channel = m == 2
+        title = ["Новый чат", "Новая группа", "Новый канал"][m]
+        titleField.placeholder = channel ? "Название канала" : "Название группы"
+        titleField.accessibilityLabel = titleField.placeholder
+        titleField.isHidden = !group
+        aboutField.isHidden = !group
+        create.isHidden = !group
+        updateCreate()
         reload()
+    }
+
+    private func updateCreate() {
+        let base = channel ? "Создать канал" : "Создать группу"
+        create.setTitle(selected.isEmpty ? base : base + " (\(selected.count))", for: .normal)
     }
 
     private func reload() {
@@ -188,17 +215,24 @@ final class NewChatViewController: SheetViewController {
             }
             return
         }
-        if let i = selected.firstIndex(of: uid) { selected.remove(at: i) } else if selected.count >= 15 { toast("В группе может быть до 15 других участников"); return } else { selected.append(uid) }
-        create.setTitle(selected.isEmpty ? "Создать группу" : "Создать группу (\(selected.count))", for: .normal)
+        if let i = selected.firstIndex(of: uid) {
+            selected.remove(at: i)
+        } else if selected.count >= (channel ? 199 : 49) {
+            toast(channel ? "В канале может быть до 199 подписчиков" : "В группе может быть до 49 других участников")
+            return
+        } else { selected.append(uid) }
+        updateCreate()
         reload()
     }
 
     private func createGroup() {
         let t = (titleField.text ?? "").trimmingCharacters(in: .whitespaces)
-        if t.isEmpty { return toast("Введите название группы") }
-        if selected.isEmpty { return toast("Выберите участников") }
+        if t.isEmpty { return toast(channel ? "Введите название канала" : "Введите название группы") }
+        if selected.isEmpty && !channel { return toast("Выберите участников") }
         create.isEnabled = false
-        Core.shared.call("create_group", ["title": t, "member_ids": selected]) { [weak self] r in
+        let p: JSON = ["title": t, "description": (aboutField.text ?? "").trimmingCharacters(in: .whitespaces), "member_ids": selected,
+                       "kind": channel ? "channel" : "group"]
+        Core.shared.call("create_group", p) { [weak self] r in
             self?.create.isEnabled = true
             switch r {
             case .failure(let e): self?.toast(e.message)
@@ -390,61 +424,179 @@ final class ConversationInfoViewController: SheetViewController {
                 return
             }
             let owner = c.bool("is_owner")
+            let admin = c.bool("is_admin")
+            let channel = c.str("kind") == "channel"
             let gone = c.bool("left") || c.bool("archived")
-            self.stack.addArrangedSubview(self.personRow(c.str("title"), "Группа", seed: self.cid))
-            self.heading("Участники: \(c.int("member_count"))")
+            let ownerId = c.str("owner_id")
+            let admins = Set(c["admins"] as? [String] ?? [])
+            // Everyone except me, optionally without one person or with one more.
+            let others = { (without: String, with: String) -> [String] in
+                members.filter { !$0.bool("me") && $0.str("user_id") != without }.map { $0.str("user_id") } + (with.isEmpty ? [] : [with])
+            }
+            self.stack.addArrangedSubview(self.personRow(c.str("title"), channel ? "Канал" : "Группа", seed: self.cid))
+            if !c.str("description").isEmpty { self.stack.addArrangedSubview(label(c.str("description"), 15)) }
+            if c.bool("can_edit_info") && !gone {
+                let name = Field(channel ? "Название канала" : "Название группы")
+                name.text = c.str("title")
+                let about = Field("Описание")
+                about.text = c.str("description")
+                self.stack.addArrangedSubview(name)
+                self.stack.addArrangedSubview(about)
+                let save = PillButton("Сохранить название и описание", primary: false)
+                save.addAction(UIAction { _ in
+                    let t = (name.text ?? "").trimmingCharacters(in: .whitespaces)
+                    if t.isEmpty { return self.toast("Введите название") }
+                    self.call("group_set_info", ["conversation_id": self.cid, "title": t, "description": (about.text ?? "").trimmingCharacters(in: .whitespaces)], ok: "Сохранено")
+                }, for: .touchUpInside)
+                self.stack.addArrangedSubview(save)
+            }
+            self.heading((channel ? "Подписчики: " : "Участники: ") + "\(c.int("member_count"))")
             for m in members {
                 let uid = m.str("user_id")
+                let me = m.bool("me")
                 let warn = m.bool("key_changed")
-                let sub = warn ? "Ключ изменился — сверьте код в личном чате" : m.bool("me") ? "это вы" : "@" + m.str("username")
-                let canKick = owner && !gone && !m.bool("me")
-                self.stack.addArrangedSubview(self.personRow(m.str("display_name"), sub, seed: uid, subColor: warn ? Theme.warning : Theme.muted, action: canKick ? {
-                    let a = UIAlertController(title: "Исключить \(m.str("display_name"))?", message: "Новые сообщения ему не придут.", preferredStyle: .actionSheet)
-                    a.addAction(UIAlertAction(title: "Исключить", style: .destructive) { _ in
-                        let ids = members.filter { !$0.bool("me") && $0.str("user_id") != uid }.map { $0.str("user_id") }
-                        self.call("group_set_members", ["conversation_id": self.cid, "member_ids": ids], ok: "Участник исключён. Новые сообщения ему не придут")
-                    })
+                var sub = me ? "это вы" : "@" + m.str("username")
+                if uid == ownerId { sub += " · владелец" } else if admins.contains(uid) { sub += " · админ" }
+                if !m.str("tag").isEmpty { sub += " · " + m.str("tag") }
+                if warn { sub = "Ключ изменился — сверьте код в личном чате" }
+                let name = m.str("display_name")
+                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, subColor: warn ? Theme.warning : Theme.muted, action: admin && !gone ? {
+                    let a = UIAlertController(title: name, message: nil, preferredStyle: .actionSheet)
+                    a.addAction(UIAlertAction(title: "Тег…", style: .default) { _ in self.editTag(uid, name: name, current: m.str("tag")) })
+                    if owner && !me {
+                        if admins.contains(uid) {
+                            a.addAction(UIAlertAction(title: "Снять права админа", style: .default) { _ in
+                                self.call("group_set_members", ["conversation_id": self.cid, "member_ids": others("", ""), "admin_ids": admins.filter { $0 != uid }.sorted()], ok: "Права админа сняты")
+                            })
+                        } else {
+                            a.addAction(UIAlertAction(title: "Назначить админом", style: .default) { _ in
+                                self.call("group_set_members", ["conversation_id": self.cid, "member_ids": others("", ""), "admin_ids": admins.sorted() + [uid]], ok: "Назначен админ")
+                            })
+                        }
+                    }
+                    if !me && uid != ownerId && (owner || !admins.contains(uid)) {
+                        a.addAction(UIAlertAction(title: channel ? "Удалить из канала" : "Исключить из группы", style: .destructive) { _ in
+                            self.call("group_set_members", ["conversation_id": self.cid, "member_ids": others(uid, "")], ok: "Исключён. Новые сообщения ему не придут")
+                        })
+                    }
                     a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
                     self.present(a, animated: true)
                 } : nil))
             }
-            if owner && !gone {
-                let name = Field("Название группы")
-                name.text = c.str("title")
-                self.stack.addArrangedSubview(name)
-                let rename = PillButton("Переименовать", primary: false)
-                rename.addAction(UIAction { _ in
-                    let t = (name.text ?? "").trimmingCharacters(in: .whitespaces)
-                    if t.isEmpty { return self.toast("Введите название группы") }
-                    self.call("group_rename", ["conversation_id": self.cid, "title": t], ok: "Название изменено")
-                }, for: .touchUpInside)
-                self.stack.addArrangedSubview(rename)
-                let add = PillButton("Добавить участников", primary: false)
+            if admin && !gone {
+                let add = PillButton(channel ? "Добавить подписчиков" : "Добавить участников", primary: false)
                 add.showsMenuAsPrimaryAction = true
                 Core.shared.call("list_contacts") { lr in
                     guard case .success(let lv) = lr else { return }
                     let inGroup = Set(members.map { $0.str("user_id") })
                     let cands = (lv as? [JSON] ?? []).filter { !inGroup.contains($0.str("user_id")) }
-                    add.menu = UIMenu(children: cands.isEmpty ? [UIAction(title: "Все контакты уже в группе", attributes: .disabled) { _ in }] : cands.map { cand in
+                    add.menu = UIMenu(children: cands.isEmpty ? [UIAction(title: "Все контакты уже здесь", attributes: .disabled) { _ in }] : cands.map { cand in
                         UIAction(title: cand.str("display_name")) { _ in
-                            let ids = members.filter { !$0.bool("me") }.map { $0.str("user_id") } + [cand.str("user_id")]
-                            self.call("group_set_members", ["conversation_id": self.cid, "member_ids": ids], ok: "Участник добавлен. Прошлые сообщения ему не видны")
+                            self.call("group_set_members", ["conversation_id": self.cid, "member_ids": others("", cand.str("user_id"))], ok: "Добавлен. Прошлые сообщения ему не видны")
                         }
                     })
                 }
                 self.stack.addArrangedSubview(add)
             }
+            if admin && !gone && !channel {
+                self.heading("Права участников")
+                let st = c.obj("settings") ?? [:]
+                for (key, text) in [("members_can_send", "Писать сообщения"), ("members_can_media", "Отправлять фото и файлы"),
+                                    ("members_can_polls", "Создавать опросы"), ("members_can_info", "Менять название и описание")] {
+                    self.stack.addArrangedSubview(self.switchRow(text, on: st.bool(key)) { on in
+                        Core.shared.call("group_set_settings", ["conversation_id": self.cid, key: on]) { r in
+                            if case .failure(let e) = r { self.toast(e.message); self.reload() }
+                        }
+                    })
+                }
+                self.muted("Владелец и админы могут всё. Сервер не пропускает сообщения тех, кому писать нельзя.")
+            } else if channel {
+                self.muted("В канале пишут только владелец и админы. Подписчики читают и голосуют в опросах.")
+            }
             self.muted("Файлы хранятся на сервере в зашифрованном виде 30 дней.")
             if !gone {
-                let leave = PillButton("Выйти из группы", primary: false)
+                let leave = PillButton(channel ? "Выйти из канала" : "Выйти из группы", primary: false)
                 leave.setTitleColor(Theme.warning, for: .normal)
                 leave.addAction(UIAction { _ in
-                    let a = UIAlertController(title: owner ? "Выйти: группа станет архивной для всех" : "Выйти: новые сообщения перестанут приходить", message: nil, preferredStyle: .actionSheet)
+                    let what = owner ? (channel ? "Выйти: канал станет архивным для всех" : "Выйти: группа станет архивной для всех") : "Выйти: новые сообщения перестанут приходить"
+                    let a = UIAlertController(title: what, message: nil, preferredStyle: .actionSheet)
                     a.addAction(UIAlertAction(title: "Выйти", style: .destructive) { _ in self.call("group_leave", ["conversation_id": self.cid], close: true) })
                     a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
                     self.present(a, animated: true)
                 }, for: .touchUpInside)
                 self.stack.addArrangedSubview(leave)
+            }
+        }
+    }
+
+    private func editTag(_ uid: String, name: String, current: String) {
+        let a = UIAlertController(title: "Тег: " + name, message: "Тег виден всем рядом с именем. Пустое поле убирает тег.", preferredStyle: .alert)
+        a.addTextField { $0.text = current; $0.placeholder = "Например, «дизайн»" }
+        a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        a.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self] _ in
+            guard let self else { return }
+            let t = (a.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespaces)
+            self.call("group_set_tag", ["conversation_id": self.cid, "user_id": uid, "tag": t])
+        })
+        present(a, animated: true)
+    }
+}
+
+final class NewPollViewController: SheetViewController {
+    private let cid: String
+    private let question = Field("Вопрос")
+    private let options = UIStackView()
+    private let more = PillButton("Добавить вариант", primary: false)
+    private var anonymous = true
+    private var multiple = false
+
+    init(conversationId: String) {
+        cid = conversationId
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Новый опрос"
+        question.autocapitalizationType = .sentences
+        stack.addArrangedSubview(question)
+        heading("Варианты ответа")
+        options.axis = .vertical
+        options.spacing = 8
+        stack.addArrangedSubview(options)
+        addOption()
+        addOption()
+        more.addAction(UIAction { [weak self] _ in self?.addOption(focus: true) }, for: .touchUpInside)
+        stack.addArrangedSubview(more)
+        stack.addArrangedSubview(switchRow("Анонимное голосование", on: true) { [weak self] on in self?.anonymous = on })
+        stack.addArrangedSubview(switchRow("Несколько ответов", on: false) { [weak self] on in self?.multiple = on })
+        let sendButton = PillButton("Отправить опрос")
+        sendButton.addAction(UIAction { [weak self] _ in self?.send(sendButton) }, for: .touchUpInside)
+        stack.addArrangedSubview(sendButton)
+    }
+
+    private func addOption(focus: Bool = false) {
+        guard options.arrangedSubviews.count < 10 else { return }
+        let f = Field("Вариант \(options.arrangedSubviews.count + 1)")
+        f.autocapitalizationType = .sentences
+        options.addArrangedSubview(f)
+        more.isHidden = options.arrangedSubviews.count >= 10
+        if focus { f.becomeFirstResponder() }
+    }
+
+    private func send(_ button: UIButton) {
+        let q = (question.text ?? "").trimmingCharacters(in: .whitespaces)
+        let opts = options.arrangedSubviews.compactMap { ($0 as? UITextField)?.text?.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if q.isEmpty { return toast("Введите вопрос") }
+        if opts.count < 2 { return toast("Нужно хотя бы два варианта") }
+        button.isEnabled = false
+        Core.shared.call("send_poll", ["conversation_id": cid, "question": q, "options": opts, "anonymous": anonymous, "multiple": multiple]) { [weak self] r in
+            button.isEnabled = true
+            switch r {
+            case .failure(let e): self?.toast(e.message)
+            case .success: self?.dismiss(animated: !Theme.reducedMotion)
             }
         }
     }

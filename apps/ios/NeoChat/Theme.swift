@@ -15,7 +15,7 @@ enum Theme {
     static let text = dyn(0xF2F7FF, 0x182C46)
     static let muted = dyn(0xBBCBE3, 0x4A607C)
     static let accent = dyn(0x98B9FF, 0x2456B8)
-    static let action = rgb(0x367FF4)
+    static let action = dyn(0x4169CF, 0x315DCF)
     static let glass = dyn(0x17263E, 0xF8FCFF, 0.68, 0.66)
     static let glassStrong = dyn(0x1A2A44, 0xFAFDFF, 0.92, 0.94)
     static let rim = dyn(0xDEEEFF, 0xFFFFFF, 0.22, 0.87)
