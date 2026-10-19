@@ -174,7 +174,7 @@ impl Inner {
             return Err(Error::Invalid("В группе от 2 до 16 участников".into()));
         }
         let gid = Uuid::new_v4().to_string();
-        let st = GroupState { group_id: gid.clone(), revision: 1, prev_hash: [0; 32], owner_id: me, members: members.iter().cloned().collect() };
+        let st = GroupState { group_id: gid.clone(), revision: 1, prev_hash: [0; 32], owner_id: me.clone(), members: members.iter().cloned().collect(), signer_id: me.clone(), channel: false, admins: Vec::new() };
         let blob = st.encode()?;
         let sig = keys::sign_blob(&account, &blob)?;
         let c = self.authed(
@@ -204,7 +204,7 @@ impl Inner {
         if members.len() < 2 || members.len() > MAX_GROUP {
             return Err(Error::Invalid("В группе от 2 до 16 участников".into()));
         }
-        let st = GroupState { group_id: gid.to_string(), revision: prev + 1, prev_hash: keys::sha256(&prev_blob), owner_id: me, members: members.iter().cloned().collect() };
+        let st = GroupState { group_id: gid.to_string(), revision: prev + 1, prev_hash: keys::sha256(&prev_blob), owner_id: me.clone(), members: members.iter().cloned().collect(), signer_id: me.clone(), channel: false, admins: Vec::new() };
         let blob = st.encode()?;
         let sig = keys::sign_blob(&account, &blob)?;
         let c = self.authed(

@@ -295,6 +295,8 @@ class SearchBox(ctx: Context, hint: String) : LinearLayout(ctx), Themed {
         edit.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
         addView(edit, LayoutParams(0, MATCH, 1f))
         layoutParams = LayoutParams(MATCH, dp(48))
+        // Containers that pass WRAP height must not shrink it to a single text line.
+        minimumHeight = dp(48)
         applyTheme()
     }
 

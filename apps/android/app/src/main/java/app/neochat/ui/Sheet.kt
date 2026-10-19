@@ -26,7 +26,11 @@ open class Sheet(protected val host: Host, title: String) {
     interface Host {
         val overlay: FrameLayout
         val bottomInset: Int
+        val topInset: Int
         fun pushBack(handler: () -> Boolean)
+        /** Called whenever the system bars or the keyboard change size. */
+        fun addInsetListener(l: () -> Unit)
+        fun removeInsetListener(l: () -> Unit)
         fun popBack(handler: () -> Boolean)
     }
 
@@ -39,6 +43,8 @@ open class Sheet(protected val host: Host, title: String) {
     private var closing = false
     private var anim: AnimatorSet? = null
     private val back: () -> Boolean = { dismiss(); true }
+    // The panel stays above the keyboard: a focused field is never covered.
+    private val insets: () -> Unit = { fit() }
     var onDismiss: (() -> Unit)? = null
 
     init {
@@ -79,13 +85,11 @@ open class Sheet(protected val host: Host, title: String) {
     fun show(): Sheet {
         val ov = host.overlay
         ov.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
-        val maxH = (ov.height * 0.88f).toInt().takeIf { it > 0 } ?: ViewGroup.LayoutParams.WRAP_CONTENT
         ov.addView(panel, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply {
             setMargins(ctx.dp(8), 0, ctx.dp(8), ctx.dp(8) + host.bottomInset)
         })
-        panel.post {
-            if (maxH > 0 && panel.height > maxH) panel.layoutParams = panel.layoutParams.apply { height = maxH }
-        }
+        panel.post { fit() }
+        host.addInsetListener(insets)
         host.pushBack(back)
         scrim.alpha = 0f
         panel.alpha = 0f
@@ -95,9 +99,24 @@ open class Sheet(protected val host: Host, title: String) {
         return this
     }
 
+    private fun fit() {
+        val ov = host.overlay
+        val lp = panel.layoutParams as? FrameLayout.LayoutParams ?: return
+        lp.bottomMargin = ctx.dp(8) + host.bottomInset
+        val room = ov.height - host.bottomInset - maxOf(host.topInset, ctx.dp(24)) - ctx.dp(16)
+        val maxH = minOf((ov.height * 0.88f).toInt(), room)
+        // Measure the natural height again; the scroll view takes what does not fit.
+        lp.height = WRAP
+        panel.measure(View.MeasureSpec.makeMeasureSpec(ov.width - ctx.dp(16), View.MeasureSpec.EXACTLY), View.MeasureSpec.UNSPECIFIED)
+        if (maxH > 0 && panel.measuredHeight > maxH) lp.height = maxH
+        panel.layoutParams = lp
+        panel.findFocus()?.let { f -> panel.post { f.requestRectangleOnScreen(android.graphics.Rect(0, 0, f.width, f.height)) } }
+    }
+
     fun dismiss() {
         if (closing) return
         closing = true
+        host.removeInsetListener(insets)
         host.popBack(back)
         (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(panel.windowToken, 0)
         // The overlay stops taking input at once; only the fade is animated.

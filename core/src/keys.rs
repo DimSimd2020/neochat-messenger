@@ -24,6 +24,8 @@ pub const PREKEY_BATCH: u32 = 100;
 
 const ROSTER_DOMAIN: &[u8] = b"NeoChat-roster-v1\0";
 const GROUP_DOMAIN: &[u8] = b"NeoChat-group-v1\0";
+/// v2 adds the signer, the kind (group or channel) and the admin list.
+const GROUP_DOMAIN_V2: &[u8] = b"NeoChat-group-v2\0";
 const LEAVE_DOMAIN: &[u8] = b"NeoChat-leave-v1\0";
 
 pub fn b64(b: &[u8]) -> String {
@@ -338,21 +340,37 @@ pub struct GroupState {
     pub prev_hash: [u8; 32],
     pub owner_id: String,
     pub members: Vec<String>,
+    /// Who signed this state: the owner or an admin of the previous state.
+    pub signer_id: String,
+    pub channel: bool,
+    pub admins: Vec<String>,
+}
+
+fn sorted(v: &[String]) -> Vec<String> {
+    let mut v = v.to_vec();
+    v.sort();
+    v.dedup();
+    v
 }
 
 impl GroupState {
     pub fn encode(&self) -> Result<Vec<u8>> {
-        let mut members = self.members.clone();
-        members.sort();
-        members.dedup();
-        let mut out = GROUP_DOMAIN.to_vec();
+        let members = sorted(&self.members);
+        let admins = sorted(&self.admins);
+        let mut out = GROUP_DOMAIN_V2.to_vec();
         out.extend_from_slice(&uuid_bytes(&self.group_id)?);
         out.extend_from_slice(&self.revision.to_be_bytes());
         out.extend_from_slice(&self.prev_hash);
         out.extend_from_slice(&uuid_bytes(&self.owner_id)?);
+        out.extend_from_slice(&uuid_bytes(&self.signer_id)?);
+        out.push(self.channel as u8);
         out.extend_from_slice(&(members.len() as u16).to_be_bytes());
         for m in &members {
             out.extend_from_slice(&uuid_bytes(m)?);
+        }
+        out.extend_from_slice(&(admins.len() as u16).to_be_bytes());
+        for a in &admins {
+            out.extend_from_slice(&uuid_bytes(a)?);
         }
         Ok(out)
     }
@@ -360,22 +378,35 @@ impl GroupState {
     pub fn decode(b: &[u8]) -> Result<GroupState> {
         let bad = || Error::Crypto("Некорректное состояние группы".into());
         let mut r = Reader { b, i: 0 };
-        if r.take(GROUP_DOMAIN.len()).ok_or_else(bad)? != GROUP_DOMAIN {
-            return Err(bad());
-        }
+        let v2 = match r.take(GROUP_DOMAIN.len()).ok_or_else(bad)? {
+            d if d == GROUP_DOMAIN => false,
+            d if d == GROUP_DOMAIN_V2 => true,
+            _ => return Err(bad()),
+        };
         let group_id = uuid_str(r.take(16).ok_or_else(bad)?);
         let revision = r.u64().ok_or_else(bad)?;
         let prev_hash: [u8; 32] = r.take(32).ok_or_else(bad)?.try_into().unwrap();
         let owner_id = uuid_str(r.take(16).ok_or_else(bad)?);
-        let n = r.u16().ok_or_else(bad)? as usize;
-        let mut members = Vec::with_capacity(n);
-        for _ in 0..n {
-            members.push(uuid_str(r.take(16).ok_or_else(bad)?));
-        }
+        let (signer_id, channel) = if v2 {
+            let signer = uuid_str(r.take(16).ok_or_else(bad)?);
+            let kind = r.take(1).ok_or_else(bad)?[0];
+            if kind > 1 {
+                return Err(bad());
+            }
+            (signer, kind == 1)
+        } else {
+            (owner_id.clone(), false)
+        };
+        let mut list = |r: &mut Reader| -> Result<Vec<String>> {
+            let n = r.u16().ok_or_else(bad)? as usize;
+            (0..n).map(|_| Ok(uuid_str(r.take(16).ok_or_else(bad)?))).collect()
+        };
+        let members = list(&mut r)?;
+        let admins = if v2 { list(&mut r)? } else { Vec::new() };
         if r.i != b.len() {
             return Err(bad());
         }
-        Ok(GroupState { group_id, revision, prev_hash, owner_id, members })
+        Ok(GroupState { group_id, revision, prev_hash, owner_id, members, signer_id, channel, admins })
     }
 }
 
@@ -502,11 +533,23 @@ mod tests {
         let o = Uuid::new_v4().to_string();
         let a = Uuid::new_v4().to_string();
         let b = Uuid::new_v4().to_string();
-        let s1 = GroupState { group_id: g.clone(), revision: 3, prev_hash: [1; 32], owner_id: o.clone(), members: vec![a.clone(), b.clone()] };
-        let s2 = GroupState { members: vec![b, a], ..s1.clone() };
+        let s1 = GroupState {
+            group_id: g.clone(),
+            revision: 3,
+            prev_hash: [1; 32],
+            owner_id: o.clone(),
+            members: vec![a.clone(), b.clone()],
+            signer_id: a.clone(),
+            channel: true,
+            admins: vec![a.clone()],
+        };
+        let s2 = GroupState { members: vec![b, a.clone()], ..s1.clone() };
         assert_eq!(s1.encode().unwrap(), s2.encode().unwrap());
         let back = GroupState::decode(&s1.encode().unwrap()).unwrap();
         assert_eq!(back.revision, 3);
         assert_eq!(back.owner_id, o);
+        assert_eq!(back.signer_id, a);
+        assert!(back.channel);
+        assert_eq!(back.admins, vec![a]);
     }
 }

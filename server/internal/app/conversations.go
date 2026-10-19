@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -13,7 +14,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const maxGroupMembers = 16
+const (
+	maxGroupMembers   = 50
+	maxChannelMembers = 200
+)
+
+// groupSettings are not secret: the server enforces who may post.
+type groupSettings struct {
+	// MembersCanSend=false leaves posting to the owner and admins.
+	MembersCanSend  *bool `json:"members_can_send,omitempty"`
+	MembersCanMedia *bool `json:"members_can_media,omitempty"`
+	MembersCanPolls *bool `json:"members_can_polls,omitempty"`
+	MembersCanInfo  *bool `json:"members_can_info,omitempty"`
+}
 
 type querier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -24,6 +37,7 @@ type memberOut struct {
 	UserID      string `json:"user_id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
+	Role        string `json:"role"`
 }
 
 type recipientOut struct {
@@ -54,6 +68,7 @@ type conversationOut struct {
 	Members              []memberOut      `json:"members"`
 	Recipients           []recipientOut   `json:"recipients"`
 	RecipientSetRevision string           `json:"recipient_set_revision"`
+	Settings             json.RawMessage  `json:"settings"`
 }
 
 // recipientSet returns active devices of all members except the sending device,
@@ -93,9 +108,9 @@ func (s *Server) loadConversation(ctx context.Context, q querier, id, viewer, vi
 	var owner *string
 	var rev int64
 	var blob, sig, leaves []byte
-	err := q.QueryRow(ctx, `SELECT c.id, c.kind, c.owner_id, c.revision, c.state_blob, c.state_sig, c.leaves, c.archived
+	err := q.QueryRow(ctx, `SELECT c.id, c.kind, c.owner_id, c.revision, c.state_blob, c.state_sig, c.leaves, c.archived, c.settings
 		FROM conversations c JOIN memberships m ON m.conversation_id=c.id AND m.user_id=$2 WHERE c.id=$1`, nullUUID(id), viewer).
-		Scan(&c.ID, &c.Kind, &owner, &rev, &blob, &sig, &leaves, &c.Archived)
+		Scan(&c.ID, &c.Kind, &owner, &rev, &blob, &sig, &leaves, &c.Archived, &c.Settings)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -112,13 +127,13 @@ func (s *Server) loadConversation(ctx context.Context, q querier, id, viewer, vi
 	if err := json.Unmarshal(leaves, &c.Leaves); err != nil {
 		return nil, err
 	}
-	rows, err := q.Query(ctx, `SELECT u.id, COALESCE(NULLIF(u.nickname, ''), u.username), u.display_name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=$1 ORDER BY u.username`, c.ID)
+	rows, err := q.Query(ctx, `SELECT u.id, COALESCE(NULLIF(u.nickname, ''), u.username), u.display_name, m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=$1 ORDER BY u.username`, c.ID)
 	if err != nil {
 		return nil, err
 	}
 	c.Members, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (memberOut, error) {
 		var m memberOut
-		return m, row.Scan(&m.UserID, &m.Username, &m.DisplayName)
+		return m, row.Scan(&m.UserID, &m.Username, &m.DisplayName, &m.Role)
 	})
 	if err != nil {
 		return nil, err
@@ -227,7 +242,16 @@ type pgconnRetry struct{}
 
 func (*pgconnRetry) Error() string { return "retry" }
 
-func (s *Server) checkMembers(r *http.Request, owner string, members []string) ([]string, error) {
+func maxMembers(kind string) int {
+	if kind == "channel" {
+		return maxChannelMembers
+	}
+	return maxGroupMembers
+}
+
+// checkMembers validates a new member list. `actor` adds people, so new members must be
+// related to the actor; people already in the group stay without that check.
+func (s *Server) checkMembers(r *http.Request, actor, owner, kind string, members []string, existing map[string]bool) ([]string, error) {
 	set := map[string]bool{owner: true}
 	for _, m := range members {
 		if !isUUID(m) {
@@ -235,16 +259,16 @@ func (s *Server) checkMembers(r *http.Request, owner string, members []string) (
 		}
 		set[m] = true
 	}
-	if len(set) < 2 {
+	if len(set) < 2 && kind != "channel" {
 		return nil, errf(400, "too_few_members", "В группе должно быть минимум два участника")
 	}
-	if len(set) > maxGroupMembers {
-		return nil, errf(400, "too_many_members", "В группе может быть не больше 16 участников")
+	if len(set) > maxMembers(kind) {
+		return nil, errf(400, "too_many_members", fmt.Sprintf("Участников может быть не больше %d", maxMembers(kind)))
 	}
 	out := make([]string, 0, len(set))
 	for m := range set {
-		if m != owner {
-			ok, err := s.related(r, owner, m)
+		if m != actor && !existing[m] {
+			ok, err := s.related(r, actor, m)
 			if err != nil {
 				return nil, err
 			}
@@ -268,7 +292,7 @@ func memberDevices(ctx context.Context, tx pgx.Tx, users []string) ([]string, er
 
 func validState(st *signedState) (int64, error) {
 	rev, err := strconv.ParseInt(st.Revision, 10, 64)
-	if err != nil || rev < 1 || len(st.Blob) == 0 || len(st.Blob) > 4096 || len(st.Signature) != signatureLen {
+	if err != nil || rev < 1 || len(st.Blob) == 0 || len(st.Blob) > 16384 || len(st.Signature) != signatureLen {
 		return 0, errf(400, "bad_request", "Некорректное состояние группы")
 	}
 	return rev, nil
@@ -277,35 +301,44 @@ func validState(st *signedState) (int64, error) {
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, a *authCtx) {
 	var req struct {
 		GroupID string      `json:"group_id"`
+		Kind    string      `json:"kind"`
 		Members []string    `json:"members"`
+		Admins  []string    `json:"admins"`
 		State   signedState `json:"state"`
 	}
-	if err := readJSON(w, r, 32<<10, &req); err != nil {
+	if err := readJSON(w, r, 128<<10, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	if req.Kind == "" {
+		req.Kind = "group"
+	}
 	rev, err := validState(&req.State)
-	if err != nil || rev != 1 || !isUUID(req.GroupID) {
+	if err != nil || rev != 1 || !isUUID(req.GroupID) || (req.Kind != "group" && req.Kind != "channel") {
 		s.fail(w, r, errBadRequest)
 		return
 	}
-	members, err := s.checkMembers(r, a.UserID, req.Members)
+	members, err := s.checkMembers(r, a.UserID, a.UserID, req.Kind, req.Members, nil)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	roles := rolesFor(a.UserID, members, req.Admins)
 	var notify []string
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(r.Context(), `INSERT INTO conversations(id, kind, owner_id, revision, state_blob, state_sig) VALUES ($1,'group',$2,1,$3,$4)`,
-			req.GroupID, a.UserID, req.State.Blob, req.State.Signature)
+		_, err := tx.Exec(r.Context(), `INSERT INTO conversations(id, kind, owner_id, revision, state_blob, state_sig) VALUES ($1,$5,$2,1,$3,$4)`,
+			req.GroupID, a.UserID, req.State.Blob, req.State.Signature, req.Kind)
 		if isUniqueViolation(err) {
 			return errf(409, "conversation_exists", "Группа уже существует")
 		}
 		if err != nil {
 			return err
 		}
+		if _, err := tx.Exec(r.Context(), `INSERT INTO group_states(conversation_id, revision, blob, sig) VALUES ($1,1,$2,$3)`, req.GroupID, req.State.Blob, req.State.Signature); err != nil {
+			return err
+		}
 		for _, m := range members {
-			if _, err := tx.Exec(r.Context(), `INSERT INTO memberships(conversation_id, user_id, joined_revision) VALUES ($1,$2,1)`, req.GroupID, m); err != nil {
+			if _, err := tx.Exec(r.Context(), `INSERT INTO memberships(conversation_id, user_id, joined_revision, role) VALUES ($1,$2,1,$3)`, req.GroupID, m, roles[m]); err != nil {
 				return err
 			}
 		}
@@ -329,33 +362,61 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, a *au
 	writeJSON(w, 201, c)
 }
 
+// rolesFor gives the owner, admins (who must be members) and everyone else their role.
+func rolesFor(owner string, members, admins []string) map[string]string {
+	roles := map[string]string{}
+	for _, m := range members {
+		roles[m] = "member"
+	}
+	for _, a := range admins {
+		if _, ok := roles[a]; ok {
+			roles[a] = "admin"
+		}
+	}
+	roles[owner] = "owner"
+	return roles
+}
+
+type lockedGroup struct {
+	owner, kind, role string
+	rev               int64
+	archived          bool
+	settings          groupSettings
+}
+
 // lockGroup locks the conversation row; membership changes and sends serialize on it.
-func lockGroup(ctx context.Context, tx pgx.Tx, id, user string) (owner string, rev int64, archived bool, err error) {
+func lockGroup(ctx context.Context, tx pgx.Tx, id, user string) (*lockedGroup, error) {
 	var ownerP *string
-	var kind string
-	err = tx.QueryRow(ctx, `SELECT c.kind, c.owner_id, c.revision, c.archived FROM conversations c
+	var raw []byte
+	g := &lockedGroup{}
+	err := tx.QueryRow(ctx, `SELECT c.kind, c.owner_id, c.revision, c.archived, c.settings, m.role FROM conversations c
 		JOIN memberships m ON m.conversation_id=c.id AND m.user_id=$2 WHERE c.id=$1 FOR UPDATE OF c`, nullUUID(id), user).
-		Scan(&kind, &ownerP, &rev, &archived)
+		Scan(&g.kind, &ownerP, &g.rev, &g.archived, &raw, &g.role)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", 0, false, errNotFound
+		return nil, errNotFound
 	}
 	if err != nil {
-		return "", 0, false, err
+		return nil, err
 	}
-	if kind != "group" {
-		return "", 0, false, errf(400, "not_group", "Это не группа")
+	if g.kind != "group" && g.kind != "channel" {
+		return nil, errf(400, "not_group", "Это не группа")
 	}
-	return *ownerP, rev, archived, nil
+	g.owner = *ownerP
+	_ = json.Unmarshal(raw, &g.settings)
+	return g, nil
 }
+
+func (g *lockedGroup) isAdmin() bool { return g.role == "owner" || g.role == "admin" }
 
 func (s *Server) handleMembership(w http.ResponseWriter, r *http.Request, a *authCtx) {
 	id := r.PathValue("id")
 	var req struct {
 		PrevRevision string      `json:"prev_revision"`
 		Members      []string    `json:"members"`
+		Admins       []string    `json:"admins"`
 		State        signedState `json:"state"`
 	}
-	if err := readJSON(w, r, 32<<10, &req); err != nil {
+	if err := readJSON(w, r, 128<<10, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -369,44 +430,79 @@ func (s *Server) handleMembership(w http.ResponseWriter, r *http.Request, a *aut
 		s.fail(w, r, errBadRequest)
 		return
 	}
-	members, err := s.checkMembers(r, a.UserID, req.Members)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
 	var notify []string
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-		owner, cur, archived, err := lockGroup(r.Context(), tx, id, a.UserID)
+		g, err := lockGroup(r.Context(), tx, id, a.UserID)
 		if err != nil {
 			return err
 		}
-		if owner != a.UserID {
-			return errf(403, "owner_required", "Состав группы меняет только владелец")
+		if !g.isAdmin() {
+			return errf(403, "admin_required", "Состав меняют владелец и админы")
 		}
-		if archived {
+		if g.archived {
 			return errf(409, "conversation_archived", "Группа архивирована")
 		}
-		if cur != prev {
+		if g.rev != prev {
 			return errf(409, "conversation_revision_changed", "Состав группы уже изменился")
 		}
-		rows, err := tx.Query(r.Context(), `SELECT user_id FROM memberships WHERE conversation_id=$1`, id)
+		rows, err := tx.Query(r.Context(), `SELECT user_id, role FROM memberships WHERE conversation_id=$1`, id)
 		if err != nil {
 			return err
 		}
-		old, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		type mr struct{ user, role string }
+		cur, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (mr, error) {
+			var x mr
+			return x, row.Scan(&x.user, &x.role)
+		})
 		if err != nil {
 			return err
+		}
+		old := make([]string, 0, len(cur))
+		existing := map[string]bool{}
+		oldAdmins := map[string]bool{}
+		for _, x := range cur {
+			old = append(old, x.user)
+			existing[x.user] = true
+			if x.role == "admin" {
+				oldAdmins[x.user] = true
+			}
+		}
+		members, err := s.checkMembers(r, a.UserID, g.owner, g.kind, req.Members, existing)
+		if err != nil {
+			return err
+		}
+		roles := rolesFor(g.owner, members, req.Admins)
+		if g.role != "owner" {
+			// Admins manage ordinary members only; the admin list belongs to the owner.
+			newAdmins := map[string]bool{}
+			for u, role := range roles {
+				if role == "admin" {
+					newAdmins[u] = true
+				}
+			}
+			if len(newAdmins) != len(oldAdmins) {
+				return errf(403, "owner_required", "Админов назначает и снимает только владелец")
+			}
+			for u := range oldAdmins {
+				if !newAdmins[u] {
+					return errf(403, "owner_required", "Админов назначает и снимает только владелец")
+				}
+			}
 		}
 		if _, err := tx.Exec(r.Context(), `DELETE FROM memberships WHERE conversation_id=$1 AND NOT (user_id = ANY($2::uuid[]))`, id, members); err != nil {
 			return err
 		}
 		for _, m := range members {
-			if _, err := tx.Exec(r.Context(), `INSERT INTO memberships(conversation_id, user_id, joined_revision) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, id, m, rev); err != nil {
+			if _, err := tx.Exec(r.Context(), `INSERT INTO memberships(conversation_id, user_id, joined_revision, role) VALUES ($1,$2,$3,$4)
+				ON CONFLICT (conversation_id, user_id) DO UPDATE SET role=excluded.role`, id, m, rev, roles[m]); err != nil {
 				return err
 			}
 		}
 		if _, err := tx.Exec(r.Context(), `UPDATE conversations SET revision=$2, state_blob=$3, state_sig=$4, leaves='[]' WHERE id=$1`,
 			id, rev, req.State.Blob, req.State.Signature); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.Context(), `INSERT INTO group_states(conversation_id, revision, blob, sig) VALUES ($1,$2,$3,$4)`, id, rev, req.State.Blob, req.State.Signature); err != nil {
 			return err
 		}
 		devs, err := memberDevices(r.Context(), tx, append(old, members...))
@@ -448,10 +544,11 @@ func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request, a *authCtx)
 	}
 	var notify []string
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-		owner, cur, archived, err := lockGroup(r.Context(), tx, id, a.UserID)
+		g, err := lockGroup(r.Context(), tx, id, a.UserID)
 		if err != nil {
 			return err
 		}
+		owner, cur, archived := g.owner, g.rev, g.archived
 		if cur != prev {
 			return errf(409, "conversation_revision_changed", "Состав группы уже изменился")
 		}
@@ -493,4 +590,85 @@ func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request, a *authCtx)
 	}
 	s.hub.notify(notify)
 	w.WriteHeader(204)
+}
+
+// handleStates returns every signed state of a group so a client can check admin-signed
+// changes against the state it trusted before.
+func (s *Server) handleStates(w http.ResponseWriter, r *http.Request, a *authCtx) {
+	id := r.PathValue("id")
+	var member bool
+	if err := s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM memberships WHERE conversation_id=$1 AND user_id=$2)`, nullUUID(id), a.UserID).Scan(&member); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if !member {
+		s.fail(w, r, errNotFound)
+		return
+	}
+	rows, err := s.db.Query(r.Context(), `SELECT revision, blob, sig FROM group_states WHERE conversation_id=$1 ORDER BY revision`, id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	states, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (signedState, error) {
+		var st signedState
+		var rev int64
+		err := row.Scan(&rev, &st.Blob, &st.Signature)
+		st.Revision = strconv.FormatInt(rev, 10)
+		return st, err
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"states": states})
+}
+
+// handleSettings changes the posting rules of a group; only the owner and admins may.
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request, a *authCtx) {
+	id := r.PathValue("id")
+	var req groupSettings
+	if err := readJSON(w, r, 4<<10, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	raw, _ := json.Marshal(req)
+	var notify []string
+	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
+		g, err := lockGroup(r.Context(), tx, id, a.UserID)
+		if err != nil {
+			return err
+		}
+		if !g.isAdmin() {
+			return errf(403, "admin_required", "Настройки меняют владелец и админы")
+		}
+		if _, err := tx.Exec(r.Context(), `UPDATE conversations SET settings=$2 WHERE id=$1`, id, raw); err != nil {
+			return err
+		}
+		rows, err := tx.Query(r.Context(), `SELECT user_id FROM memberships WHERE conversation_id=$1`, id)
+		if err != nil {
+			return err
+		}
+		users, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		devs, err := memberDevices(r.Context(), tx, users)
+		if err != nil {
+			return err
+		}
+		notify, err = emitToDevices(r.Context(), tx, devs, "membership", map[string]string{"conversation_id": id, "revision": strconv.FormatInt(g.rev, 10)})
+		return err
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.hub.notify(notify)
+	c, err := s.loadConversation(r.Context(), s.db, id, a.UserID, a.DeviceID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, 200, c)
 }

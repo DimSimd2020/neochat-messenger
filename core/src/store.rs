@@ -122,9 +122,23 @@ impl Db {
         for sql in [
             "ALTER TABLE contacts ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE contacts ADD COLUMN number TEXT NOT NULL DEFAULT ''",
+            // Groups and channels: verified state, roles, settings, info and member tags.
+            "ALTER TABLE conversations ADD COLUMN admins TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE conversations ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE conversations ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE conversations ADD COLUMN tags TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE conversations ADD COLUMN state_rev INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE conversations ADD COLUMN state_blob BLOB",
+            "ALTER TABLE messages ADD COLUMN poll TEXT",
         ] {
             let _ = conn.execute(sql, []);
         }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS poll_votes (
+                poll_id TEXT NOT NULL, user_id TEXT NOT NULL, choices TEXT NOT NULL, at INTEGER NOT NULL,
+                PRIMARY KEY (poll_id, user_id)
+            );",
+        )?;
         Ok(Db { conn })
     }
 }

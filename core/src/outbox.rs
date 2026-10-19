@@ -36,7 +36,17 @@ pub struct FileMeta {
     pub ciphertext_size: u64,
     pub name: String,
     pub mime: String,
+    /// Photos: a small JPEG (base64) and the full size, shown before the download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<u32>,
 }
+
+/// Thumbnails travel inside the E2EE payload, so they must stay small.
+const MAX_THUMB_B64: usize = 48 << 10;
 
 /// Plaintext inside every E2EE envelope. Routing fields are bound here and
 /// checked against the outer event after decryption.
@@ -191,11 +201,16 @@ impl Inner {
             ciphertext_size: enc.ciphertext_size,
             name: name.clone(),
             mime: p["mime"].as_str().unwrap_or("application/octet-stream").to_string(),
+            thumb: p["thumb"].as_str().filter(|t| !t.is_empty() && t.len() <= MAX_THUMB_B64).map(str::to_string),
+            w: p["width"].as_u64().map(|v| v.min(100_000) as u32),
+            h: p["height"].as_u64().map(|v| v.min(100_000) as u32),
         });
+        let photo = pl.file.as_ref().is_some_and(|f| f.thumb.is_some() && f.mime.starts_with("image/"));
         pl.text = p["caption"].as_str().map(str::to_string);
         // The sender keeps its own encrypted copy for local viewing.
         std::fs::copy(&enc_path, self.data_dir.join("files").join(format!("{}.enc", pl.mid)))?;
-        self.enqueue(&pl, true, Some(&enc_path), &format!("📎 {name}"))?;
+        let preview = if photo { "🖼 Фото".to_string() } else { format!("📎 {name}") };
+        self.enqueue(&pl, true, Some(&enc_path), &preview)?;
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         self.emit(json!({"type": "conversations_changed"}));
         self.wake();
@@ -459,6 +474,10 @@ impl Inner {
         let dir = self.data_dir.join("tmp").join(id);
         std::fs::create_dir_all(&dir)?;
         let out = dir.join(files::safe_name(&meta.name));
+        // Photos are shown again and again: reuse the decrypted copy while it is complete.
+        if std::fs::metadata(&out).map(|m| m.len() == meta.size).unwrap_or(false) {
+            return Ok(json!({"path": out.to_string_lossy()}));
+        }
         files::decrypt_file(&enc, &out, &unb64(&meta.key)?, &unb64(&meta.nonce)?)?;
         Ok(json!({"path": out.to_string_lossy()}))
     }
@@ -478,7 +497,7 @@ impl Inner {
     pub fn mark_read(&self, p: &Value) -> Result<Value> {
         let conv = s(p, "conversation_id")?;
         let (me, _) = self.me()?;
-        let (ids, receipts_on): (Vec<String>, bool) = {
+        let ids: Vec<String> = {
             let db = self.db();
             db.conn.execute("UPDATE conversations SET unread=0 WHERE id=?1", [conv])?;
             let mut st = db.conn.prepare(
@@ -489,9 +508,10 @@ impl Inner {
             for i in &ids {
                 db.conn.execute("INSERT OR IGNORE INTO receipts(message_id, user_id, kind, at) VALUES (?1, ?2, 'read', ?3)", params![i, me, now_ms()])?;
             }
-            (ids, kv_get_str(&db.conn, "read_receipts")?.as_deref() != Some("0"))
+            ids
         };
-        if receipts_on && !ids.is_empty() && conv != crate::sync::SYSTEM_CHAT {
+        // Read receipts are always on.
+        if !ids.is_empty() && conv != crate::sync::SYSTEM_CHAT {
             self.enqueue_receipt(conv, "read", ids)?;
             self.wake();
         }

@@ -286,18 +286,6 @@ final class SettingsViewController: SheetViewController {
         }
         stack.addArrangedSubview(notify)
         muted("В уведомлении видно только название чата. Мгновенные уведомления недоступны в этой сборке: новые сообщения приходят, когда приложение открыто или iOS разрешает фоновое обновление.")
-        var receiptsSwitch: UISwitch?
-        let receipts = toggleRow("Отчёты о прочтении", on: true) { on in
-            Core.shared.call("set_settings", ["read_receipts": on]) { [weak self] r in
-                if case .failure(let e) = r { self?.toast(e.message); receiptsSwitch?.setOn(!on, animated: true) }
-            }
-        }
-        receiptsSwitch = receipts.arrangedSubviews.last as? UISwitch
-        stack.addArrangedSubview(receipts)
-        muted("Если выключить, собеседники не увидят, что вы прочитали сообщение.")
-        Core.shared.call("get_settings") { r in
-            if case .success(let v) = r { receiptsSwitch?.isOn = (v as? JSON)?["read_receipts"] as? Bool ?? true }
-        }
         var twoFactorSwitch: UISwitch?
         let twoFactor = toggleRow("Подтверждение входа", on: false) { on in
             Core.shared.call("set_two_factor", ["enabled": on]) { [weak self] r in

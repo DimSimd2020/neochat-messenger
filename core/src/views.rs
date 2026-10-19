@@ -68,7 +68,9 @@ impl Inner {
                 Some(f) => {
                     let meta: FileMeta = serde_json::from_str(f)?;
                     let downloaded = self.data_dir.join("files").join(format!("{}.enc", r.id)).exists();
-                    Some(json!({"name": meta.name, "size": meta.size, "mime": meta.mime, "downloaded": downloaded}))
+                    Some(json!({"name": meta.name, "size": meta.size, "mime": meta.mime, "downloaded": downloaded,
+                        "image": meta.mime.starts_with("image/") && meta.thumb.is_some(),
+                        "thumb": meta.thumb, "width": meta.w, "height": meta.h}))
                 }
                 None => None,
             };

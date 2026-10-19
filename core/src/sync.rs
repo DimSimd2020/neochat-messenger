@@ -339,6 +339,7 @@ impl Inner {
                     )?;
                     if inserted > 0 {
                         let pv = match &p.file {
+                            Some(f) if f.thumb.is_some() && f.mime.starts_with("image/") => "🖼 Фото".to_string(),
                             Some(f) => format!("📎 {}", f.name),
                             None => preview(p.text.as_deref().unwrap_or("")),
                         };

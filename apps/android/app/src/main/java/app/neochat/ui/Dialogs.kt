@@ -304,10 +304,6 @@ object Dialogs {
         notify.onToggle = { prefs.edit().putBoolean("notifications", it).apply() }
         s.add(notify, 14)
         s.muted("В уведомлении видно только название чата, текст сообщения не показывается.", 2)
-        val receipts = ToggleRow(ctx, "Отчёты о прочтении")
-        s.add(receipts, 10)
-        s.muted("Если выключить, собеседники не увидят, что вы прочитали сообщение.", 2)
-        CoreClient.call("get_settings") { v, _ -> receipts.setChecked((v as? JSONObject)?.optBoolean("read_receipts", true) != false, false) }
         val twoFactor = ToggleRow(ctx, "Подтверждение входа")
         s.add(twoFactor, 10)
         s.muted("При входе на новом устройстве понадобится код. Он придёт в чат «NeoChat уведомления» на ваших устройствах.", 2)
@@ -317,14 +313,6 @@ object Dialogs {
                 if (e != null) {
                     act.toast(e.message)
                     twoFactor.setChecked(!on, true)
-                }
-            }
-        }
-        receipts.onToggle = { on ->
-            CoreClient.call("set_settings", JSONObject().put("read_receipts", on)) { _, e ->
-                if (e != null) {
-                    act.toast(e.message)
-                    receipts.setChecked(!on, true)
                 }
             }
         }

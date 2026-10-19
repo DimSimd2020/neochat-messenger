@@ -3,6 +3,7 @@ package app
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
@@ -13,8 +14,9 @@ import (
 )
 
 const (
-	maxSendBody     = 1 << 20
-	maxEnvelopeSize = 8192
+	maxSendBody = 16 << 20
+	// A long Cyrillic text or a photo thumbnail with padding fits comfortably.
+	maxEnvelopeSize = 32 << 10
 )
 
 // sendReq matches docs/protocol/send.schema.json.
@@ -28,6 +30,10 @@ type sendReq struct {
 		Ciphertext     []byte `json:"ciphertext"`
 	} `json:"recipients"`
 	AttachmentIDs []string `json:"attachment_ids"`
+	// Control marks receipts and poll votes: members may send them where only admins
+	// post. Content is end-to-end encrypted, so clients also drop content from members
+	// who may not post.
+	Control bool `json:"control,omitempty"`
 }
 
 type sendAck struct {
@@ -83,7 +89,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, a *authCtx) 
 	}
 	rev, err := strconv.ParseInt(req.ConversationRevision, 10, 64)
 	if req.Version != 1 || !isUUID(req.ClientMessageID) || err != nil ||
-		len(req.Recipients) > maxGroupMembers*maxDevices-1 || len(req.AttachmentIDs) > 1 {
+		len(req.Recipients) > maxChannelMembers*maxDevices-1 || len(req.AttachmentIDs) > 1 {
 		s.fail(w, r, errBadRequest)
 		return
 	}
@@ -109,13 +115,25 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, a *authCtx) 
 		notify = nil
 		var cur int64
 		var archived bool
-		err := tx.QueryRow(r.Context(), `SELECT c.revision, c.archived FROM conversations c
-			JOIN memberships m ON m.conversation_id=c.id AND m.user_id=$2 WHERE c.id=$1 FOR UPDATE OF c`, nullUUID(convID), a.UserID).Scan(&cur, &archived)
+		var kind, role string
+		var rawSettings []byte
+		err := tx.QueryRow(r.Context(), `SELECT c.revision, c.archived, c.kind, c.settings, m.role FROM conversations c
+			JOIN memberships m ON m.conversation_id=c.id AND m.user_id=$2 WHERE c.id=$1 FOR UPDATE OF c`, nullUUID(convID), a.UserID).Scan(&cur, &archived, &kind, &rawSettings, &role)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errNotFound
 		}
 		if err != nil {
 			return err
+		}
+		if !req.Control && role == "member" {
+			var st groupSettings
+			_ = json.Unmarshal(rawSettings, &st)
+			if kind == "channel" {
+				return errf(403, "post_forbidden", "Публикуют в канале только владелец и админы")
+			}
+			if st.MembersCanSend != nil && !*st.MembersCanSend {
+				return errf(403, "post_forbidden", "Писать в группу могут только админы")
+			}
 		}
 		// Idempotency is checked first: a retry after a membership change still gets its ACK.
 		var storedFP []byte

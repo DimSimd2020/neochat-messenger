@@ -483,21 +483,6 @@ void settings(const DialogHost &h)
     notify->setChecked(QSettings().value("notifications/enabled", true).toBool());
     QObject::connect(notify, &QAbstractButton::toggled, sheet, [](bool on) { QSettings().setValue("notifications/enabled", on); });
     sheet->body()->addWidget(notify);
-    auto *receipts = new ui::Toggle(QStringLiteral("Отчёты о прочтении"));
-    receipts->setEnabled(false);
-    Core::instance()->call("get_settings", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
-        QSignalBlocker b(receipts);
-        receipts->setChecked(v.toObject().value("read_receipts").toBool(true));
-        receipts->setEnabled(true);
-    });
-    QObject::connect(receipts, &QAbstractButton::toggled, sheet, [=](bool on) {
-        Core::instance()->call("set_settings", {{"read_receipts", on}}, sheet, [=](const QJsonValue &, const CoreError &e) {
-            if (!e.ok())
-                fail(h, e);
-        });
-    });
-    sheet->body()->addWidget(receipts);
-    sheet->body()->addWidget(mutedText(QStringLiteral("Если выключить, собеседники не увидят, что вы прочитали сообщение.")));
     auto *twoFactor = new ui::Toggle(QStringLiteral("Подтверждение входа"));
     twoFactor->setEnabled(false);
     Core::instance()->call("account_settings", {}, sheet, [=](const QJsonValue &v, const CoreError &) {

@@ -39,7 +39,10 @@ class MainActivity : Activity(), Sheet.Host {
     private var bottom = 0
     private var ime = 0
     override val bottomInset get() = maxOf(bottom, ime)
-    val topInset get() = top
+    override val topInset get() = top
+    private val insetListeners = ArrayList<() -> Unit>()
+    override fun addInsetListener(l: () -> Unit) { insetListeners += l }
+    override fun removeInsetListener(l: () -> Unit) { insetListeners.remove(l) }
     var scanner: QrScanner? = null
 
     private var home: HomeScreen? = null
@@ -103,6 +106,7 @@ class MainActivity : Activity(), Sheet.Host {
                 ime = if (b > ins.stableInsetBottom) b else 0
             }
             current?.applyInsets(top, bottom, ime)
+            insetListeners.toList().forEach { it() }
             ins
         }
     }
