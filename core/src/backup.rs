@@ -92,7 +92,7 @@ pub fn open_keys(backup: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl Inner {
-    fn backup_key(&self) -> Result<Option<[u8; 32]>> {
+    pub(crate) fn backup_key(&self) -> Result<Option<[u8; 32]>> {
         Ok(kv_get(&self.db().conn, "backup_key")?.and_then(|k| k.try_into().ok()))
     }
 
@@ -110,11 +110,14 @@ impl Inner {
             )?;
             (last_at, last_mark, mark)
         };
-        if mark == last_mark || now_ms() - last_at < UPLOAD_EVERY_MS {
+        // A new own device asks for an immediate upload (kv "history_force").
+        let force = kv_get_str(&self.db().conn, "history_force")?.is_some();
+        if !force && (mark == last_mark || now_ms() - last_at < UPLOAD_EVERY_MS) {
             return Ok(());
         }
         self.upload_history(&key)?;
         let db = self.db();
+        crate::store::kv_del(&db.conn, "history_force")?;
         kv_set(&db.conn, "history_uploaded_at", now_ms().to_string().as_bytes())?;
         kv_set(&db.conn, "history_mark", mark.as_bytes())?;
         Ok(())

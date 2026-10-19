@@ -64,6 +64,7 @@ impl Inner {
             return Err(Error::NotLoggedIn);
         }
         let n = self.run_cycle()?;
+        let _ = self.maybe_upload_history();
         Ok(json!({"new_messages": n}))
     }
 
@@ -157,6 +158,10 @@ impl Inner {
                 let uid = ev["payload"]["user_id"].as_str().unwrap_or_default().to_string();
                 let (me, _) = self.me()?;
                 let res = if uid == me { self.refresh_own_roster() } else { self.refresh_user(&uid) };
+                if uid == me && res.is_ok() {
+                    // A device may have just joined: give it the latest history at once.
+                    kv_set(&self.db().conn, "history_force", b"1")?;
+                }
                 match res {
                     Ok(()) => {}
                     Err(e @ Error::Network(_)) => return Err(e),
@@ -167,6 +172,19 @@ impl Inner {
                 self.emit(json!({"type": "contacts_changed"}));
                 self.emit(json!({"type": "conversations_changed"}));
                 Ok(())
+            }
+            "history" => {
+                let fresh: i64 = kv_get_str(&self.db().conn, "history_fresh_until")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+                if fresh > crate::store::now_ms() {
+                    if let Some(key) = self.backup_key()? {
+                        match self.restore_history(&key) {
+                            Ok(()) => self.emit(json!({"type": "conversations_changed"})),
+                            Err(e @ Error::Network(_)) => return Err(e),
+                            Err(_) => {}
+                        }
+                    }
+                }
+                self.mark_processed(event_id)
             }
             "notice" => {
                 self.add_notice(event_id, ev["payload"]["text"].as_str().unwrap_or_default())?;

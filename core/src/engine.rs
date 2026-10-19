@@ -393,6 +393,8 @@ impl Inner {
     }
 
     fn after_login(&self) {
+        // For a while after sign-in, fresher history copies from other devices are merged in.
+        let _ = kv_set(&self.db().conn, "history_fresh_until", (now_ms() + 15 * 60 * 1000).to_string().as_bytes());
         let _ = self.refresh_profile();
         self.set_conn(STATE_ONLINE);
         self.emit(json!({"type": "account_changed"}));

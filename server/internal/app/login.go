@@ -232,7 +232,7 @@ func (s *Server) addDevice(r *http.Request, tx pgx.Tx, userID string, d *deviceI
 	if err := insertDevice(r.Context(), tx, userID, d, false); err != nil {
 		return nil, err
 	}
-	own, err := notifyOwn(r.Context(), tx, userID, d.DeviceID, fmt.Sprintf("Вход на новом устройстве: %s (%s). Если это не вы, отзовите его в настройках и смените пароль.", d.Name, platformName(d.Platform)))
+	own, err := notifyOwn(r.Context(), tx, userID, "", fmt.Sprintf("Вход на новом устройстве: %s (%s). Если это не вы, отзовите его в настройках и смените пароль.", d.Name, platformName(d.Platform)))
 	if err != nil {
 		return nil, err
 	}
@@ -443,6 +443,25 @@ func (s *Server) handlePutHistory(w http.ResponseWriter, r *http.Request, a *aut
 		s.fail(w, r, err)
 		return
 	}
+	// A device that has just signed in picks up messages newer than the copy it restored.
+	var notify []string
+	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(r.Context(), `SELECT id FROM devices WHERE user_id=$1 AND revoked_at IS NULL AND id<>$2`, a.UserID, a.DeviceID)
+		if err != nil {
+			return err
+		}
+		devices, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		notify, err = emitToDevices(r.Context(), tx, devices, "history", nil)
+		return err
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.hub.notify(notify)
 	w.WriteHeader(204)
 }
 

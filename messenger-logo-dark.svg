@@ -3,14 +3,14 @@
   <desc id="description">Rounded neon-blue outlines intertwine an N and a paper plane. The mark sits on a dark gray tile with rounded corners.</desc>
   <defs>
     <linearGradient id="blue" x1="326" y1="704" x2="667" y2="328" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1C55E8"/>
-      <stop offset=".5" stop-color="#2D6BFF"/>
-      <stop offset="1" stop-color="#3C82FF"/>
+      <stop stop-color="#2A72FF"/>
+      <stop offset=".5" stop-color="#4693FF"/>
+      <stop offset="1" stop-color="#6BBBFF"/>
     </linearGradient>
     <linearGradient id="light" x1="330" y1="701" x2="671" y2="327" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#4C8AFF"/>
-      <stop offset=".55" stop-color="#6FA2FF"/>
-      <stop offset="1" stop-color="#5E96FF"/>
+      <stop stop-color="#8CC6FF"/>
+      <stop offset=".55" stop-color="#B8E0FF"/>
+      <stop offset="1" stop-color="#A6D6FF"/>
     </linearGradient>
     <g id="mark" stroke-linecap="round" stroke-linejoin="round">
       <!-- Continuous outside edge: the N returns through the paper plane. -->
@@ -28,11 +28,11 @@
   <rect x="198" y="222" width="600" height="600" rx="132" fill="#191919"/>
 
   <!-- Original neon mark, preserved unchanged. -->
-  <use href="#mark" stroke="#2F5BFF" stroke-width="40" opacity=".018"/>
-  <use href="#mark" stroke="#2F5BFF" stroke-width="32" opacity=".025"/>
-  <use href="#mark" stroke="#2F5BFF" stroke-width="25" opacity=".045"/>
-  <use href="#mark" stroke="#2F5BFF" stroke-width="19" opacity=".08"/>
-  <use href="#mark" stroke="#3462FF" stroke-width="14" opacity=".17"/>
+  <use href="#mark" stroke="#3F8CFF" stroke-width="40" opacity=".018"/>
+  <use href="#mark" stroke="#3F8CFF" stroke-width="32" opacity=".025"/>
+  <use href="#mark" stroke="#3F8CFF" stroke-width="25" opacity=".045"/>
+  <use href="#mark" stroke="#3F8CFF" stroke-width="19" opacity=".08"/>
+  <use href="#mark" stroke="#4A98FF" stroke-width="14" opacity=".17"/>
   <use href="#mark" stroke="url(#blue)" stroke-width="10"/>
   <use href="#mark" stroke="url(#light)" stroke-width="4.5"/>
 </svg>

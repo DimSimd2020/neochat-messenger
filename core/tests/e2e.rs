@@ -320,3 +320,25 @@ fn published_update_is_signed_and_downloads() {
     assert_eq!(std::fs::metadata(got["path"].as_str().unwrap()).unwrap().len(), check["size"].as_u64().unwrap());
     assert_eq!(c.call("check_update", json!({"platform": "android", "version": check["version"]}))["available"], json!(false));
 }
+
+#[test]
+fn password_sign_in_gets_latest_history() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let (alice, _) = register(&e, &aname);
+    let (bob, _) = register(&e, &uname("bob"));
+    let b = alice.call("resolve_contact", json!({"username": bob.call("status", json!({}))["username"]}));
+    let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
+    alice.sync();
+    // Sent after the last history upload: the copy on the server does not have it yet.
+    alice.call("send_text", json!({"conversation_id": cid, "text": "только что"}));
+    alice.sync();
+
+    let pc = Client::new();
+    pc.call("login", json!({"server": e.server, "username": aname, "password": "correct horse battery", "device_name": "pc", "platform": "windows"}));
+    // Alice's device learns about the new device and uploads at once; the PC merges the fresh copy.
+    alice.sync();
+    pc.sync();
+    assert_eq!(pc.texts(&cid), vec!["только что"]);
+    assert!(pc.texts("neochat-system").iter().any(|t| t.contains("Вход на новом устройстве")));
+}
