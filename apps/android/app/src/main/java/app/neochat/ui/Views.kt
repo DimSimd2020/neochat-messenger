@@ -497,6 +497,8 @@ class ThemeSlider(ctx: Context) : View(ctx), Themed {
         }
     }
 
+    override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(MeasureSpec.getSize(w), dp(82))
+
     private fun xFor(p: Float) = trackH / 2 + p * (width - trackH) / 2
     private fun valueAt(x: Float) = ((x - trackH / 2) / ((width - trackH) / 2)).roundToInt().coerceIn(0, 2)
 
