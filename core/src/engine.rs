@@ -493,10 +493,8 @@ impl Inner {
         kv_set(&tx, "link_secret", out["link_secret"].as_str().unwrap_or_default().as_bytes())?;
         tx.commit()?;
         let e = device.roster_entry();
-        Ok(json!({
-            "qr": format!("neochat-link:1:{}:{}:{}", link_id, b64(&e.identity_key), b64(&e.auth_key)),
-            "expires_in": out["expires_in"],
-        }))
+        let qr = format!("neochat-link:1:{}:{}:{}", link_id, b64(&e.identity_key), b64(&e.auth_key));
+        Ok(json!({"qr_rows": qr_rows(&qr)?, "qr": qr, "expires_in": out["expires_in"]}))
     }
 
     fn link_poll(&self) -> Result<Value> {
@@ -839,4 +837,12 @@ impl Inner {
 pub fn display_name(first: &str, last: &str, username: &str) -> String {
     let full = format!("{} {}", first.trim(), last.trim()).trim().to_string();
     if full.is_empty() { format!("@{username}") } else { full }
+}
+
+/// QR modules as rows of '1' (dark) and '0' so every client draws the same code.
+fn qr_rows(text: &str) -> Result<Vec<String>> {
+    let code = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::M).map_err(|e| Error::Invalid(format!("QR: {e}")))?;
+    let w = code.width();
+    let colors = code.to_colors();
+    Ok(colors.chunks(w).map(|row| row.iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect()).collect())
 }

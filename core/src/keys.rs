@@ -445,7 +445,9 @@ pub fn safety_number(my_id: &str, my_key: &[u8], their_id: &str, their_key: &[u8
         &IdentityKey::decode(their_key)?,
     )
     .map_err(|e| Error::Crypto(format!("Ошибка кода безопасности: {e:?}")))?;
-    fp.display_string().map_err(|e| Error::Crypto(format!("Ошибка кода безопасности: {e:?}")))
+    let digits = fp.display_string().map_err(|e| Error::Crypto(format!("Ошибка кода безопасности: {e:?}")))?;
+    // 12 groups of 5 digits, the form people compare aloud.
+    Ok(digits.as_bytes().chunks(5).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join(" "))
 }
 
 pub fn account_keypair(conn: &rusqlite::Connection) -> Result<Option<IdentityKeyPair>> {
