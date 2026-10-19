@@ -72,6 +72,13 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_qr = new ui::QrView;
     m_qr->setAccessibleName(QStringLiteral("QR-код для входа"));
     ql->addWidget(m_qr, 0, Qt::AlignHCenter);
+    // A saved sign-in on this computer is replaced only when the person asks for the QR code.
+    m_showQr = new ui::Button(QStringLiteral("Показать QR-код"), ui::Button::Secondary);
+    connect(m_showQr, &QAbstractButton::clicked, this, [this] {
+        m_hasKeys = false;
+        updateQr();
+    });
+    ql->addWidget(m_showQr);
     m_qrState = new ui::Label(QStringLiteral("Откройте NeoChat на телефоне: Устройства → «Сканировать QR-код»."), 13.5, 400, ui::Label::Muted);
     m_qrState->setWordWrap(true);
     m_qrState->setAlignment(Qt::AlignHCenter);
@@ -206,11 +213,16 @@ void Onboarding::start(const QJsonObject &status)
     setMode(Login);
 }
 
-// A computer with its own keys signs in by password; only a new one offers the QR code.
+// The QR code starts by itself on a new computer; with a saved sign-in it waits for a click.
 void Onboarding::updateQr()
 {
-    const bool want = m_mode == Login && !m_hasKeys && !m_busy && m_pages->currentIndex() == 0;
-    m_qrCard->setVisible(want);
+    const bool shown = m_mode == Login && m_pages->currentIndex() == 0;
+    m_qrCard->setVisible(shown);
+    m_qr->setVisible(!m_hasKeys);
+    m_showQr->setVisible(m_hasKeys);
+    if (m_hasKeys)
+        m_qrState->setText(QStringLiteral("Войти с телефона: покажите QR-код и отсканируйте его в NeoChat (Устройства → «Сканировать QR-код»)."));
+    const bool want = shown && !m_hasKeys && !m_busy;
     if (!want) {
         m_poll->stop();
         m_qrActive = false;

@@ -60,6 +60,7 @@ private:
     // QR sign-in
     QWidget *m_qrCard;
     ui::QrView *m_qr;
+    ui::Button *m_showQr;
     ui::Label *m_qrState;
     QTimer *m_poll;
     bool m_qrActive = false;

@@ -309,7 +309,7 @@ impl Inner {
     fn wipe_account(&self, conn: &rusqlite::Connection) -> Result<()> {
         // Used only before creating a fresh identity on this installation.
         conn.execute_batch(
-            "DELETE FROM kv; DELETE FROM sessions; DELETE FROM identities; DELETE FROM prekeys; DELETE FROM signed_prekeys;
+            "DELETE FROM kv WHERE k<>'history_owner'; DELETE FROM sessions; DELETE FROM identities; DELETE FROM prekeys; DELETE FROM signed_prekeys;
              DELETE FROM kyber_prekeys; DELETE FROM kyber_used; DELETE FROM known_devices; DELETE FROM outbox; DELETE FROM processed;",
         )?;
         Ok(())
@@ -357,6 +357,7 @@ impl Inner {
 
     fn store_account(&self, tx: &rusqlite::Connection, server: &str, out: &Value, username: &str, primary: bool) -> Result<()> {
         kv_set(tx, "server", server.trim_end_matches('/').as_bytes())?;
+        set_history_owner(tx, out["user_id"].as_str().unwrap_or_default())?;
         kv_set(tx, "user_id", out["user_id"].as_str().unwrap_or_default().as_bytes())?;
         kv_set(tx, "username", username.as_bytes())?;
         kv_set(tx, "primary", if primary { b"1" } else { b"0" })?;
@@ -405,12 +406,17 @@ impl Inner {
         };
         let ts = (now_ms() / 1000).to_string();
         let sig = keys::login_signature(&self.db().conn, &username, &device_id, &ts)?;
-        let out = Api::new(&server).call(
+        let out = match Api::new(&server).call(
             "POST",
             "/v1/sessions",
             None,
             Some(&json!({"username": username, "password": pw.auth, "device_id": device_id, "timestamp": ts, "signature": b64(&sig)})),
-        )?;
+        ) {
+            // The server no longer knows this device (revoked, or the account was recreated):
+            // sign in as a new device; a wrong password fails there with the same error.
+            Err(e) if e.is_api("invalid_credentials") => return self.login_new_device(&server, &username, &pw, p),
+            r => r?,
+        };
         {
             let db = self.db();
             kv_set(&db.conn, "server", server.trim_end_matches('/').as_bytes())?;
@@ -583,6 +589,7 @@ impl Inner {
         {
             let mut db = self.db();
             let tx = db.conn.transaction()?;
+            set_history_owner(&tx, &user_id)?;
             kv_set(&tx, "user_id", user_id.as_bytes())?;
             kv_set(&tx, "username", s(&out, "username")?.as_bytes())?;
             kv_set(&tx, "primary", b"1")?;
@@ -925,6 +932,16 @@ pub fn display_name(first: &str, last: &str, username: &str) -> String {
 }
 
 /// QR modules as rows of '1' (dark) and '0' so every client draws the same code.
+/// Local history belongs to one account: signing in to another account on this
+/// installation must not show the previous account's chats.
+fn set_history_owner(tx: &rusqlite::Connection, user_id: &str) -> Result<()> {
+    if kv_get_str(tx, "history_owner")?.as_deref() != Some(user_id) {
+        tx.execute_batch("DELETE FROM receipts; DELETE FROM messages; DELETE FROM conversations; DELETE FROM contacts;")?;
+        kv_set(tx, "history_owner", user_id.as_bytes())?;
+    }
+    Ok(())
+}
+
 fn qr_rows(text: &str) -> Result<Vec<String>> {
     let code = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::M).map_err(|_| Error::Invalid("Не удалось построить QR-код".into()))?;
     let w = code.width();
