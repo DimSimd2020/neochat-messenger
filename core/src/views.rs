@@ -10,7 +10,7 @@ use crate::outbox::FileMeta;
 
 const COLUMNS: &str = "m.local_id, m.id, m.conversation_id, m.sender_user_id, m.outgoing, m.kind, m.body, m.reply_to, m.file, m.status, m.error, m.sent_at,
     COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END, CASE WHEN m.sender_user_id='system' THEN 'NeoChat' ELSE '' END),
-    COALESCE(c.last_name, ''), COALESCE(c.username, '')";
+    COALESCE(c.last_name, ''), COALESCE(c.username, ''), m.poll";
 
 impl Inner {
     /// Runs a message query; `me` is appended as the last positional parameter.
@@ -42,12 +42,16 @@ impl Inner {
                 error: r.get(10)?,
                 sent_at: r.get(11)?,
                 sender_name: display_name(&r.get::<_, String>(12)?, &r.get::<_, String>(13)?, &r.get::<_, String>(14)?),
-                delivered: r.get(15)?,
-                read: r.get(16)?,
+                poll: r.get(15)?,
+                delivered: r.get(16)?,
+                read: r.get(17)?,
             })
         })?;
         let rows: Vec<Row> = rows.collect::<std::result::Result<_, _>>()?;
         let mut out = Vec::with_capacity(rows.len());
+        // Per conversation: (channel title when it is a channel, member tags).
+        let mut convs: std::collections::HashMap<String, (Option<String>, Value)> = Default::default();
+        let mut polls: Vec<(usize, String, Value)> = Vec::new();
         for r in rows {
             let reply = match &r.reply_to {
                 Some(rid) => db
@@ -74,12 +78,34 @@ impl Inner {
                 }
                 None => None,
             };
+            if !convs.contains_key(&r.conversation_id) {
+                let info = db
+                    .conn
+                    .query_row("SELECT kind, title, tags FROM conversations WHERE id=?1", [&r.conversation_id], |x| {
+                        Ok((x.get::<_, String>(0)?, x.get::<_, String>(1)?, x.get::<_, String>(2)?))
+                    })
+                    .optional()?
+                    .unwrap_or_default();
+                let channel = (info.0 == "channel").then(|| if info.1.is_empty() { "Канал".to_string() } else { info.1 });
+                convs.insert(r.conversation_id.clone(), (channel, serde_json::from_str(&info.2).unwrap_or(json!({}))));
+            }
+            let (channel, tags) = &convs[&r.conversation_id];
+            if let Some(p) = &r.poll {
+                polls.push((out.len(), r.id.clone(), serde_json::from_str(p).unwrap_or(json!({}))));
+            }
+            let sender_name = match channel {
+                Some(t) => t.clone(),
+                None if r.outgoing => "Вы".to_string(),
+                None => r.sender_name,
+            };
             out.push(json!({
                 "local_id": r.local_id,
                 "id": r.id,
                 "conversation_id": r.conversation_id,
                 "sender_user_id": r.sender,
-                "sender_name": if r.outgoing { "Вы".to_string() } else { r.sender_name },
+                "sender_name": sender_name,
+                "sender_tag": if channel.is_some() { json!("") } else { tags.get(&r.sender).cloned().unwrap_or(json!("")) },
+                "channel": channel.is_some(),
                 "outgoing": r.outgoing,
                 "kind": r.kind,
                 "text": if r.kind == "undecryptable" { "Не удалось расшифровать сообщение".to_string() } else { r.body },
@@ -91,6 +117,11 @@ impl Inner {
                 "delivered_count": r.delivered,
                 "read_count": r.read,
             }));
+        }
+        drop(st);
+        drop(db);
+        for (i, id, poll) in polls {
+            out[i]["poll"] = self.poll_json(&id, &poll, &me)?;
         }
         Ok(out)
     }
@@ -119,7 +150,7 @@ impl Inner {
             let db = self.db();
             let conv = p["conversation_id"].as_str();
             let mut st = db.conn.prepare(
-                "SELECT id, body FROM messages WHERE kind IN ('text','file') AND (?1 IS NULL OR conversation_id=?1) ORDER BY local_id DESC LIMIT 5000",
+                "SELECT id, body FROM messages WHERE kind IN ('text','file','poll') AND (?1 IS NULL OR conversation_id=?1) ORDER BY local_id DESC LIMIT 5000",
             )?;
             let rows = st.query_map([conv], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             let mut ids = Vec::new();
@@ -156,6 +187,7 @@ struct Row {
     error: Option<String>,
     sent_at: i64,
     sender_name: String,
+    poll: Option<String>,
     delivered: i64,
     read: i64,
 }

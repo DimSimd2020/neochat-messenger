@@ -10,6 +10,7 @@ mod conv;
 mod engine;
 mod error;
 mod files;
+mod groups;
 mod keys;
 mod outbox;
 mod store;

@@ -215,27 +215,34 @@ impl Inner {
         }
         drop(rows);
         let mut st = db.conn.prepare(
-            "SELECT id, kind, title, peer_user_id, owner_id, revision, members, archived, left_group, last_activity, last_preview FROM conversations",
+            "SELECT id, kind, title, peer_user_id, owner_id, revision, members, archived, left_group, last_activity, last_preview, description, tags FROM conversations",
         )?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             let line = json!({"t": "conversation", "id": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?, "title": r.get::<_, String>(2)?,
                 "peer_user_id": r.get::<_, Option<String>>(3)?, "owner_id": r.get::<_, Option<String>>(4)?, "revision": r.get::<_, String>(5)?,
                 "members": r.get::<_, String>(6)?, "archived": r.get::<_, i64>(7)?, "left_group": r.get::<_, i64>(8)?,
-                "last_activity": r.get::<_, i64>(9)?, "last_preview": r.get::<_, String>(10)?});
+                "last_activity": r.get::<_, i64>(9)?, "last_preview": r.get::<_, String>(10)?, "description": r.get::<_, String>(11)?, "tags": r.get::<_, String>(12)?});
             writeln!(w, "{line}")?;
         }
         drop(rows);
         let mut st = db.conn.prepare(
-            "SELECT id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at FROM messages
-             WHERE kind IN ('text','file') AND status NOT IN ('queued','sending','failed') ORDER BY local_id",
+            "SELECT id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll FROM messages
+             WHERE kind IN ('text','file','poll') AND status NOT IN ('queued','sending','failed') ORDER BY local_id",
         )?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             let line = json!({"t": "message", "id": r.get::<_, String>(0)?, "conversation_id": r.get::<_, String>(1)?, "sender_user_id": r.get::<_, String>(2)?,
                 "sender_device_id": r.get::<_, String>(3)?, "outgoing": r.get::<_, i64>(4)?, "kind": r.get::<_, String>(5)?, "body": r.get::<_, String>(6)?,
                 "reply_to": r.get::<_, Option<String>>(7)?, "file": r.get::<_, Option<String>>(8)?, "status": r.get::<_, String>(9)?,
-                "server_id": r.get::<_, Option<String>>(10)?, "sent_at": r.get::<_, i64>(11)?});
+                "server_id": r.get::<_, Option<String>>(10)?, "sent_at": r.get::<_, i64>(11)?, "poll": r.get::<_, Option<String>>(12)?});
+            writeln!(w, "{line}")?;
+        }
+        drop(rows);
+        let mut st = db.conn.prepare("SELECT poll_id, user_id, choices, at FROM poll_votes")?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let line = json!({"t": "vote", "poll_id": r.get::<_, String>(0)?, "user_id": r.get::<_, String>(1)?, "choices": r.get::<_, String>(2)?, "at": r.get::<_, i64>(3)?});
             writeln!(w, "{line}")?;
         }
         drop(rows);
@@ -261,19 +268,26 @@ impl Inner {
                     )?;
                 }
                 "conversation" => {
+                    let tags = if st("tags").is_empty() { "{}".to_string() } else { st("tags") };
                     tx.execute(
-                        "INSERT OR IGNORE INTO conversations(id, kind, title, peer_user_id, owner_id, revision, members, archived, left_group, last_activity, last_preview)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        "INSERT OR IGNORE INTO conversations(id, kind, title, peer_user_id, owner_id, revision, members, archived, left_group, last_activity, last_preview, description, tags)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                         params![st("id"), st("kind"), st("title"), v["peer_user_id"].as_str(), v["owner_id"].as_str(), st("revision"), st("members"),
-                            int("archived"), int("left_group"), int("last_activity"), st("last_preview")],
+                            int("archived"), int("left_group"), int("last_activity"), st("last_preview"), st("description"), tags],
                     )?;
                 }
                 "message" => {
                     tx.execute(
-                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                         params![st("id"), st("conversation_id"), st("sender_user_id"), st("sender_device_id"), int("outgoing"), st("kind"), st("body"),
-                            v["reply_to"].as_str(), v["file"].as_str(), st("status"), v["server_id"].as_str(), int("sent_at")],
+                            v["reply_to"].as_str(), v["file"].as_str(), st("status"), v["server_id"].as_str(), int("sent_at"), v["poll"].as_str()],
+                    )?;
+                }
+                "vote" => {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO poll_votes(poll_id, user_id, choices, at) VALUES (?1, ?2, ?3, ?4)",
+                        params![st("poll_id"), st("user_id"), st("choices"), int("at")],
                     )?;
                 }
                 _ => {}

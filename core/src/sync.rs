@@ -10,7 +10,7 @@ use futures::executor::block_on;
 use libsignal_protocol::{
     CiphertextMessage, CiphertextMessageType, GenericSignedPreKey, PreKeySignalMessage, SignalMessage, message_decrypt,
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde_json::{Value, json};
 
 use crate::engine::{Inner, STATE_CONNECTING, STATE_OFFLINE, STATE_ONLINE, s};
@@ -27,6 +27,7 @@ const SIGNED_PREKEY_KEEP_MS: i64 = 30 * 24 * 3600 * 1000;
 struct CycleStats {
     new_messages: usize,
     receipts: BTreeMap<String, Vec<String>>,
+    notify: std::collections::BTreeSet<String>,
 }
 
 impl Inner {
@@ -306,7 +307,13 @@ impl Inner {
         });
         let now = now_ms();
         let mut changed_conv = false;
+        // Group and poll controls change state through helpers that lock the db: applied after commit.
+        let mut control: Option<(String, Value)> = None;
+        let payload = payload.map(|p| {
+            if crate::groups::may_post(&tx, &conv, &sender, &p.kind) { Some(p) } else { None }
+        });
         match payload {
+            Ok(None) => {}
             Err(e) => {
                 // Kept as a diagnosable placeholder; the cursor still advances.
                 tx.execute(
@@ -316,12 +323,18 @@ impl Inner {
                 )?;
                 changed_conv = true;
             }
-            Ok(p) => match p.kind.as_str() {
-                "text" | "file" => {
+            Ok(Some(p)) => match p.kind.as_str() {
+                "text" | "file" | "poll" => {
+                    let poll = if p.kind == "poll" { crate::groups::clean_poll(&p) } else { None };
+                    if p.kind == "poll" && poll.is_none() {
+                        tx.execute("INSERT OR IGNORE INTO processed(event_id, at) VALUES (?1, ?2)", params![event_id, now])?;
+                        tx.commit()?;
+                        return Ok(());
+                    }
                     let outgoing = sender == me;
                     let inserted = tx.execute(
-                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                         params![
                             p.mid,
                             conv,
@@ -335,12 +348,14 @@ impl Inner {
                             if outgoing { "sent" } else { "received" },
                             s(ev, "message_id")?,
                             p.ts.min(now + 300_000),
+                            poll.map(|v| v.to_string()),
                         ],
                     )?;
                     if inserted > 0 {
                         let pv = match &p.file {
                             Some(f) if f.thumb.is_some() && f.mime.starts_with("image/") => "🖼 Фото".to_string(),
                             Some(f) => format!("📎 {}", f.name),
+                            None if p.kind == "poll" => format!("📊 {}", p.text.as_deref().unwrap_or("")),
                             None => preview(p.text.as_deref().unwrap_or("")),
                         };
                         tx.execute(
@@ -349,7 +364,14 @@ impl Inner {
                         )?;
                         if !outgoing {
                             stats.new_messages += 1;
-                            stats.receipts.entry(conv.clone()).or_default().push(p.mid.clone());
+                            // Channels have no receipts: they would go to every subscriber.
+                            let channel: bool = tx.query_row("SELECT kind='channel' FROM conversations WHERE id=?1", [&conv], |r| r.get(0)).unwrap_or(false);
+                            if !channel {
+                                stats.receipts.entry(conv.clone()).or_default().push(p.mid.clone());
+                            } else {
+                                stats.receipts.entry(conv.clone()).or_default();
+                                stats.notify.insert(conv.clone());
+                            }
                         }
                         changed_conv = true;
                     }
@@ -378,14 +400,9 @@ impl Inner {
                         }
                     }
                 }
-                "group_update" => {
-                    let owner: Option<String> = tx.query_row("SELECT owner_id FROM conversations WHERE id=?1", [&conv], |r| r.get(0)).optional()?.flatten();
-                    if owner.as_deref() == Some(sender.as_str()) {
-                        if let Some(t) = p.group.as_ref().and_then(|g| g["title"].as_str()) {
-                            let t: String = t.chars().take(64).collect();
-                            tx.execute("UPDATE conversations SET title=?2 WHERE id=?1", params![conv, t])?;
-                            changed_conv = true;
-                        }
+                "group_update" | "poll_vote" | "poll_close" => {
+                    if let Some(g) = p.group.clone() {
+                        control = Some((p.kind.clone(), g));
                     }
                 }
                 _ => {}
@@ -394,11 +411,15 @@ impl Inner {
         tx.execute("INSERT OR IGNORE INTO processed(event_id, at) VALUES (?1, ?2)", params![event_id, now])?;
         tx.commit()?;
         drop(db);
+        if let Some((kind, g)) = control {
+            let applied = if kind == "group_update" { self.apply_group_update(&conv, &sender, &g) } else { self.apply_poll_control(&conv, &sender, &kind, &g) };
+            changed_conv |= applied.unwrap_or(false) && kind == "group_update";
+        }
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         if changed_conv {
             self.emit(json!({"type": "conversations_changed"}));
         }
-        if stats.receipts.get(&conv).is_some_and(|v| !v.is_empty()) && sender != me {
+        if (stats.receipts.get(&conv).is_some_and(|v| !v.is_empty()) || stats.notify.remove(&conv)) && sender != me {
             let title = self.conversation_json(&conv).ok().and_then(|c| c["title"].as_str().map(str::to_string)).unwrap_or_default();
             self.emit(json!({"type": "notify", "conversation_id": conv, "title": title}));
         }

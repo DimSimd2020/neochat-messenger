@@ -397,7 +397,7 @@ impl GroupState {
         } else {
             (owner_id.clone(), false)
         };
-        let mut list = |r: &mut Reader| -> Result<Vec<String>> {
+        let list = |r: &mut Reader| -> Result<Vec<String>> {
             let n = r.u16().ok_or_else(bad)? as usize;
             (0..n).map(|_| Ok(uuid_str(r.take(16).ok_or_else(bad)?))).collect()
         };

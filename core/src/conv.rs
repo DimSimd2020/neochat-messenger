@@ -13,10 +13,11 @@ use crate::error::{Error, Result};
 use crate::keys::{self, GroupState, b64, unb64};
 use crate::store::{kv_get, now_ms};
 
-pub const MAX_GROUP: usize = 16;
+pub const MAX_GROUP: usize = 50;
+pub const MAX_CHANNEL: usize = 200;
 
 impl Inner {
-    fn account_key_of(&self, user_id: &str) -> Result<Vec<u8>> {
+    pub(crate) fn account_key_of(&self, user_id: &str) -> Result<Vec<u8>> {
         let db = self.db();
         let me = keys::my_user_id(&db.conn)?;
         if user_id == me {
@@ -49,6 +50,7 @@ impl Inner {
         let mut archived = c["archived"].as_bool().unwrap_or(false);
         let mut peer: Option<String> = None;
         let owner = c["owner_id"].as_str().map(str::to_string);
+        let mut verified: Option<(GroupState, Vec<u8>)> = None;
         if kind == "direct" {
             if server_members.len() != 2 || !server_members.contains(&me) {
                 return Err(Error::Crypto("Некорректный состав личного диалога".into()));
@@ -59,10 +61,9 @@ impl Inner {
             self.ensure_user(&owner)?;
             let blob = unb64(c["state"]["blob"].as_str().unwrap_or_default())?;
             let sig = unb64(c["state"]["signature"].as_str().unwrap_or_default())?;
-            keys::verify_blob(&self.account_key_of(&owner)?, &blob, &sig)?;
-            let st = GroupState::decode(&blob)?;
-            if st.group_id != id || st.owner_id != owner {
-                return Err(Error::Crypto("Состояние группы относится к другой группе".into()));
+            let st = self.verified_state(&id, &owner, &blob, &sig)?;
+            if st.channel != (kind == "channel") {
+                return Err(Error::Crypto("Тип группы не совпадает с подписанным".into()));
             }
             let mut members: BTreeSet<String> = st.members.iter().cloned().collect();
             let leaves = c["leaves"].as_array().cloned().unwrap_or_default();
@@ -91,6 +92,7 @@ impl Inner {
             if rev != st.revision + leaves.len() as u64 || members != server_members {
                 return Err(Error::Crypto("Состав группы не совпадает с подписанным владельцем".into()));
             }
+            verified = Some((st, blob));
         }
         // Every recipient device must be listed in a verified roster of a verified member.
         let recipients = c["recipients"].as_array().cloned().unwrap_or_default();
@@ -129,6 +131,13 @@ impl Inner {
                 now_ms()
             ],
         )?;
+        if let Some((st, blob)) = verified {
+            // Admins come from the verified state, never from the server's role list.
+            db.conn.execute(
+                "UPDATE conversations SET admins=?2, settings=?3, state_rev=?4, state_blob=?5 WHERE id=?1",
+                params![id, serde_json::to_string(&st.admins)?, c["settings"].to_string(), st.revision as i64, blob],
+            )?;
+        }
         Ok(())
     }
 
@@ -164,76 +173,104 @@ impl Inner {
     pub fn create_group(self: &Arc<Self>, p: &Value) -> Result<Value> {
         let account = self.require_account()?;
         let title = s(p, "title")?.trim().to_string();
+        let channel = p["kind"].as_str() == Some("channel");
         if title.is_empty() || title.chars().count() > 64 {
-            return Err(Error::Invalid("Название группы: от 1 до 64 символов".into()));
+            return Err(Error::Invalid("Название: от 1 до 64 символов".into()));
         }
+        let description = p["description"].as_str().unwrap_or("").trim().chars().take(255).collect::<String>();
         let (me, _) = self.me()?;
-        let mut members: BTreeSet<String> = p["member_ids"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let mut members: BTreeSet<String> = ids(&p["member_ids"]);
         members.insert(me.clone());
-        if members.len() < 2 || members.len() > MAX_GROUP {
-            return Err(Error::Invalid("В группе от 2 до 16 участников".into()));
+        let (min, max) = if channel { (1, MAX_CHANNEL) } else { (2, MAX_GROUP) };
+        if members.len() < min || members.len() > max {
+            return Err(Error::Invalid(if channel { format!("В канале до {MAX_CHANNEL} подписчиков") } else { format!("В группе от 2 до {MAX_GROUP} участников") }));
         }
+        let admins: Vec<String> = ids(&p["admin_ids"]).into_iter().filter(|a| members.contains(a) && *a != me).collect();
         let gid = Uuid::new_v4().to_string();
-        let st = GroupState { group_id: gid.clone(), revision: 1, prev_hash: [0; 32], owner_id: me.clone(), members: members.iter().cloned().collect(), signer_id: me.clone(), channel: false, admins: Vec::new() };
+        let st = GroupState { group_id: gid.clone(), revision: 1, prev_hash: [0; 32], owner_id: me.clone(), members: members.iter().cloned().collect(), signer_id: me.clone(), channel, admins: admins.clone() };
         let blob = st.encode()?;
         let sig = keys::sign_blob(&account, &blob)?;
         let c = self.authed(
             "POST",
             "/v1/conversations/groups",
-            Some(&json!({"group_id": gid, "members": members, "state": {"revision": "1", "blob": b64(&blob), "signature": b64(&sig)}})),
+            Some(&json!({"group_id": gid, "kind": if channel { "channel" } else { "group" }, "members": members, "admins": admins,
+                "state": {"revision": "1", "blob": b64(&blob), "signature": b64(&sig)}})),
         )?;
         self.apply_conversation(&c)?;
-        self.db().conn.execute("UPDATE conversations SET title=?2 WHERE id=?1", params![gid, title])?;
-        self.enqueue_control(&gid, "group_update", json!({"title": title}))?;
+        self.db().conn.execute("UPDATE conversations SET title=?2, description=?3 WHERE id=?1", params![gid, title, description])?;
+        self.enqueue_control(&gid, "group_update", json!({"title": title, "description": description}))?;
         self.emit(json!({"type": "conversations_changed"}));
         self.conversation_json(&gid)
     }
 
+    /// New member list and, for the owner, a new admin list. Admins sign changes of
+    /// ordinary members; the owner signs everything else.
     pub fn group_set_members(self: &Arc<Self>, p: &Value) -> Result<Value> {
         let account = self.require_account()?;
         let gid = s(p, "conversation_id")?;
         let (me, _) = self.me()?;
+        // Verify the current state first: it is the base of the next one.
+        self.fetch_conversation(gid)?;
         let cur = self.authed("GET", &format!("/v1/conversations/{gid}"), None)?;
-        if cur["owner_id"].as_str() != Some(me.as_str()) {
-            return Err(Error::Invalid("Состав меняет только владелец группы".into()));
-        }
+        let owner = cur["owner_id"].as_str().unwrap_or_default().to_string();
         let prev_blob = unb64(cur["state"]["blob"].as_str().unwrap_or_default())?;
-        let prev: u64 = cur["revision"].as_str().unwrap_or("0").parse().unwrap_or(0);
-        let mut members: BTreeSet<String> = p["member_ids"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
-        members.insert(me.clone());
-        if members.len() < 2 || members.len() > MAX_GROUP {
-            return Err(Error::Invalid("В группе от 2 до 16 участников".into()));
+        let prev_state = GroupState::decode(&prev_blob)?;
+        let is_owner = owner == me;
+        if !is_owner && !prev_state.admins.contains(&me) {
+            return Err(Error::Invalid("Состав меняют владелец и админы".into()));
         }
-        let st = GroupState { group_id: gid.to_string(), revision: prev + 1, prev_hash: keys::sha256(&prev_blob), owner_id: me.clone(), members: members.iter().cloned().collect(), signer_id: me.clone(), channel: false, admins: Vec::new() };
+        let prev: u64 = cur["revision"].as_str().unwrap_or("0").parse().unwrap_or(0);
+        let mut members: BTreeSet<String> = ids(&p["member_ids"]);
+        members.insert(owner.clone());
+        let (min, max) = if prev_state.channel { (1, MAX_CHANNEL) } else { (2, MAX_GROUP) };
+        if members.len() < min || members.len() > max {
+            return Err(Error::Invalid(format!("Участников от {min} до {max}")));
+        }
+        let admins: Vec<String> = if is_owner && !p["admin_ids"].is_null() {
+            ids(&p["admin_ids"]).into_iter().filter(|a| members.contains(a) && *a != owner).collect()
+        } else {
+            prev_state.admins.iter().filter(|a| members.contains(*a)).cloned().collect()
+        };
+        if !is_owner {
+            for m in &prev_state.members {
+                if !members.contains(m) && prev_state.admins.contains(m) {
+                    return Err(Error::Invalid("Админа может удалить только владелец".into()));
+                }
+            }
+        }
+        let st = GroupState {
+            group_id: gid.to_string(),
+            revision: prev + 1,
+            prev_hash: keys::sha256(&prev_blob),
+            owner_id: owner,
+            members: members.iter().cloned().collect(),
+            signer_id: me.clone(),
+            channel: prev_state.channel,
+            admins: admins.clone(),
+        };
         let blob = st.encode()?;
         let sig = keys::sign_blob(&account, &blob)?;
         let c = self.authed(
             "POST",
             &format!("/v1/conversations/{gid}/membership"),
-            Some(&json!({"prev_revision": prev.to_string(), "members": members, "state": {"revision": (prev + 1).to_string(), "blob": b64(&blob), "signature": b64(&sig)}})),
+            Some(&json!({"prev_revision": prev.to_string(), "members": members, "admins": admins,
+                "state": {"revision": (prev + 1).to_string(), "blob": b64(&blob), "signature": b64(&sig)}})),
         )?;
         self.apply_conversation(&c)?;
-        let title: String = self.db().conn.query_row("SELECT title FROM conversations WHERE id=?1", [gid], |r| r.get(0))?;
-        self.enqueue_control(gid, "group_update", json!({"title": title}))?;
+        // New members learn the title, description and tags from whoever added them.
+        let (title, description, tags): (String, String, String) =
+            self.db().conn.query_row("SELECT title, description, tags FROM conversations WHERE id=?1", [gid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let mut info = json!({"title": title, "description": description});
+        if is_owner || admins.contains(&me) {
+            info["tags"] = serde_json::from_str(&tags).unwrap_or(json!({}));
+        }
+        self.enqueue_control(gid, "group_update", info)?;
         self.emit(json!({"type": "conversations_changed"}));
         self.conversation_json(gid)
     }
 
     pub fn group_rename(self: &Arc<Self>, p: &Value) -> Result<Value> {
-        let gid = s(p, "conversation_id")?;
-        let title = s(p, "title")?.trim().to_string();
-        let (me, _) = self.me()?;
-        let owner: Option<String> = self.db().conn.query_row("SELECT owner_id FROM conversations WHERE id=?1", [gid], |r| r.get(0))?;
-        if owner.as_deref() != Some(me.as_str()) {
-            return Err(Error::Invalid("Название меняет владелец группы".into()));
-        }
-        if title.is_empty() || title.chars().count() > 64 {
-            return Err(Error::Invalid("Название группы: от 1 до 64 символов".into()));
-        }
-        self.db().conn.execute("UPDATE conversations SET title=?2 WHERE id=?1", params![gid, title])?;
-        self.enqueue_control(gid, "group_update", json!({"title": title}))?;
-        self.emit(json!({"type": "conversations_changed"}));
-        self.conversation_json(gid)
+        self.group_set_info(&json!({"conversation_id": s(p, "conversation_id")?, "title": s(p, "title")?}))
     }
 
     pub fn group_leave(&self, p: &Value) -> Result<Value> {
@@ -275,7 +312,7 @@ impl Inner {
         let row = db
             .conn
             .query_row(
-                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity FROM conversations WHERE id=?1",
+                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags FROM conversations WHERE id=?1",
                 [id],
                 |r| {
                     Ok((
@@ -291,18 +328,26 @@ impl Inner {
                         r.get::<_, String>(9)?,
                         r.get::<_, String>(10)?,
                         r.get::<_, i64>(11)?,
+                        r.get::<_, String>(12)?,
+                        r.get::<_, String>(13)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| Error::Invalid("Беседа не найдена".into()))?;
-        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity) = row;
+        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags) = row;
+        drop(db);
+        let rights = self.rights(&id)?;
+        let db = self.db();
+        let tags: serde_json::Map<String, Value> = serde_json::from_str(&tags).unwrap_or_default();
+        let role_of = |u: &str| if owner.as_deref() == Some(u) { "owner" } else if rights.admins.iter().any(|a| a == u) { "admin" } else { "member" };
         let member_ids: Vec<String> = serde_json::from_str(&members)?;
         let mut members_out = Vec::new();
         let mut peer_verified = false;
         for m in &member_ids {
             if *m == me {
-                members_out.push(json!({"user_id": m, "display_name": "Вы", "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true}));
+                members_out.push(json!({"user_id": m, "display_name": "Вы", "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true,
+                    "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
                 continue;
             }
             let c = db
@@ -315,11 +360,14 @@ impl Inner {
                 if Some(m) == peer.as_ref() {
                     peer_verified = v == 1;
                 }
-                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false}));
+                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false,
+                    "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
             }
         }
         let display = if kind == "direct" {
             members_out.iter().find(|m| m["me"] == false).and_then(|m| m["display_name"].as_str()).unwrap_or("Диалог").to_string()
+        } else if title.is_empty() && kind == "channel" {
+            "Канал".to_string()
         } else if title.is_empty() {
             "Группа".to_string()
         } else if kind == "system" {
@@ -336,6 +384,7 @@ impl Inner {
         } else {
             None
         };
+        let active = kind != "system" && changed.is_empty() && left == 0 && archived == 0;
         Ok(json!({
             "id": id,
             "kind": kind,
@@ -353,7 +402,22 @@ impl Inner {
             "last_activity": activity,
             "key_changed_users": changed,
             "peer_verified": peer_verified,
-            "can_send": kind != "system" && changed.is_empty() && left == 0 && archived == 0,
+            "can_send": active && rights.can_post(&me),
+            "can_post": rights.can_post(&me),
+            "can_media": active && rights.can_media(&me),
+            "can_polls": active && rights.can_polls(&me),
+            "can_edit_info": rights.can_info(&me),
+            "role": role_of(&me),
+            "is_admin": rights.is_admin(&me),
+            "admins": rights.admins,
+            "settings": {
+                "members_can_send": rights.settings["members_can_send"].as_bool().unwrap_or(true),
+                "members_can_media": rights.settings["members_can_media"].as_bool().unwrap_or(true),
+                "members_can_polls": rights.settings["members_can_polls"].as_bool().unwrap_or(true),
+                "members_can_info": rights.settings["members_can_info"].as_bool().unwrap_or(false),
+            },
+            "description": description,
+            "tags": tags,
             "notice": notice,
         }))
     }
@@ -387,4 +451,9 @@ impl Inner {
         self.db().conn.execute("UPDATE conversations SET draft=?2 WHERE id=?1", params![s(p, "conversation_id")?, text])?;
         Ok(Value::Null)
     }
+}
+
+/// A JSON array of ids as a set.
+fn ids(v: &Value) -> BTreeSet<String> {
+    v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
 }

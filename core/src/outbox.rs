@@ -21,7 +21,7 @@ use crate::engine::{Inner, s};
 use crate::error::{Error, Result, crypto};
 use crate::files;
 use crate::keys::{b64, unb64};
-use crate::store::{SignalStore, kv_get_str, now_ms};
+use crate::store::{SignalStore, now_ms};
 
 pub const MAX_TEXT: usize = 4096;
 const PAUSED: i64 = i64::MAX;
@@ -71,6 +71,9 @@ pub struct Payload {
     pub receipt: Option<Receipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<Value>,
+    /// A poll: {options, multiple, anonymous}; the question is `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -91,13 +94,13 @@ fn pad(mut b: Vec<u8>) -> Vec<u8> {
 }
 
 impl Inner {
-    fn new_payload(&self, conv: &str, kind: &str) -> Result<Payload> {
+    pub(crate) fn new_payload(&self, conv: &str, kind: &str) -> Result<Payload> {
         let (me, dev) = self.me()?;
         let rev: String = self.db().conn.query_row("SELECT revision FROM conversations WHERE id=?1", [conv], |r| r.get(0)).optional()?.ok_or_else(|| Error::Invalid("Беседа не найдена".into()))?;
         Ok(Payload { v: 1, kind: kind.into(), cid: conv.into(), mid: Uuid::new_v4().to_string(), sender: me, sdev: dev, rev, ts: now_ms(), ..Default::default() })
     }
 
-    fn check_can_send(&self, conv: &str) -> Result<()> {
+    pub(crate) fn check_can_send(&self, conv: &str) -> Result<()> {
         let c = self.conversation_json(conv)?;
         if !c["key_changed_users"].as_array().map(|a| a.is_empty()).unwrap_or(true) {
             return Err(Error::KeyChanged("Ключ собеседника изменился. Сверьте код перед продолжением".into()));
@@ -111,17 +114,20 @@ impl Inner {
         if c["kind"] == "system" {
             return Err(Error::Invalid("В этот чат нельзя писать".into()));
         }
+        if c["can_post"] == false {
+            return Err(Error::Invalid(if c["kind"] == "channel" { "Публикуют в канале только владелец и админы" } else { "Писать в группу могут только админы" }.into()));
+        }
         Ok(())
     }
 
     /// Stores a visible message and its outbox entry in one transaction.
-    fn enqueue(&self, p: &Payload, visible: bool, attachment: Option<&Path>, preview: &str) -> Result<()> {
+    pub(crate) fn enqueue(&self, p: &Payload, visible: bool, attachment: Option<&Path>, preview: &str) -> Result<()> {
         let mut db = self.db();
         let tx = db.conn.transaction()?;
         if visible {
             tx.execute(
-                "INSERT INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, sent_at)
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, 'queued', ?9)",
+                "INSERT INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, sent_at, poll)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, 'queued', ?9, ?10)",
                 params![
                     p.mid,
                     p.cid,
@@ -131,7 +137,8 @@ impl Inner {
                     p.text.clone().unwrap_or_default(),
                     p.reply_to,
                     p.file.as_ref().map(|f| serde_json::to_string(f)).transpose()?,
-                    p.ts
+                    p.ts,
+                    p.poll.as_ref().map(|v| v.to_string()),
                 ],
             )?;
             tx.execute(
@@ -188,6 +195,9 @@ impl Inner {
         let conv = s(p, "conversation_id")?;
         let src = PathBuf::from(s(p, "path")?);
         self.check_can_send(conv)?;
+        if self.conversation_json(conv)?["can_media"] == false {
+            return Err(Error::Invalid("Отправлять файлы здесь могут только админы".into()));
+        }
         let name = files::safe_name(p["name"].as_str().map(str::to_string).unwrap_or_else(|| src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).as_str());
         let mut pl = self.new_payload(conv, "file")?;
         let enc_path = self.data_dir.join("outgoing").join(format!("{}.enc", pl.mid));
@@ -345,7 +355,14 @@ impl Inner {
         // Membership changes arrive as events and the server rejects a stale recipient
         // set (send_one then refetches), so the cached list is used when there is one.
         let known: String = self.db().conn.query_row("SELECT recipients FROM conversations WHERE id=?1", [conv], |r| r.get(0))?;
-        if known == "[]" || known.is_empty() {
+        let cached: Vec<Value> = serde_json::from_str(&known).unwrap_or_default();
+        // A cached device that left its owner's verified roster (revoked, account recovered) means the list is stale.
+        let stale = cached.is_empty()
+            || cached.iter().any(|r| {
+                let d = r["device_id"].as_str().unwrap_or_default();
+                !self.db().conn.query_row("SELECT EXISTS(SELECT 1 FROM known_devices WHERE device_id=?1)", [d], |x| x.get::<_, bool>(0)).unwrap_or(false)
+            });
+        if stale {
             self.fetch_conversation(conv)?;
         }
         self.check_can_send(conv)?;
@@ -422,6 +439,7 @@ impl Inner {
             "recipient_set_revision": rset,
             "recipients": out,
             "attachment_ids": att_id.map(|a| vec![a.to_string()]).unwrap_or_default(),
+            "control": !matches!(payload.kind.as_str(), "text" | "file" | "poll"),
         }))?;
         tx.execute("UPDATE outbox SET request=?2 WHERE id=?1", params![payload.mid, req])?;
         drop(sessions);
@@ -501,7 +519,7 @@ impl Inner {
             let db = self.db();
             db.conn.execute("UPDATE conversations SET unread=0 WHERE id=?1", [conv])?;
             let mut st = db.conn.prepare(
-                "SELECT id FROM messages WHERE conversation_id=?1 AND outgoing=0 AND kind IN ('text','file')
+                "SELECT id FROM messages WHERE conversation_id=?1 AND outgoing=0 AND kind IN ('text','file','poll')
                  AND id NOT IN (SELECT message_id FROM receipts WHERE user_id=?2 AND kind='read')",
             )?;
             let ids: Vec<String> = st.query_map(params![conv, me], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
@@ -510,8 +528,9 @@ impl Inner {
             }
             ids
         };
-        // Read receipts are always on.
-        if !ids.is_empty() && conv != crate::sync::SYSTEM_CHAT {
+        // Read receipts are always on; channels have none (they would reach every subscriber).
+        let channel = self.rights(conv).map(|r| r.kind == "channel").unwrap_or(false);
+        if !ids.is_empty() && conv != crate::sync::SYSTEM_CHAT && !channel {
             self.enqueue_receipt(conv, "read", ids)?;
             self.wake();
         }

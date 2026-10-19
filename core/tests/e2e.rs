@@ -373,3 +373,70 @@ fn live_latency() {
         println!("доставка {i}: {:?} (статус у отправителя: {sent})", t.elapsed());
     }
 }
+
+#[test]
+fn groups_admins_tags_polls_and_channels() {
+    let Some(e) = env() else { return };
+    let users: Vec<(Client, String)> = (0..4).map(|i| {
+        let name = uname(&format!("u{i}"));
+        (register(&e, &name).0, name)
+    }).collect();
+    let [(owner, _), (admin, an), (bob, bn), (carol, cn)] = <[_; 4]>::try_from(users).ok().unwrap();
+    let id = |c: &Client, n: &str| c.call("resolve_contact", json!({"username": n}))["user_id"].as_str().unwrap().to_string();
+    let (a, b) = (id(&owner, &an), id(&owner, &bn));
+    let c = id(&admin, &cn);
+    let g = owner.call("create_group", json!({"title": "Команда", "member_ids": [a, b], "admin_ids": [a]}));
+    let gid = g["id"].as_str().unwrap().to_string();
+    assert_eq!(g["role"], "owner");
+
+    // The admin adds Carol; Bob and Carol verify the admin-signed state through the chain.
+    admin.sync();
+    let got = admin.call("group_set_members", json!({"conversation_id": gid, "member_ids": [a, b, c]}));
+    assert_eq!(got["member_count"], 4);
+    bob.sync();
+    carol.sync();
+    assert_eq!(bob.call("get_conversation", json!({"conversation_id": gid}))["member_count"], 4);
+    assert_eq!(carol.call("get_conversation", json!({"conversation_id": gid}))["role"], "member");
+    // A member cannot change the list, an admin cannot remove another admin or name one.
+    assert!(bob.try_call("group_set_members", json!({"conversation_id": gid, "member_ids": [a, b]})).is_err());
+
+    // Tags and info from an admin reach everyone; a member's attempt is refused locally.
+    owner.sync();
+    owner.call("group_set_tag", json!({"conversation_id": gid, "user_id": b, "tag": "Модератор"}));
+    owner.call("group_set_info", json!({"conversation_id": gid, "description": "Обсуждаем релиз"}));
+    owner.sync();
+    bob.sync();
+    let bc = bob.call("get_conversation", json!({"conversation_id": gid}));
+    assert_eq!(bc["description"], "Обсуждаем релиз");
+    assert_eq!(bc["tags"][&b], "Модератор");
+    assert!(bob.try_call("group_set_tag", json!({"conversation_id": gid, "user_id": b, "tag": "Босс"})).is_err());
+
+    // Polls: Bob votes, the owner sees it.
+    let poll = owner.call("send_poll", json!({"conversation_id": gid, "question": "Когда релиз?", "options": ["Сегодня", "Завтра"]}));
+    owner.sync();
+    bob.sync();
+    bob.call("vote_poll", json!({"message_id": poll["id"], "choices": [1]}));
+    bob.sync();
+    owner.sync();
+    let p = owner.messages(&gid).into_iter().find(|m| m["id"] == poll["id"]).unwrap();
+    assert_eq!(p["poll"]["options"][1]["votes"], 1, "{p}");
+
+    // Only admins post when the owner closes the group for members.
+    owner.call("group_set_settings", json!({"conversation_id": gid, "members_can_send": false}));
+    bob.sync();
+    assert_eq!(bob.call("get_conversation", json!({"conversation_id": gid}))["can_send"], false);
+    assert!(bob.try_call("send_text", json!({"conversation_id": gid, "text": "можно?"})).is_err());
+
+    // Channel: subscribers read, only the owner posts, posts are signed by the channel.
+    let ch = owner.call("create_group", json!({"title": "Новости", "kind": "channel", "member_ids": [b]}));
+    let chid = ch["id"].as_str().unwrap().to_string();
+    owner.call("send_text", json!({"conversation_id": chid, "text": "Первый пост"}));
+    owner.sync();
+    bob.sync();
+    let bch = bob.call("get_conversation", json!({"conversation_id": chid}));
+    assert_eq!(bch["kind"], "channel");
+    assert_eq!(bch["can_send"], false);
+    let posts = bob.messages(&chid);
+    assert_eq!(posts.last().unwrap()["text"], "Первый пост");
+    assert_eq!(posts.last().unwrap()["sender_name"], "Новости");
+}
