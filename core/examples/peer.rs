@@ -1,6 +1,6 @@
 //! Scripted second participant for manual client checks.
 //!
-//!   cargo run --release --example peer -- <dir> register <server> <invite> <username>
+//!   cargo run --release --example peer -- <dir> register <server> <username>
 //!   cargo run --release --example peer -- <dir> send <username> <text>
 //!   cargo run --release --example peer -- <dir> expect <username> <text>
 //!   cargo run --release --example peer -- <dir> file <username> <path>
@@ -47,7 +47,7 @@ fn main() {
     let c = open(&dir);
     match a[2].as_str() {
         "register" => {
-            call(&c, "register", json!({"server": a[3], "invite": a[4], "username": a[5], "password": "peer-test-passphrase", "device_name": "peer", "platform": "windows"}));
+            call(&c, "register", json!({"server": a[3], "username": a[4], "password": "peer-test-passphrase", "device_name": "peer", "platform": "windows"}));
             println!("registered");
         }
         "send" => {

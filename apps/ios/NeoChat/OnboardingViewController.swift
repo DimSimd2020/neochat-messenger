@@ -1,6 +1,6 @@
 import UIKit
 
-/// Sign in, invite registration and recovery. On a phone without keys "Войти" links it
+/// Sign in, registration and recovery. On a phone without keys "Войти" links it
 /// to the account and waits for approval on the primary device.
 final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private enum Mode { case login, register, recover }
@@ -18,7 +18,6 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private let hint = label("", 15, color: Theme.muted)
     private let username = Field("Имя пользователя")
     private let password = Field("Пароль", secure: true)
-    private let invite = Field("Код приглашения")
     private let code = Field("Код восстановления")
     private let error = label("", 14, color: Theme.warning)
     private let submit = PillButton("Войти")
@@ -78,9 +77,9 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func showForm() {
         reset()
         setSecure(false)
-        for v in [heading, hint, username, password, invite, code, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
+        for v in [heading, hint, username, password, code, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
         stack.setCustomSpacing(18, after: error)
-        for f in [username, password, invite, code] { f.delegate = self }
+        for f in [username, password, code] { f.delegate = self }
         username.textContentType = .username
         submit.addTarget(self, action: #selector(onSubmit), for: .touchUpInside)
         switchMode.addTarget(self, action: #selector(onSwitch), for: .touchUpInside)
@@ -90,14 +89,13 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
 
     private func setMode(_ m: Mode) {
         mode = m
-        invite.isHidden = m != .register
         code.isHidden = m != .recover
         password.placeholder = m == .recover ? "Новый пароль" : "Пароль"
         password.accessibilityLabel = password.placeholder
         password.textContentType = m == .login ? .password : .newPassword
         switch m {
         case .login: set("Вход", "", "Войти")
-        case .register: set("Регистрация", "Нужен код приглашения. Пароль — не меньше 8 символов.", "Создать аккаунт")
+        case .register: set("Регистрация", "Пароль — не меньше 8 символов.", "Создать аккаунт")
         case .recover: set("Восстановление доступа", "Остальные устройства будут отключены. Переписка с них не переносится.", "Восстановить")
         }
         switchMode.setTitle(m == .login ? "Создать аккаунт" : "Уже есть аккаунт? Войти", for: .normal)
@@ -122,7 +120,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     @objc private func onRecover() { if !busy { setMode(.recover) } }
 
     func textFieldShouldReturn(_ f: UITextField) -> Bool {
-        let order = [username, password, invite, code].filter { !$0.isHidden }
+        let order = [username, password, code].filter { !$0.isHidden }
         if let i = order.firstIndex(where: { $0 === f }), i + 1 < order.count { order[i + 1].becomeFirstResponder() } else { onSubmit() }
         return true
     }
@@ -149,11 +147,8 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
             method = linking ? "link_start" : "login"
             p["password"] = pass
         case .register:
-            let inv = (invite.text ?? "").trimmingCharacters(in: .whitespaces)
-            if inv.isEmpty { return showError("Введите код приглашения") }
             method = "register"
             p["password"] = pass
-            p["invite"] = inv
         case .recover:
             let c = (code.text ?? "").trimmingCharacters(in: .whitespaces)
             if c.isEmpty { return showError("Введите код восстановления") }

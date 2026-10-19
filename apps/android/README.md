@@ -44,7 +44,7 @@ adb shell am start -n app.neochat/.ui.MainActivity
 
 ```bash
 cd core && cargo build --release --example peer
-target/release/examples/peer <dir> register https://r1270286.s2566.vm.mydomain.zone:8443 <invite> boris_test
+target/release/examples/peer <dir> register https://r1270286.s2566.vm.mydomain.zone:8443 boris_test
 target/release/examples/peer <dir> send <username> "Привет"
 target/release/examples/peer <dir> expect <username> "Ответ"
 ```

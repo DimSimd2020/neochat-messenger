@@ -20,7 +20,7 @@ import app.neochat.core.CoreClient
 import org.json.JSONObject
 
 /**
- * Sign in, invite registration and recovery. On a phone without keys "Войти" links it
+ * Sign in, registration and recovery. On a phone without keys "Войти" links it
  * to the account and waits for approval on the primary device.
  */
 class OnboardingScreen(private val act: MainActivity, status: JSONObject, private val done: () -> Unit) : Screen {
@@ -38,7 +38,6 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private val hint = ctx.label("", 14.5f, 400, Theme.Role.MUTED)
     private var server = DEFAULT_SERVER
     private val hasKeys = status.optBoolean("has_device_keys")
-    private val invite = FloatingField(ctx, "Код приглашения")
     private val username = FloatingField(ctx, "Имя пользователя")
     private val password = FloatingField(ctx, "Пароль", password = true)
     private val code = FloatingField(ctx, "Код восстановления")
@@ -92,7 +91,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         form.orientation = LinearLayout.VERTICAL
         form.addView(heading, lp().apply { topMargin = dp(22) })
         form.addView(hint, lp().apply { topMargin = dp(8) })
-        for (f in listOf(username, password, invite, code)) form.addView(f, lp().apply { topMargin = dp(12) })
+        for (f in listOf(username, password, code)) form.addView(f, lp().apply { topMargin = dp(12) })
         username.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         code.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
         error.visibility = View.GONE
@@ -190,12 +189,11 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
 
     private fun setMode(m: Mode) {
         mode = m
-        invite.visibility = if (m == Mode.REGISTER) View.VISIBLE else View.GONE
         code.visibility = if (m == Mode.RECOVER) View.VISIBLE else View.GONE
         password.setLabel(if (m == Mode.RECOVER) "Новый пароль" else "Пароль")
         when (m) {
             Mode.LOGIN -> set("Вход", "", "Войти")
-            Mode.REGISTER -> set("Регистрация", "Нужен код приглашения. Пароль — не меньше 8 символов.", "Создать аккаунт")
+            Mode.REGISTER -> set("Регистрация", "Пароль — не меньше 8 символов.", "Создать аккаунт")
             Mode.RECOVER -> set("Восстановление доступа", "Остальные устройства будут отключены. Переписка с них не переносится.", "Восстановить")
         }
         switchMode.text = if (m == Mode.LOGIN) "Создать аккаунт" else "Уже есть аккаунт? Войти"
@@ -235,11 +233,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         val linking = mode == Mode.LOGIN && !hasKeys
         val method = when (mode) {
             Mode.LOGIN -> (if (linking) "link_start" else "login").also { p.put("password", pass) }
-            Mode.REGISTER -> {
-                if (invite.text.isBlank()) return showError("Введите код приглашения")
-                p.put("password", pass).put("invite", invite.text.trim())
-                "register"
-            }
+            Mode.REGISTER -> "register".also { p.put("password", pass) }
             Mode.RECOVER -> {
                 if (code.text.isBlank()) return showError("Введите код восстановления")
                 p.put("new_password", pass).put("recovery_code", code.text.trim())

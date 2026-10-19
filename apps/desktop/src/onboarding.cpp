@@ -65,9 +65,11 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     QPixmap pm = QPixmap(":/logo.png").scaled(int(36 * dpr), int(36 * dpr), Qt::KeepAspectRatio, Qt::SmoothTransformation);
     pm.setDevicePixelRatio(dpr);
     logo->setPixmap(pm);
+    brand->addStretch(1);
     brand->addWidget(logo);
     brand->addSpacing(6);
-    brand->addWidget(new ui::Label(QStringLiteral("NeoChat"), 24, QFont::Bold), 1);
+    brand->addWidget(new ui::Label(QStringLiteral("NeoChat"), 24, QFont::Bold));
+    brand->addStretch(1);
     lay->addLayout(brand);
 
     m_pages = new QStackedWidget;
@@ -87,16 +89,17 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_heading = new ui::Label({}, 21, QFont::Bold);
     m_hint = new ui::Label({}, 13.5, 400, ui::Label::Muted);
     m_hint->setWordWrap(true);
+    m_heading->setAlignment(Qt::AlignHCenter);
+    m_hint->setAlignment(Qt::AlignHCenter);
     fl->addWidget(m_heading);
     fl->addWidget(m_hint);
     // The server address is built in; NEOCHAT_SERVER overrides it for local test servers.
     m_serverUrl = qEnvironmentVariable("NEOCHAT_SERVER", QString::fromLatin1(kDefaultServer));
-    m_invite = new ui::TextField(QStringLiteral("Код приглашения"));
     m_username = new ui::TextField(QStringLiteral("Имя пользователя"));
     m_password = new ui::TextField(QStringLiteral("Пароль"));
     m_password->setPassword(true);
     m_code = new ui::TextField(QStringLiteral("Код восстановления"));
-    for (auto *f : {m_username, m_password, m_invite, m_code}) {
+    for (auto *f : {m_username, m_password, m_code}) {
         fl->addWidget(f);
         connect(f->edit(), &QLineEdit::returnPressed, this, &Onboarding::submit);
     }
@@ -210,7 +213,6 @@ void Onboarding::setMode(int mode)
 {
     m_mode = mode;
     m_error->hide();
-    m_invite->setVisible(mode == Register);
     m_code->setVisible(mode == Recover);
     m_password->edit()->clear();
     switch (mode) {
@@ -221,7 +223,7 @@ void Onboarding::setMode(int mode)
         break;
     case Register:
         m_heading->setText(QStringLiteral("Регистрация"));
-        m_hint->setText(QStringLiteral("Нужен код приглашения. Пароль — не меньше 8 символов."));
+        m_hint->setText(QStringLiteral("Пароль — не меньше 8 символов."));
         m_submit->setText(QStringLiteral("Создать аккаунт"));
         break;
     case Recover:
@@ -277,11 +279,8 @@ void Onboarding::submit()
         p["password"] = password;
         break;
     case Register:
-        if (m_invite->text().trimmed().isEmpty())
-            return showError(QStringLiteral("Введите код приглашения"));
         method = "register";
         p["password"] = password;
-        p["invite"] = m_invite->text().trimmed();
         break;
     case Recover:
         if (m_code->text().trimmed().isEmpty())

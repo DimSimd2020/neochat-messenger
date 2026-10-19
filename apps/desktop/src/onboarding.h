@@ -14,7 +14,7 @@ class QrView;
 }
 
 // First-run and sign-in flow. "Войти" signs in with stored keys or, on a new
-// computer, links it to the account (approved on the primary device); invite
+// computer, links it to the account (approved on the primary device);
 // registration and recovery by code are secondary links.
 class Onboarding : public QWidget {
     Q_OBJECT
@@ -45,7 +45,6 @@ private:
     ui::Label *m_hint;
     QString m_serverUrl;
     bool m_hasKeys = false;
-    ui::TextField *m_invite;
     ui::TextField *m_username;
     ui::TextField *m_password;
     ui::TextField *m_code;

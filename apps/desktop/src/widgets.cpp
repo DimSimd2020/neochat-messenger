@@ -509,8 +509,6 @@ void TextField::paintEvent(QPaintEvent *)
     p.setPen(m_edit->hasFocus() ? c.accent : c.muted);
     const qreal y = (height() - QFontMetricsF(p.font()).height()) / 2 * (1 - t) + 7 * t;
     p.drawText(QRectF(15, y, width() - 30, QFontMetricsF(p.font()).height()), Qt::AlignLeft | Qt::AlignVCenter, m_label);
-    // The line edit stays hidden below the label until the label has moved up.
-    m_edit->setVisible(t > 0.01 || m_edit->hasFocus());
 }
 
 // ---- ThemeSlider ----

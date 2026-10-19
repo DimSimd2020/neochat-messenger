@@ -327,7 +327,6 @@ impl Inner {
         };
         let (blob, sig) = roster.sign(&account)?;
         let body = json!({
-            "invite": s(p, "invite")?.trim(),
             "username": username,
             "password": password,
             "account_identity_key": b64(&account.identity_key().serialize()),

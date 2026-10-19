@@ -1,6 +1,6 @@
 // UI scenario test. Drives the real widgets (offscreen) against a local server and
 // a second, headless neocore client acting as the peer. Run via scripts/uitest.sh,
-// which passes NEOCHAT_E2E_SERVER, NEOCHAT_E2E_INVITES and NEOCHAT_SHOTS.
+// which passes NEOCHAT_E2E_SERVER and NEOCHAT_SHOTS.
 
 #include "chatlist.h"
 #include "composer.h"
@@ -117,7 +117,6 @@ private:
         QTest::qWait(Theme::reducedMotion() ? 50 : 500);
         m_window->grab().save(m_shots + "/" + name + ".png");
     }
-    QString takeInvite() { return m_invites.takeLast(); }
     int messageCount(MessageView *v)
     {
         int n = 0;
@@ -135,7 +134,6 @@ private:
 
     QTemporaryDir m_dir;
     QString m_server, m_shots;
-    QStringList m_invites;
     MainWindow *m_window = nullptr;
     Peer *m_alice = nullptr;
     QString m_aliceName, m_aliceCode, m_bobName, m_conv;
@@ -150,10 +148,9 @@ void UiTest::initTestCase()
     m_server = qEnvironmentVariable("NEOCHAT_E2E_SERVER");
     // The onboarding form has no server field; point it at the test server.
     qputenv("NEOCHAT_SERVER", m_server.toUtf8());
-    m_invites = qEnvironmentVariable("NEOCHAT_E2E_INVITES").split(',', Qt::SkipEmptyParts);
     m_shots = qEnvironmentVariable("NEOCHAT_SHOTS", m_dir.path() + "/shots");
-    if (m_server.isEmpty() || m_invites.size() < 3)
-        QSKIP("NEOCHAT_E2E_SERVER and NEOCHAT_E2E_INVITES are required");
+    if (m_server.isEmpty())
+        QSKIP("NEOCHAT_E2E_SERVER is required");
     QDir().mkpath(m_shots);
     QSettings().clear();
     Theme::instance()->init();
@@ -170,12 +167,15 @@ void UiTest::initTestCase()
 void UiTest::registerAccount()
 {
     QTRY_VERIFY(field("Пароль"));
-    QTRY_VERIFY(!field("Код приглашения"));
+    // A click anywhere on an empty field, label area included, must focus it.
+    QTest::mouseClick(field("Имя пользователя"), Qt::LeftButton, {}, QPoint(30, 12));
+    QTRY_VERIFY(field("Имя пользователя")->edit()->hasFocus());
+    QTest::mouseClick(field("Пароль")->edit(), Qt::LeftButton);
+    QTRY_VERIFY(field("Пароль")->edit()->hasFocus());
     shot("01-onboarding");
     button("Создать аккаунт")->click();
-    QTRY_VERIFY(field("Код приглашения"));
+    QTRY_VERIFY(button("Уже есть аккаунт? Войти"));
     m_bobName = uname("bob");
-    field("Код приглашения")->setText(takeInvite());
     field("Имя пользователя")->setText(m_bobName);
     QTest::keyClicks(field("Пароль")->edit(), "correct horse battery");
     button("Создать аккаунт")->click();
@@ -194,7 +194,7 @@ void UiTest::addContactAndOpenChat()
 {
     m_alice = new Peer(m_dir.path() + "/alice");
     m_aliceName = uname("alice");
-    const QJsonObject reg = m_alice->call("register", {{"server", m_server}, {"invite", takeInvite()}, {"username", m_aliceName}, {"password", "correct horse battery"},
+    const QJsonObject reg = m_alice->call("register", {{"server", m_server}, {"username", m_aliceName}, {"password", "correct horse battery"},
                                                        {"device_name", "peer"}, {"platform", "android"}})
                                 .toObject();
     m_aliceCode = reg.value("recovery_code").toString();

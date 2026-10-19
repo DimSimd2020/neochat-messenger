@@ -1,7 +1,7 @@
 //! End-to-end tests against a running NeoChat server.
 //!
 //! Run through `scripts/e2e.sh`, which starts PostgreSQL, the Go server and
-//! passes NEOCHAT_E2E_SERVER and NEOCHAT_E2E_INVITES (comma-separated).
+//! passes NEOCHAT_E2E_SERVER.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -11,17 +11,15 @@ use serde_json::{Value, json};
 
 struct Env {
     server: String,
-    invites: Mutex<Vec<String>>,
 }
 
 static ENV: std::sync::OnceLock<Option<Arc<Env>>> = std::sync::OnceLock::new();
 
-/// Shared by all tests so every invite is used once.
+/// Shared by all tests.
 fn env() -> Option<Arc<Env>> {
     ENV.get_or_init(|| {
         let server = std::env::var("NEOCHAT_E2E_SERVER").ok()?;
-        let invites = std::env::var("NEOCHAT_E2E_INVITES").ok()?.split(',').map(|s| s.trim().to_string()).collect();
-        Some(Arc::new(Env { server, invites: Mutex::new(invites) }))
+        Some(Arc::new(Env { server }))
     })
     .clone()
 }
@@ -79,10 +77,9 @@ impl Client {
 
 fn register(e: &Env, name: &str) -> (Client, String) {
     let c = Client::new();
-    let invite = e.invites.lock().unwrap().pop().expect("enough invites");
     let res = c.call(
         "register",
-        json!({"server": e.server, "invite": invite, "username": name, "password": "correct horse battery", "device_name": "test", "platform": "windows"}),
+        json!({"server": e.server, "username": name, "password": "correct horse battery", "device_name": "test", "platform": "windows"}),
     );
     assert!(res["recovery_code"].as_str().unwrap().len() > 40);
     (c, res["recovery_code"].as_str().unwrap().to_string())

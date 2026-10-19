@@ -7,14 +7,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -111,21 +109,13 @@ func (c *client) do(method, path string, body any, out any) (int, map[string]any
 	return resp.StatusCode, m
 }
 
-func invite(t *testing.T, s *Server) string {
-	code := strings.ToLower(fmt.Sprintf("inv%x", rnd(6)))
-	if _, err := s.db.Exec(context.Background(), `INSERT INTO invites(code_hash) VALUES ($1)`, tokenHash(code)); err != nil {
-		t.Fatal(err)
-	}
-	return code
-}
-
 func register(t *testing.T, s *Server, ts *httptest.Server, username string) *client {
 	t.Helper()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	c := &client{t: t, base: ts.URL, username: username, authPriv: priv}
 	secret := sha256.Sum256([]byte("recovery-" + username))
 	req := registerReq{
-		Invite: invite(t, s), Username: username, Password: "correct horse battery",
+		Username: username, Password: "correct horse battery",
 		AccountIdentityKey: rnd(identityLen), RecoveryHash: secret[:],
 		Device: fakeDevice(newUUID(), pub),
 		Roster: rosterIn{Revision: "1", Blob: []byte("roster"), Signature: rnd(64)},
@@ -190,21 +180,20 @@ func direct(t *testing.T, a, b *client) *conversationOut {
 	return &conv
 }
 
-func TestInviteSingleUseAndLogin(t *testing.T) {
+func TestRegisterAndLogin(t *testing.T) {
 	s, ts := testServer(t)
-	code := invite(t, s)
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	c := &client{t: t, base: ts.URL}
 	mk := func(name string) registerReq {
 		h := sha256.Sum256([]byte(name))
-		return registerReq{Invite: code, Username: name, Password: "long enough pw", AccountIdentityKey: rnd(33), RecoveryHash: h[:],
+		return registerReq{Username: name, Password: "long enough pw", AccountIdentityKey: rnd(33), RecoveryHash: h[:],
 			Device: fakeDevice(newUUID(), pub), Roster: rosterIn{Revision: "1", Blob: []byte("r"), Signature: rnd(64)}}
 	}
 	if st, _ := c.do("POST", "/v1/accounts", mk("alice"), nil); st != 201 {
-		t.Fatalf("first use: %d", st)
+		t.Fatalf("register: %d", st)
 	}
-	if st, m := c.do("POST", "/v1/accounts", mk("bob"), nil); st != 403 || m["code"] != "invite_invalid" {
-		t.Fatalf("second use: %d %v", st, m)
+	if st, m := c.do("POST", "/v1/accounts", mk("alice"), nil); st != 409 || m["code"] != "username_taken" {
+		t.Fatalf("taken username: %d %v", st, m)
 	}
 
 	bob := register(t, s, ts, "bob")

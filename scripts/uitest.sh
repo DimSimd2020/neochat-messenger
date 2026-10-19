@@ -13,14 +13,13 @@ BIN="$DATA/neochat.exe"
 (cd server && go build -o "$BIN" ./cmd/neochat)
 export NEOCHAT_DATABASE_URL="$NEOCHAT_E2E_DATABASE_URL" NEOCHAT_DATA_DIR="$DATA/data" NEOCHAT_LISTEN="127.0.0.1:$PORT" NEOCHAT_ARGON_MEMORY_KIB=1024
 "$BIN" migrate
-INVITES=$("$BIN" invite -n 6 | paste -sd, -)
 "$BIN" serve >"$DATA/server.log" 2>&1 &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null || true; rm -rf "$DATA"' EXIT
 for _ in $(seq 50); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break; sleep 0.2; done
 
 export PATH="$(cygpath -u "$QT_DIR")/bin:$PATH" QT_QPA_PLATFORM=offscreen QT_QPA_FONTDIR="${QT_QPA_FONTDIR:-C:/Windows/Fonts}"
-NEOCHAT_E2E_SERVER="http://127.0.0.1:$PORT" NEOCHAT_E2E_INVITES="$INVITES" NEOCHAT_SHOTS="${NEOCHAT_SHOTS:-$PWD/apps/desktop/build/shots}" \
+NEOCHAT_E2E_SERVER="http://127.0.0.1:$PORT" NEOCHAT_SHOTS="${NEOCHAT_SHOTS:-$PWD/apps/desktop/build/shots}" \
   apps/desktop/build/neochat_uitest.exe -o "$DATA/uitest.txt,txt" "$@" && rc=0 || rc=$?
 cat "$DATA/uitest.txt"
 exit $rc

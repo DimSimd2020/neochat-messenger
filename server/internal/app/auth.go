@@ -238,7 +238,6 @@ func insertPrekeys(ctx context.Context, tx pgx.Tx, deviceID string, ec, kyber []
 // ---- handlers ----
 
 type registerReq struct {
-	Invite             string   `json:"invite"`
 	Username           string   `json:"username"`
 	Password           string   `json:"password"`
 	AccountIdentityKey []byte   `json:"account_identity_key"`
@@ -287,15 +286,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	userID := newUUID()
 	var out tokensOut
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-		var used *time.Time
-		err := tx.QueryRow(r.Context(), `SELECT used_at FROM invites WHERE code_hash=$1 FOR UPDATE`, tokenHash(strings.TrimSpace(req.Invite))).Scan(&used)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && used != nil) {
-			return errf(403, "invite_invalid", "Приглашение недействительно или уже использовано")
-		}
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash)
+		_, err := tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash)
 			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7)`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash)
 		if isUniqueViolation(err) {
 			return errf(409, "username_taken", "Это имя пользователя уже занято")
@@ -304,9 +295,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if err := insertDevice(r.Context(), tx, userID, &req.Device, true); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(r.Context(), `UPDATE invites SET used_at=now(), used_by=$2 WHERE code_hash=$1`, tokenHash(strings.TrimSpace(req.Invite)), userID); err != nil {
 			return err
 		}
 		out, _, err = newSession(r.Context(), tx, userID, req.Device.DeviceID, "")

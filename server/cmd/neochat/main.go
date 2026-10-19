@@ -2,15 +2,10 @@
 //
 //	neochat serve           run the HTTP API (migrates first)
 //	neochat migrate         apply database migrations
-//	neochat invite [-n N]   print N new one-time invite codes
 package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base32"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -30,7 +24,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: neochat serve|migrate|invite [-n N]")
+		fmt.Fprintln(os.Stderr, "usage: neochat serve|migrate")
 		os.Exit(2)
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -47,20 +41,6 @@ func main() {
 	case "migrate":
 		if err := app.Migrate(ctx, db, migrations.FS); err != nil {
 			fatal(log, "migrate", err)
-		}
-	case "invite":
-		fs := flag.NewFlagSet("invite", flag.ExitOnError)
-		n := fs.Int("n", 1, "number of invites")
-		fs.Parse(os.Args[2:])
-		for i := 0; i < *n; i++ {
-			b := make([]byte, 10)
-			rand.Read(b)
-			code := strings.ToLower(base32.StdEncoding.EncodeToString(b))
-			h := sha256.Sum256([]byte(code))
-			if _, err := db.Exec(ctx, `INSERT INTO invites(code_hash) VALUES ($1)`, h[:]); err != nil {
-				fatal(log, "invite", err)
-			}
-			fmt.Println(code)
 		}
 	case "serve":
 		if err := app.Migrate(ctx, db, migrations.FS); err != nil {
