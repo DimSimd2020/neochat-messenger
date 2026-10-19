@@ -5,13 +5,13 @@
 #include "widgets.h"
 
 #include <QApplication>
-#include <QButtonGroup>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QKeyEvent>
 #include <QPainter>
+#include <QRegularExpression>
 #include <QStackedWidget>
 #include <QSysInfo>
 #include <QTimer>
@@ -20,39 +20,6 @@
 namespace {
 
 const char kDefaultServer[] = "https://r1270286.s2566.vm.mydomain.zone:8443";
-
-class ModeChip : public QAbstractButton {
-public:
-    ModeChip(const QString &text, QWidget *parent) : QAbstractButton(parent)
-    {
-        setText(text);
-        setCheckable(true);
-        setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
-        setAccessibleName(text);
-        setMinimumHeight(36);
-        connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
-    }
-    QSize sizeHint() const override { return {QFontMetrics(Theme::instance()->font(13.5, QFont::DemiBold)).horizontalAdvance(text()) + 24, 36}; }
-
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        const Palette &c = Theme::p();
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing);
-        if (isChecked()) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(c.selected);
-            p.drawRoundedRect(rect(), 10, 10);
-        }
-        p.setFont(Theme::instance()->font(13.5, QFont::DemiBold));
-        p.setPen(isChecked() ? c.text : c.muted);
-        p.drawText(rect(), Qt::AlignCenter, text());
-        if (hasFocus())
-            ui::paintFocusRing(&p, rect(), 10);
-    }
-};
 
 class CardFrame : public QWidget {
 public:
@@ -105,40 +72,31 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
 
     m_pages = new QStackedWidget;
     lay->addWidget(m_pages);
+    // Size the card to the visible page, not the tallest one.
+    connect(m_pages, &QStackedWidget::currentChanged, this, [this](int index) {
+        for (int i = 0; i < m_pages->count(); ++i)
+            m_pages->widget(i)->setSizePolicy(QSizePolicy::Preferred, i == index ? QSizePolicy::Preferred : QSizePolicy::Ignored);
+        m_pages->adjustSize();
+    });
 
     // ---- form page ----
     auto *form = new QWidget;
     auto *fl = new QVBoxLayout(form);
     fl->setContentsMargins(0, 4, 0, 0);
     fl->setSpacing(10);
-    m_modeBar = new QWidget;
-    auto *ml = new QHBoxLayout(m_modeBar);
-    ml->setContentsMargins(0, 0, 0, 0);
-    ml->setSpacing(4);
-    m_modes = new QButtonGroup(this);
-    const QStringList names{QStringLiteral("Вход"), QStringLiteral("Новый аккаунт"), QStringLiteral("Привязать"), QStringLiteral("Восстановить")};
-    for (int i = 0; i < names.size(); ++i) {
-        auto *chip = new ModeChip(names[i], m_modeBar);
-        m_modes->addButton(chip, i);
-        ml->addWidget(chip);
-        if (i == Login)
-            m_loginChip = chip;
-    }
-    ml->addStretch();
-    fl->addWidget(m_modeBar);
-    m_heading = new ui::Label({}, 17, QFont::DemiBold);
+    m_heading = new ui::Label({}, 21, QFont::Bold);
     m_hint = new ui::Label({}, 13.5, 400, ui::Label::Muted);
     m_hint->setWordWrap(true);
     fl->addWidget(m_heading);
     fl->addWidget(m_hint);
-    m_server = new ui::TextField(QStringLiteral("Сервер"));
-    m_server->setText(QString::fromLatin1(kDefaultServer));
+    // The server address is built in; NEOCHAT_SERVER overrides it for local test servers.
+    m_serverUrl = qEnvironmentVariable("NEOCHAT_SERVER", QString::fromLatin1(kDefaultServer));
     m_invite = new ui::TextField(QStringLiteral("Код приглашения"));
     m_username = new ui::TextField(QStringLiteral("Username"));
-    m_password = new ui::TextField(QStringLiteral("Парольная фраза"));
+    m_password = new ui::TextField(QStringLiteral("Пароль"));
     m_password->setPassword(true);
     m_code = new ui::TextField(QStringLiteral("Код восстановления"));
-    for (auto *f : {m_server, m_invite, m_username, m_password, m_code}) {
+    for (auto *f : {m_username, m_password, m_invite, m_code}) {
         fl->addWidget(f);
         connect(f->edit(), &QLineEdit::returnPressed, this, &Onboarding::submit);
     }
@@ -150,7 +108,12 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     fl->addSpacing(4);
     fl->addWidget(m_submit);
     connect(m_submit, &QAbstractButton::clicked, this, &Onboarding::submit);
-    connect(m_modes, &QButtonGroup::idClicked, this, &Onboarding::setMode);
+    m_switch = new ui::Button({}, ui::Button::Flat);
+    fl->addWidget(m_switch);
+    connect(m_switch, &QAbstractButton::clicked, this, [this] { setMode(m_mode == Login ? Register : Login); });
+    m_recover = new ui::Button(QStringLiteral("Восстановить доступ"), ui::Button::Flat);
+    fl->addWidget(m_recover);
+    connect(m_recover, &QAbstractButton::clicked, this, [this] { setMode(Recover); });
     m_pages->addWidget(form);
 
     // ---- recovery code page ----
@@ -197,7 +160,7 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     ll->setContentsMargins(0, 4, 0, 0);
     ll->setSpacing(12);
     ll->addWidget(new ui::Label(QStringLiteral("Подтвердите на основном устройстве"), 17, QFont::DemiBold));
-    auto *linkHint = new ui::Label(QStringLiteral("Откройте NeoChat на основном устройстве: Устройства → Привязать новое. "
+    auto *linkHint = new ui::Label(QStringLiteral("Это новый компьютер для вашего аккаунта. Откройте NeoChat на основном устройстве: Устройства → Привязать новое. "
                                                   "Отсканируйте QR-код или вставьте скопированный текст кода."),
                                    13.5, 400, ui::Label::Muted);
     linkHint->setWordWrap(true);
@@ -221,6 +184,8 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_poll = new QTimer(this);
     m_poll->setInterval(2000);
     connect(m_poll, &QTimer::timeout, this, &Onboarding::pollLink);
+    for (int i = 1; i < m_pages->count(); ++i)
+        m_pages->widget(i)->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Ignored);
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
 }
 
@@ -233,19 +198,17 @@ void Onboarding::paintEvent(QPaintEvent *)
 void Onboarding::start(const QJsonObject &status)
 {
     m_pages->setCurrentIndex(0);
-    const bool canLogin = status.value("has_device_keys").toBool();
-    m_loginChip->setVisible(canLogin);
+    m_hasKeys = status.value("has_device_keys").toBool();
     if (!status.value("server").toString().isEmpty())
-        m_server->setText(status.value("server").toString());
+        m_serverUrl = status.value("server").toString();
     if (!status.value("username").toString().isEmpty())
         m_username->setText(status.value("username").toString());
-    setMode(canLogin ? Login : Register);
+    setMode(Login);
 }
 
 void Onboarding::setMode(int mode)
 {
     m_mode = mode;
-    m_modes->button(mode)->setChecked(true);
     m_error->hide();
     m_invite->setVisible(mode == Register);
     m_code->setVisible(mode == Recover);
@@ -253,26 +216,25 @@ void Onboarding::setMode(int mode)
     switch (mode) {
     case Login:
         m_heading->setText(QStringLiteral("Вход"));
-        m_hint->setText(QStringLiteral("Сессия этого компьютера закончилась. Ключи шифрования остались на устройстве; введите парольную фразу."));
+        m_hint->clear();
         m_submit->setText(QStringLiteral("Войти"));
         break;
     case Register:
-        m_heading->setText(QStringLiteral("Новый аккаунт"));
-        m_hint->setText(QStringLiteral("Регистрация по приглашению. Парольная фраза — не меньше 10 символов."));
+        m_heading->setText(QStringLiteral("Регистрация"));
+        m_hint->setText(QStringLiteral("Нужен код приглашения. Пароль — не меньше 8 символов."));
         m_submit->setText(QStringLiteral("Создать аккаунт"));
         break;
-    case Link:
-        m_heading->setText(QStringLiteral("Привязать этот компьютер"));
-        m_hint->setText(QStringLiteral("Аккаунт уже есть на другом устройстве. Этот компьютер получит свои ключи; прошлая история на него не переносится."));
-        m_submit->setText(QStringLiteral("Получить код привязки"));
-        break;
     case Recover:
-        m_heading->setText(QStringLiteral("Восстановление"));
-        m_hint->setText(QStringLiteral("Все прежние устройства будут отключены, контакты увидят смену ключа. История не восстанавливается."));
-        m_submit->setText(QStringLiteral("Восстановить доступ"));
+        m_heading->setText(QStringLiteral("Восстановление доступа"));
+        m_hint->setText(QStringLiteral("Остальные устройства будут отключены. Переписка с них не переносится."));
+        m_submit->setText(QStringLiteral("Восстановить"));
         break;
     }
-    m_password->setLabel(mode == Recover ? QStringLiteral("Новая парольная фраза") : QStringLiteral("Парольная фраза"));
+    m_hint->setVisible(!m_hint->text().isEmpty());
+    m_switch->setText(mode == Login ? QStringLiteral("Создать аккаунт") : QStringLiteral("Уже есть аккаунт? Войти"));
+    m_switch->setAccessibleName(m_switch->text());
+    m_recover->setVisible(mode == Login);
+    m_password->setLabel(mode == Recover ? QStringLiteral("Новый пароль") : QStringLiteral("Пароль"));
 }
 
 void Onboarding::showError(const QString &text)
@@ -285,7 +247,8 @@ void Onboarding::setBusy(bool busy)
 {
     m_busy = busy;
     m_submit->setEnabled(!busy);
-    m_modeBar->setEnabled(!busy);
+    m_switch->setEnabled(!busy);
+    m_recover->setEnabled(!busy);
     if (busy)
         m_submit->setText(QStringLiteral("Подождите…"));
     else
@@ -296,20 +259,21 @@ void Onboarding::submit()
 {
     if (m_busy)
         return;
-    const QString server = m_server->text().trimmed();
-    const QString username = m_username->text().trimmed();
+    const QString username = m_username->text().trimmed().remove(QRegularExpression("^@"));
     const QString password = m_password->text();
-    if (!server.startsWith("https://") && !server.startsWith("http://127.0.0.1") && !server.startsWith("http://localhost"))
-        return showError(QStringLiteral("Адрес сервера должен начинаться с https://"));
     if (username.isEmpty())
         return showError(QStringLiteral("Введите username"));
     if (password.isEmpty())
-        return showError(QStringLiteral("Введите парольную фразу"));
-    QJsonObject p{{"server", server}, {"username", username}, {"device_name", deviceName()}, {"platform", "windows"}};
+        return showError(QStringLiteral("Введите пароль"));
+    if (m_mode != Login && password.size() < 8)
+        return showError(QStringLiteral("Пароль — не меньше 8 символов"));
+    QJsonObject p{{"server", m_serverUrl}, {"username", username}, {"device_name", deviceName()}, {"platform", "windows"}};
+    // Without keys on this computer signing in means linking it to the account.
+    const bool linking = m_mode == Login && !m_hasKeys;
     QString method;
     switch (m_mode) {
     case Login:
-        method = "login";
+        method = linking ? "link_start" : "login";
         p["password"] = password;
         break;
     case Register:
@@ -318,10 +282,6 @@ void Onboarding::submit()
         method = "register";
         p["password"] = password;
         p["invite"] = m_invite->text().trimmed();
-        break;
-    case Link:
-        method = "link_start";
-        p["password"] = password;
         break;
     case Recover:
         if (m_code->text().trimmed().isEmpty())
@@ -334,7 +294,7 @@ void Onboarding::submit()
     showError({});
     setBusy(true);
     const int mode = m_mode;
-    Core::instance()->call(method, p, this, [this, mode](const QJsonValue &v, const CoreError &e) {
+    Core::instance()->call(method, p, this, [this, mode, linking](const QJsonValue &v, const CoreError &e) {
         setBusy(false);
         if (!e.ok())
             return showError(e.message);
@@ -342,7 +302,7 @@ void Onboarding::submit()
         m_code->edit()->clear();
         if (mode == Register || mode == Recover)
             showRecoveryCode(v.toObject().value("recovery_code").toString());
-        else if (mode == Link)
+        else if (linking)
             showLinkCode(v.toObject());
         else
             emit finished();

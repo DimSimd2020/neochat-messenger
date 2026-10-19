@@ -1,0 +1,64 @@
+name: iOS
+
+on:
+  push:
+    paths: ["core/**", "apps/ios/**", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: brew install protobuf xcodegen
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-ios
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ios-core-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Core (aarch64-apple-ios)
+        working-directory: core
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        run: cargo build --release --lib --target aarch64-apple-ios
+
+      - name: Core tests (host)
+        working-directory: core
+        run: cargo test --lib
+
+      - name: Xcode project
+        working-directory: apps/ios
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        working-directory: apps/ios
+        run: |
+          xcodebuild -project NeoChat.xcodeproj -scheme NeoChat -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -n 200
+
+      - name: Package IPA
+        working-directory: apps/ios
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/NeoChat.app Payload/
+          zip -qry NeoChat-unsigned.ipa Payload
+          ls -la NeoChat-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NeoChat-unsigned-ipa
+          path: apps/ios/NeoChat-unsigned.ipa
+          retention-days: 30

@@ -143,6 +143,8 @@ private:
 void UiTest::initTestCase()
 {
     m_server = qEnvironmentVariable("NEOCHAT_E2E_SERVER");
+    // The onboarding form has no server field; point it at the test server.
+    qputenv("NEOCHAT_SERVER", m_server.toUtf8());
     m_invites = qEnvironmentVariable("NEOCHAT_E2E_INVITES").split(',', Qt::SkipEmptyParts);
     m_shots = qEnvironmentVariable("NEOCHAT_SHOTS", m_dir.path() + "/shots");
     if (m_server.isEmpty() || m_invites.size() < 3)
@@ -162,13 +164,15 @@ void UiTest::initTestCase()
 
 void UiTest::registerAccount()
 {
-    QTRY_VERIFY(field("Код приглашения"));
+    QTRY_VERIFY(field("Пароль"));
+    QTRY_VERIFY(!field("Код приглашения"));
     shot("01-onboarding");
+    button("Создать аккаунт")->click();
+    QTRY_VERIFY(field("Код приглашения"));
     m_bobName = uname("bob");
-    field("Сервер")->setText(m_server);
     field("Код приглашения")->setText(takeInvite());
     field("Username")->setText(m_bobName);
-    QTest::keyClicks(field("Парольная фраза")->edit(), "correct horse battery");
+    QTest::keyClicks(field("Пароль")->edit(), "correct horse battery");
     button("Создать аккаунт")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<QCheckBox>([](QCheckBox *) { return true; }), 15000);
     shot("02-recovery-code");

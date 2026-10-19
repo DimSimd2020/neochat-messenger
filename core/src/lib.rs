@@ -16,6 +16,8 @@ mod sync;
 mod views;
 
 pub mod ffi;
+#[cfg(target_os = "android")]
+mod jni_bridge;
 
 pub use engine::Core;
 pub use error::{Error, Result};

@@ -4,7 +4,6 @@
 #include <QWidget>
 
 class QStackedWidget;
-class QButtonGroup;
 class QTimer;
 class QCheckBox;
 namespace ui {
@@ -14,9 +13,9 @@ class Label;
 class QrView;
 }
 
-// First-run and sign-in flow: new account by invite, linking this computer to
-// an existing account (QR approved on the primary device), recovery by code,
-// and password sign-in when the stored session expired.
+// First-run and sign-in flow. "Войти" signs in with stored keys or, on a new
+// computer, links it to the account (approved on the primary device); invite
+// registration and recovery by code are secondary links.
 class Onboarding : public QWidget {
     Q_OBJECT
 public:
@@ -32,7 +31,7 @@ protected:
     void paintEvent(QPaintEvent *) override;
 
 private:
-    enum Mode { Login, Register, Link, Recover };
+    enum Mode { Login, Register, Recover };
     void setMode(int mode);
     void submit();
     void showError(const QString &text);
@@ -42,18 +41,18 @@ private:
     void pollLink();
 
     QStackedWidget *m_pages;
-    QButtonGroup *m_modes;
-    QWidget *m_modeBar;
-    QWidget *m_loginChip;
     ui::Label *m_heading;
     ui::Label *m_hint;
-    ui::TextField *m_server;
+    QString m_serverUrl;
+    bool m_hasKeys = false;
     ui::TextField *m_invite;
     ui::TextField *m_username;
     ui::TextField *m_password;
     ui::TextField *m_code;
     ui::Label *m_error;
     ui::Button *m_submit;
+    ui::Button *m_switch;
+    ui::Button *m_recover;
     // recovery code page
     ui::Label *m_recoveryCode;
     QCheckBox *m_saved;
@@ -63,6 +62,6 @@ private:
     ui::Label *m_linkState;
     QString m_linkText;
     QTimer *m_poll;
-    int m_mode = Register;
+    int m_mode = Login;
     bool m_busy = false;
 };

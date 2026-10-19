@@ -117,7 +117,7 @@ func validateRoster(r *rosterIn) (int64, error) {
 
 func validatePassword(p string) error {
 	if len(p) < 8 || len(p) > 1024 {
-		return errf(400, "weak_password", "Парольная фраза должна содержать от 8 символов")
+		return errf(400, "weak_password", "Пароль должен содержать не меньше 8 символов")
 	}
 	return nil
 }

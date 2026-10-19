@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The UI is drawn by the app; the platform theme only provides a dark window
+         behind the first frame and transparent system bars. -->
+    <style name="Theme.NeoChat" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorAccent">#4169CF</item>
+    </style>
+    <color name="window">#101A2E</color>
+</resources>
