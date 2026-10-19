@@ -24,7 +24,9 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: NeoChat/NeoChat-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/../../core/include
         # Link the static core explicitly: the same folder also holds a dylib.
-        OTHER_LDFLAGS: $(SRCROOT)/../../core/target/aarch64-apple-ios/release/libneocore.a
+        NEOCORE_TARGET: aarch64-apple-ios
+        "NEOCORE_TARGET[sdk=iphonesimulator*]": aarch64-apple-ios-sim
+        OTHER_LDFLAGS: $(SRCROOT)/../../core/target/$(NEOCORE_TARGET)/release/libneocore.a
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
@@ -36,3 +38,17 @@ targets:
       - sdk: BackgroundTasks.framework
       - sdk: UserNotifications.framework
       - sdk: AVFoundation.framework
+    scheme:
+      testTargets: [NeoChatUITests]
+  NeoChatUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: NeoChatUITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.neochat.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: NeoChat
+    dependencies:
+      - target: NeoChat

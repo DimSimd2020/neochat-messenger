@@ -67,3 +67,57 @@ jobs:
           name: NeoChat-unsigned-ipa
           path: apps/ios/NeoChat-unsigned.ipa
           retention-days: 30
+
+  # Runs the app on an iOS Simulator and registers a fresh account on the production server.
+  simulator:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: brew install protobuf xcodegen
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-ios-sim
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ios-sim-core-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Core (aarch64-apple-ios-sim)
+        working-directory: core
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        run: cargo build --release --lib --target aarch64-apple-ios-sim
+
+      - name: Xcode project
+        working-directory: apps/ios
+        run: xcodegen generate
+
+      - name: UI test on simulator
+        working-directory: apps/ios
+        env:
+          TEST_RUNNER_SHOTS_DIR: ${{ github.workspace }}/ios-shots
+        run: |
+          set -o pipefail
+          DEVICE=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone 1[0-9][^(]*\(([0-9A-F-]{36})\)' | grep -oE '[0-9A-F-]{36}')
+          echo "simulator $DEVICE"
+          # Ad-hoc signing: the simulator keychain needs a signed app.
+          xcodebuild -project NeoChat.xcodeproj -scheme NeoChat -configuration Debug \
+            -destination "id=$DEVICE" -derivedDataPath build-sim -resultBundlePath UITests.xcresult \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO \
+            test | tail -n 150
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-simulator-shots
+          path: ios-shots
+          retention-days: 14
