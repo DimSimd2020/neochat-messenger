@@ -11,6 +11,7 @@ mod engine;
 mod error;
 mod files;
 mod groups;
+mod markdown;
 mod keys;
 mod outbox;
 mod store;

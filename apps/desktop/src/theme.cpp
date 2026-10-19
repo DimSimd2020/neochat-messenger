@@ -1,6 +1,10 @@
 #include "theme.h"
 
 #include <QApplication>
+#include <QLinearGradient>
+#include <QPainter>
+#include <QRadialGradient>
+#include <QWidget>
 #include <QPalette>
 #include <QSettings>
 #include <QStyleHints>
@@ -19,14 +23,17 @@ QColor mixColor(const QColor &a, const QColor &b, qreal t)
 
 Palette Palette::dark()
 {
-    return {"#111318", "#1A1D24", "#14171D", "#21252E", "#2A2F3B", "#EEF1F7", "#A3AEBF", "#98B9FF", "#4169CF", "#FFFFFF",
-            "#3257AF", "#FFFFFF", "#D6E3FF", "#2C374D", "#343C4B", "#F2C989", "#382F24"};
+    // Android's liquid-glass dark: deep navy instead of neutral grey.
+    return {"#0F1A2E", "#12213B", "#0F1B31", "#16243D", "#1C2C46", "#F2F7FF", "#BBCBE3", "#98B9FF", "#4169CF", "#FFFFFF",
+            "#3159B8", "#FFFFFF", "#D6E3FF", "#26385A", "#2B3D5C", "#F2C989", "#382F24",
+            "#12213B", "#101A2E", "#132C42", "#294E86", "#215868"};
 }
 
 Palette Palette::light()
 {
-    return {"#E5E9F1", "#FFFFFF", "#E9EDF4", "#F3F5F9", "#E7ECF3", "#1C2638", "#53617A", "#2456B8", "#315DCF", "#FFFFFF",
-            "#315DCF", "#FFFFFF", "#D8E4FF", "#E1E9FA", "#CFD7E5", "#805015", "#FFF3DD"};
+    return {"#DEE8F5", "#E9F0FC", "#E3ECF8", "#F7FAFF", "#FFFFFF", "#182C46", "#4A607C", "#2456B8", "#315DCF", "#FFFFFF",
+            "#3159B8", "#FFFFFF", "#D8E4FF", "#D6E2F7", "#C8D5E8", "#805015", "#FFF3DD",
+            "#E9F0FC", "#DEE8F5", "#D7E8F0", "#B6CDF7", "#B6E1DD"};
 }
 
 Palette Palette::mix(const Palette &a, const Palette &b, qreal t)
@@ -35,7 +42,8 @@ Palette Palette::mix(const Palette &a, const Palette &b, qreal t)
     QColor Palette::*fields[] = {&Palette::stage, &Palette::canvas, &Palette::rail, &Palette::surface, &Palette::raised,
                                        &Palette::text, &Palette::muted, &Palette::accent, &Palette::action, &Palette::onAccent,
                                        &Palette::outgoing, &Palette::onOutgoing, &Palette::outgoingMuted, &Palette::selected,
-                                       &Palette::border, &Palette::warning, &Palette::warningBg};
+                                       &Palette::border, &Palette::warning, &Palette::warningBg, &Palette::bg0, &Palette::bg1,
+                                       &Palette::bg2, &Palette::spotTop, &Palette::spotBottom};
     for (auto f : fields)
         r.*f = mixColor(a.*f, b.*f, t);
     return r;
@@ -158,4 +166,30 @@ QEasingCurve Theme::surfaceEasing()
     QEasingCurve c(QEasingCurve::BezierSpline);
     c.addCubicBezierSegment(QPointF(0.22, 0.8), QPointF(0.25, 1.0), QPointF(1.0, 1.0));
     return c;
+}
+
+void Theme::paintBackdrop(QPainter &painter, const QWidget *w, const QColor &glass)
+{
+    const Palette &c = p();
+    const QWidget *win = w->window();
+    const QPoint off = w->mapTo(win, QPoint(0, 0));
+    const QRectF all(-off.x(), -off.y(), win->width(), win->height());
+    QLinearGradient g(all.topLeft(), QPointF(all.left() + all.width() * 0.35, all.bottom()));
+    g.setColorAt(0, c.bg0);
+    g.setColorAt(0.56, c.bg1);
+    g.setColorAt(1, c.bg2);
+    painter.fillRect(w->rect(), g);
+    const qreal s = qMax(all.width(), all.height()) * 0.7;
+    auto spot = [&](QPointF center, QColor color) {
+        QRadialGradient r(center, s);
+        color.setAlphaF(0.55);
+        r.setColorAt(0, color);
+        color.setAlphaF(0);
+        r.setColorAt(1, color);
+        painter.fillRect(w->rect(), r);
+    };
+    spot(QPointF(all.right(), all.top()), c.spotTop);
+    spot(QPointF(all.left() - all.width() * 0.35, all.top() + all.height() * 0.95), c.spotBottom);
+    if (glass.isValid())
+        painter.fillRect(w->rect(), glass);
 }

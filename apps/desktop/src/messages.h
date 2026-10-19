@@ -84,6 +84,8 @@ protected:
     void contextMenuEvent(QContextMenuEvent *e) override;
     void keyPressEvent(QKeyEvent *e) override;
     void paintEvent(QPaintEvent *e) override;
+    // The backdrop is fixed to the window: repaint instead of moving pixels.
+    void scrollContentsBy(int, int) override { viewport()->update(); }
 
 private:
     void load(bool older);

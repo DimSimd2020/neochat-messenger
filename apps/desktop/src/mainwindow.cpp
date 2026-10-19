@@ -91,7 +91,9 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        p.fillRect(rect(), Theme::p().rail);
+        QColor glass = Theme::p().rail;
+        glass.setAlphaF(0.72);
+        Theme::paintBackdrop(p, this, glass);
         const QRect r = chats->geometry();
         p.setPen(Qt::NoPen);
         p.setBrush(Theme::p().accent);
@@ -173,7 +175,9 @@ protected:
     void paintEvent(QPaintEvent *) override
     {
         QPainter p(this);
-        p.fillRect(rect(), Theme::p().canvas);
+        QColor glass = Theme::p().surface;
+        glass.setAlphaF(0.55);
+        Theme::paintBackdrop(p, this, glass);
         p.fillRect(QRect(0, height() - 1, width(), 1), Theme::p().border);
     }
 };
@@ -242,7 +246,7 @@ protected:
     void paintEvent(QPaintEvent *) override
     {
         QPainter p(this);
-        p.fillRect(rect(), Theme::p().canvas);
+        Theme::paintBackdrop(p, this);
     }
 };
 

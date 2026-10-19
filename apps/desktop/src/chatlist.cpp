@@ -321,7 +321,9 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
 void ChatPanel::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
-    p.fillRect(rect(), Theme::p().surface);
+    QColor glass = Theme::p().surface;
+    glass.setAlphaF(0.62);
+    Theme::paintBackdrop(p, this, glass);
     p.fillRect(QRect(width() - 1, 0, 1, height()), Theme::p().border);
 }
 

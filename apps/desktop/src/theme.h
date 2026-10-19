@@ -7,9 +7,14 @@
 #include <QVariantAnimation>
 
 // Colors from docs/design/tokens.json ("themes").
+class QPainter;
+class QWidget;
+
 struct Palette {
     QColor stage, canvas, rail, surface, raised, text, muted, accent, action, onAccent;
     QColor outgoing, onOutgoing, outgoingMuted, selected, border, warning, warningBg;
+    // Window backdrop shared with Android and iOS: gradient plus two soft spots.
+    QColor bg0, bg1, bg2, spotTop, spotBottom;
 
     static Palette dark();
     static Palette light();
@@ -38,6 +43,10 @@ public:
     static int ms(int duration) { return reducedMotion() ? 0 : duration; }
     // cubic-bezier(.22,.8,.25,1) from the motion spec.
     static QEasingCurve surfaceEasing();
+
+    // Paints the window backdrop into `w` in window coordinates, so neighbouring widgets
+    // continue one gradient; `glass` (translucent) is laid over it when given.
+    static void paintBackdrop(QPainter &painter, const QWidget *w, const QColor &glass = {});
 
     // Applies the saved mode without animation (first window paint).
     void init();

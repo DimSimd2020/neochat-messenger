@@ -487,6 +487,10 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
 
 void MessageView::paintEvent(QPaintEvent *e)
 {
+    {
+        QPainter bg(viewport());
+        Theme::paintBackdrop(bg, viewport());
+    }
     QListView::paintEvent(e);
     if (m_jump->isVisible() && m_newBelow > 0) {
         QPainter p(viewport());

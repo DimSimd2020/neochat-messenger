@@ -106,6 +106,7 @@ impl Inner {
                 "sender_name": sender_name,
                 "sender_tag": if channel.is_some() { json!("") } else { tags.get(&r.sender).cloned().unwrap_or(json!("")) },
                 "channel": channel.is_some(),
+                "spans": if r.kind == "text" || r.kind == "file" { json!(crate::markdown::spans(&r.body)) } else { json!([]) },
                 "outgoing": r.outgoing,
                 "kind": r.kind,
                 "text": if r.kind == "undecryptable" { "Не удалось расшифровать сообщение".to_string() } else { r.body },

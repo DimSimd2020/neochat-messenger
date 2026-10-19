@@ -202,7 +202,7 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
 void Onboarding::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
-    p.fillRect(rect(), Theme::p().stage);
+    Theme::paintBackdrop(p, this);
 }
 
 void Onboarding::start(const QJsonObject &status)
