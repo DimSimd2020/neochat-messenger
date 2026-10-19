@@ -24,6 +24,8 @@ pub type EventCallback = Box<dyn Fn(&str) + Send + Sync>;
 pub const STATE_OFFLINE: u8 = 0;
 pub const STATE_CONNECTING: u8 = 1;
 pub const STATE_ONLINE: u8 = 2;
+/// Built-in server; never shown to people. Callers may override it with "server" (tests).
+const DEFAULT_SERVER: &str = "https://r1270286.s2566.vm.mydomain.zone:8443";
 
 pub struct Inner {
     pub db: Mutex<Db>,
@@ -296,7 +298,6 @@ impl Inner {
             "username": kv_get_str(c, "username")?,
             "device_id": kv_get_str(c, "device_id")?,
             "primary": kv_get_str(c, "primary")?.as_deref() == Some("1"),
-            "server": kv_get_str(c, "server")?,
             "connection": st,
         }))
     }
@@ -311,7 +312,7 @@ impl Inner {
     }
 
     fn register(&self, p: &Value) -> Result<Value> {
-        let server = s(p, "server")?.trim().to_string();
+        let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
         let password = s(p, "password")?;
         let device = keys::new_device()?;
@@ -380,7 +381,7 @@ impl Inner {
     }
 
     fn login(&self, p: &Value) -> Result<Value> {
-        let server = s(p, "server")?.trim().to_string();
+        let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
         let (device_id, stored_user) = {
             let db = self.db();
@@ -425,7 +426,7 @@ impl Inner {
     /// New account identity from the offline recovery code. Old devices are revoked
     /// and contacts see an identity change; past history is not restored.
     fn recover(&self, p: &Value) -> Result<Value> {
-        let server = s(p, "server")?.trim().to_string();
+        let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
         let old_secret = keys::recovery_decode(s(p, "recovery_code")?)?;
         let device = keys::new_device()?;
@@ -471,7 +472,7 @@ impl Inner {
     /// Starts linking this installation as a secondary device. Returns QR text that
     /// the primary device scans; it carries the new device's public keys.
     fn link_start(&self, p: &Value) -> Result<Value> {
-        let server = s(p, "server")?.trim().to_string();
+        let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
         let device = keys::new_device()?;
         let body = json!({

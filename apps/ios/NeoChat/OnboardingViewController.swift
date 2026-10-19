@@ -4,10 +4,8 @@ import UIKit
 /// to the account and waits for approval on the primary device.
 final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private enum Mode { case login, register, recover }
-    static let defaultServer = "https://r1270286.s2566.vm.mydomain.zone:8443"
 
     private let done: () -> Void
-    private var server = defaultServer
     private let hasKeys: Bool
     private var mode = Mode.login
     private var busy = false
@@ -30,7 +28,6 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         self.done = done
         hasKeys = status.bool("has_device_keys")
         super.init(nibName: nil, bundle: nil)
-        if !status.str("server").isEmpty { server = status.str("server") }
         username.text = status.str("username")
     }
 
@@ -139,7 +136,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         if user.isEmpty { return showError("Введите имя пользователя") }
         if pass.isEmpty { return showError("Введите пароль") }
         if mode != .login && pass.count < 8 { return showError("Пароль — не меньше 8 символов") }
-        var p: JSON = ["server": server, "username": user, "device_name": UIDevice.current.name, "platform": "ios"]
+        var p: JSON = ["username": user, "device_name": UIDevice.current.name, "platform": "ios"]
         let linking = mode == .login && !hasKeys
         let method: String
         switch mode {

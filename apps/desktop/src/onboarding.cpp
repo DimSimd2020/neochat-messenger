@@ -19,8 +19,6 @@
 
 namespace {
 
-const char kDefaultServer[] = "https://r1270286.s2566.vm.mydomain.zone:8443";
-
 class CardFrame : public QWidget {
 public:
     using QWidget::QWidget;
@@ -93,8 +91,8 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_hint->setAlignment(Qt::AlignHCenter);
     fl->addWidget(m_heading);
     fl->addWidget(m_hint);
-    // The server address is built in; NEOCHAT_SERVER overrides it for local test servers.
-    m_serverUrl = qEnvironmentVariable("NEOCHAT_SERVER", QString::fromLatin1(kDefaultServer));
+    // The core has the server built in; NEOCHAT_SERVER points it at a test server.
+    m_serverUrl = qEnvironmentVariable("NEOCHAT_SERVER");
     m_username = new ui::TextField(QStringLiteral("Имя пользователя"));
     m_password = new ui::TextField(QStringLiteral("Пароль"));
     m_password->setPassword(true);
@@ -202,8 +200,6 @@ void Onboarding::start(const QJsonObject &status)
 {
     m_pages->setCurrentIndex(0);
     m_hasKeys = status.value("has_device_keys").toBool();
-    if (!status.value("server").toString().isEmpty())
-        m_serverUrl = status.value("server").toString();
     if (!status.value("username").toString().isEmpty())
         m_username->setText(status.value("username").toString());
     setMode(Login);
@@ -269,7 +265,9 @@ void Onboarding::submit()
         return showError(QStringLiteral("Введите пароль"));
     if (m_mode != Login && password.size() < 8)
         return showError(QStringLiteral("Пароль — не меньше 8 символов"));
-    QJsonObject p{{"server", m_serverUrl}, {"username", username}, {"device_name", deviceName()}, {"platform", "windows"}};
+    QJsonObject p{{"username", username}, {"device_name", deviceName()}, {"platform", "windows"}};
+    if (!m_serverUrl.isEmpty())
+        p["server"] = m_serverUrl;
     // Without keys on this computer signing in means linking it to the account.
     const bool linking = m_mode == Login && !m_hasKeys;
     QString method;

@@ -70,7 +70,7 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Db(d) | Error::Network(d) => write!(f, "{}: {}", self.code(), d),
+            Error::Db(d) => write!(f, "{}: {}", self.code(), d),
             _ => write!(f, "{}: {}", self.code(), self.message()),
         }
     }

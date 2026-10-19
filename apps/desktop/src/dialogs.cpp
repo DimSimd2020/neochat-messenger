@@ -555,8 +555,7 @@ void profile(const DialogHost &h)
     Core::instance()->call("status", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
         const QJsonObject s = v.toObject();
         name->setText("@" + s.value("username").toString());
-        sub->setText((s.value("primary").toBool() ? QStringLiteral("Основное устройство") : QStringLiteral("Дополнительное устройство")) + QStringLiteral(" · ") +
-                     s.value("server").toString());
+        sub->setText((s.value("primary").toBool() ? QStringLiteral("Основное устройство") : QStringLiteral("Дополнительное устройство")));
     });
     auto *dev = new ui::Button(QStringLiteral("Устройства"), ui::Button::Secondary);
     auto *set = new ui::Button(QStringLiteral("Настройки"), ui::Button::Secondary);

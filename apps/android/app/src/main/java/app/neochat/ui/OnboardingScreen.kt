@@ -36,7 +36,6 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
 
     private val heading = ctx.label("", 24f, 700)
     private val hint = ctx.label("", 14.5f, 400, Theme.Role.MUTED)
-    private var server = DEFAULT_SERVER
     private val hasKeys = status.optBoolean("has_device_keys")
     private val username = FloatingField(ctx, "Имя пользователя")
     private val password = FloatingField(ctx, "Пароль", password = true)
@@ -79,7 +78,6 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         col.addView(recovery, lp())
         col.addView(link, lp())
 
-        status.str("server").takeIf { it.isNotEmpty() }?.let { server = it }
         status.str("username").takeIf { it.isNotEmpty() }?.let { username.setText(it) }
         setMode(Mode.LOGIN)
         page(form)
@@ -228,7 +226,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         if (user.isEmpty()) return showError("Введите имя пользователя")
         if (pass.isEmpty()) return showError("Введите пароль")
         if (mode != Mode.LOGIN && pass.length < 8) return showError("Пароль — не меньше 8 символов")
-        val p = JSONObject().put("server", server).put("username", user).put("device_name", deviceName()).put("platform", "android")
+        val p = JSONObject().put("username", user).put("device_name", deviceName()).put("platform", "android")
         // Without keys on this phone signing in means linking it to the account.
         val linking = mode == Mode.LOGIN && !hasKeys
         val method = when (mode) {
@@ -321,6 +319,5 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     }
 
     companion object {
-        const val DEFAULT_SERVER = "https://r1270286.s2566.vm.mydomain.zone:8443"
     }
 }
