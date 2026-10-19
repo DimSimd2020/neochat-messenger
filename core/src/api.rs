@@ -14,19 +14,36 @@ pub struct Api {
     pub base: String,
 }
 
+/// One agent for the whole process: its pool keeps TLS connections open between
+/// requests, so a message costs round trips instead of fresh handshakes.
+static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+
 impl Api {
     pub fn new(base: &str) -> Api {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .user_agent("NeoChat/0.1")
-            .build()
-            .into();
+        let agent = AGENT
+            .get_or_init(|| {
+                ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    .timeout_connect(Some(Duration::from_secs(10)))
+                    .timeout_recv_response(Some(Duration::from_secs(30)))
+                    .max_idle_age(Duration::from_secs(50))
+                    .user_agent("NeoChat/0.4")
+                    .build()
+                    .into()
+            })
+            .clone();
         Api { agent, base: base.trim_end_matches('/').to_string() }
     }
 
     pub fn call(&self, method: &str, path: &str, token: Option<&str>, body: Option<&Value>) -> Result<Value> {
+        match self.call_once(method, path, token, body) {
+            // A pooled connection the server already closed: reads are safe to repeat.
+            Err(Error::Network(_)) if method == "GET" => self.call_once(method, path, token, body),
+            r => r,
+        }
+    }
+
+    fn call_once(&self, method: &str, path: &str, token: Option<&str>, body: Option<&Value>) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
         let auth = token.map(|t| format!("Bearer {t}"));
         let resp = match method {

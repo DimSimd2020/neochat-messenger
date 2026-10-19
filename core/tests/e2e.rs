@@ -42,7 +42,7 @@ impl Client {
     fn open(&mut self) {
         let ev = self.events.clone();
         let core = Core::open(
-            &json!({"data_dir": self.dir.to_string_lossy(), "db_key": self.key, "foreground": false}),
+            &json!({"data_dir": self.dir.to_string_lossy(), "db_key": self.key, "foreground": std::env::var("NEOCHAT_E2E_LIVE").is_ok()}),
             Box::new(move |s| ev.lock().unwrap().push(serde_json::from_str(s).unwrap())),
         )
         .expect("open core");
@@ -341,4 +341,35 @@ fn password_sign_in_gets_latest_history() {
     pc.sync();
     assert_eq!(pc.texts(&cid), vec!["только что"]);
     assert!(pc.texts("neochat-system").iter().any(|t| t.contains("Вход на новом устройстве")));
+}
+
+/// Live delivery over the event socket: NEOCHAT_E2E_LIVE=1 cargo test --test e2e live_latency -- --nocapture
+#[test]
+fn live_latency() {
+    let Some(e) = env() else { return };
+    if std::env::var("NEOCHAT_E2E_LIVE").is_err() {
+        return;
+    }
+    let (alice, _) = register(&e, &uname("alice"));
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let b = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
+    alice.call("send_text", json!({"conversation_id": cid, "text": "прогрев"}));
+    let wait = |c: &Client, n: usize| {
+        let t = std::time::Instant::now();
+        while c.texts(&cid).len() < n {
+            assert!(t.elapsed().as_secs() < 30, "не дошло");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        t.elapsed()
+    };
+    wait(&bob, 1);
+    for i in 0..3 {
+        let t = std::time::Instant::now();
+        alice.call("send_text", json!({"conversation_id": cid, "text": format!("сообщение {i}")}));
+        wait(&bob, i + 2);
+        let sent = alice.messages(&cid).last().unwrap()["status"].clone();
+        println!("доставка {i}: {:?} (статус у отправителя: {sent})", t.elapsed());
+    }
 }

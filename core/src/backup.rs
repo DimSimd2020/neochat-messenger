@@ -96,6 +96,22 @@ impl Inner {
         Ok(kv_get(&self.db().conn, "backup_key")?.and_then(|k| k.try_into().ok()))
     }
 
+    /// Runs maybe_upload_history on its own thread so a large upload never delays messages.
+    pub fn spawn_history_upload(self: &std::sync::Arc<Self>) {
+        static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new().name("neocore-history".into()).spawn(move || {
+            let _ = me.maybe_upload_history();
+            RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+        if spawned.is_err() {
+            RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     /// Uploads the history when it changed and the last upload is old enough.
     pub fn maybe_upload_history(&self) -> Result<()> {
         let Some(key) = self.backup_key()? else { return Ok(()) };

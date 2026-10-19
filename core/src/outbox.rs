@@ -327,7 +327,12 @@ impl Inner {
     /// Ensures sessions, encrypts for every recipient and stores the request
     /// atomically with the new ratchet state.
     fn build_request(&self, conv: &str, payload: &Payload, att_id: Option<&str>) -> Result<Vec<u8>> {
-        self.fetch_conversation(conv)?;
+        // Membership changes arrive as events and the server rejects a stale recipient
+        // set (send_one then refetches), so the cached list is used when there is one.
+        let known: String = self.db().conn.query_row("SELECT recipients FROM conversations WHERE id=?1", [conv], |r| r.get(0))?;
+        if known == "[]" || known.is_empty() {
+            self.fetch_conversation(conv)?;
+        }
         self.check_can_send(conv)?;
         let (recipients, rev, rset): (Vec<Value>, String, String) = {
             let db = self.db();

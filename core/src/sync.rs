@@ -44,7 +44,7 @@ impl Inner {
                     ws = std::thread::Builder::new().name("neocore-ws".into()).spawn(move || me.ws_loop()).ok();
                 }
                 let _ = self.run_cycle();
-                let _ = self.maybe_upload_history();
+                self.spawn_history_upload();
                 // Installations from before profiles learn the display name and numeric ID once.
                 if kv_get_str(&self.db().conn, "number").ok().flatten().unwrap_or_default().is_empty() {
                     let _ = self.refresh_profile();
@@ -71,6 +71,8 @@ impl Inner {
     fn run_cycle(self: &Arc<Self>) -> Result<usize> {
         let _g = self.cycle_lock.lock().unwrap_or_else(|e| e.into_inner());
         let res = (|| {
+            // Outgoing first: a just-typed message should not wait for the incoming feed.
+            self.flush_outbox()?;
             let n = self.sync_events()?;
             self.flush_outbox()?;
             self.maintain_prekeys()?;
@@ -405,7 +407,13 @@ impl Inner {
     /// Keeps enough one-time prekeys on the server and rotates the signed prekey.
     /// New private keys are committed locally before they are published.
     fn maintain_prekeys(&self) -> Result<()> {
+        // Prekeys drain slowly; checking every 10 minutes saves a request per cycle.
+        let checked: i64 = kv_get_str(&self.db().conn, "prekeys_checked_at")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        if now_ms() - checked < 10 * 60 * 1000 {
+            return Ok(());
+        }
         let counts = self.authed("GET", "/v1/devices/current/prekeys", None)?;
+        kv_set(&self.db().conn, "prekeys_checked_at", now_ms().to_string().as_bytes())?;
         let low = counts["one_time_prekeys"].as_u64().unwrap_or(0) < 25 || counts["kyber_one_time_prekeys"].as_u64().unwrap_or(0) < 25;
         let rotate = {
             let db = self.db();
