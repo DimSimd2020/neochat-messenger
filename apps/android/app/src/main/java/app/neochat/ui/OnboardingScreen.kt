@@ -33,7 +33,8 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
 
     private val heading = ctx.label("", 24f, 700)
     private val hint = ctx.label("", 14.5f, 400, Theme.Role.MUTED)
-    private val username = FloatingField(ctx, "Имя пользователя")
+    private val name = FloatingField(ctx, "Имя")
+    private val username = FloatingField(ctx, "Никнейм")
     private val password = FloatingField(ctx, "Пароль", password = true)
     private val code = FloatingField(ctx, "Код восстановления")
     private val loginCode = FloatingField(ctx, "Код из чата «NeoChat уведомления»")
@@ -78,7 +79,8 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         form.orientation = LinearLayout.VERTICAL
         form.addView(heading, lp().apply { topMargin = dp(22) })
         form.addView(hint, lp().apply { topMargin = dp(8) })
-        for (f in listOf(username, password, code, loginCode)) form.addView(f, lp().apply { topMargin = dp(12) })
+        for (f in listOf(name, username, password, code, loginCode)) form.addView(f, lp().apply { topMargin = dp(12) })
+        name.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
         loginCode.visibility = View.GONE
         loginCode.edit.inputType = InputType.TYPE_CLASS_NUMBER
         username.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -153,6 +155,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private fun setMode(m: Mode) {
         mode = m
         code.visibility = if (m == Mode.RECOVER) View.VISIBLE else View.GONE
+        name.visibility = if (m == Mode.REGISTER) View.VISIBLE else View.GONE
         if (m != Mode.LOGIN) loginCode.visibility = View.GONE
         password.setLabel(if (m == Mode.RECOVER) "Новый пароль" else "Пароль")
         when (m) {
@@ -189,7 +192,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         if (busy) return
         val user = username.text.trim().removePrefix("@")
         val pass = password.text
-        if (user.isEmpty()) return showError("Введите имя пользователя")
+        if (user.isEmpty()) return showError("Введите никнейм")
         if (pass.isEmpty()) return showError("Введите пароль")
         if (mode != Mode.LOGIN && pass.length < 8) return showError("Пароль — не меньше 8 символов")
         val p = JSONObject().put("username", user).put("device_name", deviceName()).put("platform", "android")
@@ -198,7 +201,11 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
                 p.put("password", pass)
                 if (loginCode.visibility == View.VISIBLE) p.put("code", loginCode.text.trim())
             }
-            Mode.REGISTER -> "register".also { p.put("password", pass) }
+            Mode.REGISTER -> {
+                if (name.text.isBlank()) return showError("Введите имя")
+                p.put("password", pass).put("display_name", name.text.trim())
+                "register"
+            }
             Mode.RECOVER -> {
                 if (code.text.isBlank()) return showError("Введите код восстановления")
                 p.put("new_password", pass).put("recovery_code", code.text.trim())

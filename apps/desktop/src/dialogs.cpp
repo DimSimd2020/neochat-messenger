@@ -225,24 +225,20 @@ void contacts(const DialogHost &h)
 void newContact(const DialogHost &h, std::function<void()> added)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Новый контакт"), 420);
-    auto *first = new ui::TextField(QStringLiteral("Имя (обязательно)"));
+    auto *user = new ui::TextField(QStringLiteral("Никнейм"));
+    auto *first = new ui::TextField(QStringLiteral("Имя (необязательно)"));
     auto *last = new ui::TextField(QStringLiteral("Фамилия (необязательно)"));
-    auto *user = new ui::TextField(QStringLiteral("Имя пользователя"));
     auto *err = new ui::Label({}, 13.5, 400, ui::Label::Warning);
     err->setWordWrap(true);
     err->hide();
     auto *submit = new ui::Button(QStringLiteral("Добавить"));
-    for (QWidget *w : {static_cast<QWidget *>(first), static_cast<QWidget *>(last), static_cast<QWidget *>(user), static_cast<QWidget *>(err)})
+    for (QWidget *w : {static_cast<QWidget *>(user), static_cast<QWidget *>(first), static_cast<QWidget *>(last), static_cast<QWidget *>(err)})
         sheet->body()->addWidget(w);
-    sheet->body()->addWidget(mutedText(QStringLiteral("Поиск идёт только по точному имени пользователя: публичного каталога нет.")));
+    sheet->body()->addWidget(mutedText(QStringLiteral("Поиск идёт только по точному никнейму: публичного каталога нет. Без своего имени контакт показывается под именем из его профиля.")));
     sheet->body()->addWidget(submit);
     auto go = [=] {
-        if (first->text().trimmed().isEmpty()) {
-            err->setText(QStringLiteral("Введите имя"));
-            return err->show();
-        }
         if (user->text().trimmed().isEmpty()) {
-            err->setText(QStringLiteral("Введите имя пользователя"));
+            err->setText(QStringLiteral("Введите никнейм"));
             return err->show();
         }
         err->hide();
@@ -253,7 +249,7 @@ void newContact(const DialogHost &h, std::function<void()> added)
                                    submit->setEnabled(true);
                                    sheet->setBusy(false);
                                    if (!e.ok()) {
-                                       err->setText(e.code == "not_found" ? QStringLiteral("Пользователь с таким именем не найден") : e.message);
+                                       err->setText(e.code == "not_found" ? QStringLiteral("Пользователь с таким никнеймом не найден") : e.message);
                                        return err->show();
                                    }
                                    if (h.toast)
@@ -541,10 +537,34 @@ void profile(const DialogHost &h)
     sub->setWordWrap(true);
     sheet->body()->addWidget(name);
     sheet->body()->addWidget(sub);
+    auto *edit = new ui::TextField(QStringLiteral("Имя"));
+    auto *save = new ui::Button(QStringLiteral("Сохранить имя"), ui::Button::Secondary);
+    sheet->body()->addWidget(edit);
+    sheet->body()->addWidget(save);
     Core::instance()->call("status", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
         const QJsonObject s = v.toObject();
-        name->setText("@" + s.value("username").toString());
-        sub->setVisible(false);
+        const QString nick = "@" + s.value("username").toString();
+        const QString display = s.value("display_name").toString();
+        name->setText(display.isEmpty() ? nick : display);
+        QString line = nick;
+        if (!s.value("number").toString().isEmpty())
+            line += QStringLiteral(" · ID ") + s.value("number").toString();
+        sub->setText(line);
+        sub->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        edit->setText(display);
+    });
+    QObject::connect(save, &QAbstractButton::clicked, sheet, [=] {
+        const QString n = edit->text().trimmed();
+        if (n.isEmpty())
+            return h.toast(QStringLiteral("Введите имя"));
+        save->setEnabled(false);
+        Core::instance()->call("set_profile", {{"display_name", n}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+            save->setEnabled(true);
+            if (!e.ok())
+                return fail(h, e);
+            name->setText(n);
+            h.toast(QStringLiteral("Имя сохранено"));
+        });
     });
     auto *dev = new ui::Button(QStringLiteral("Устройства"), ui::Button::Secondary);
     auto *set = new ui::Button(QStringLiteral("Настройки"), ui::Button::Secondary);

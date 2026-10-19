@@ -45,6 +45,7 @@ private:
     ui::Label *m_hint;
     QString m_serverUrl;
     bool m_hasKeys = false;
+    ui::TextField *m_name;
     ui::TextField *m_username;
     ui::TextField *m_password;
     ui::TextField *m_code;

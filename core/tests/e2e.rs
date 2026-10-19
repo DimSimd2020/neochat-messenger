@@ -79,7 +79,7 @@ fn register(e: &Env, name: &str) -> (Client, String) {
     let c = Client::new();
     let res = c.call(
         "register",
-        json!({"server": e.server, "username": name, "password": "correct horse battery", "device_name": "test", "platform": "windows"}),
+        json!({"server": e.server, "username": name, "display_name": "Тест", "password": "correct horse battery", "device_name": "test", "platform": "windows"}),
     );
     assert!(res["recovery_code"].as_str().unwrap().len() > 40);
     (c, res["recovery_code"].as_str().unwrap().to_string())
@@ -275,4 +275,30 @@ fn qr_login_history_and_two_factor() {
     with_code["code"] = code.into();
     third.call("login", with_code);
     assert_eq!(third.texts(&cid), vec!["старая переписка"]);
+}
+
+#[test]
+fn profile_name_nickname_and_number() {
+    let Some(e) = env() else { return };
+    let nick = format!("DimSimd_{}", &uuid::Uuid::new_v4().simple().to_string()[..6]);
+    let dima = Client::new();
+    dima.call(
+        "register",
+        json!({"server": e.server, "username": nick, "display_name": "Дмитрий", "password": "correct horse battery", "device_name": "test", "platform": "windows"}),
+    );
+    let st = dima.call("status", json!({}));
+    assert_eq!(st["username"], nick.as_str());
+    assert_eq!(st["display_name"], "Дмитрий");
+    assert!(st["number"].as_str().unwrap().parse::<u64>().unwrap() > 100000);
+
+    // The nickname is found in any letter case and shows as typed, with the profile name.
+    let (other, _) = register(&e, &uname("other"));
+    let c = other.call("resolve_contact", json!({"username": nick.to_lowercase()}));
+    assert_eq!(c["username"], nick.as_str());
+    assert_eq!(c["display_name"], "Дмитрий");
+
+    dima.call("set_profile", json!({"display_name": "Дима"}));
+    other.sync();
+    let c = other.call("list_contacts", json!({}))[0].clone();
+    assert_eq!(c["display_name"], "Дима");
 }

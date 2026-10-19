@@ -168,8 +168,8 @@ void UiTest::registerAccount()
 {
     QTRY_VERIFY(field("Пароль"));
     // A click anywhere on an empty field, label area included, must focus it.
-    QTest::mouseClick(field("Имя пользователя"), Qt::LeftButton, {}, QPoint(30, 12));
-    QTRY_VERIFY(field("Имя пользователя")->edit()->hasFocus());
+    QTest::mouseClick(field("Никнейм"), Qt::LeftButton, {}, QPoint(30, 12));
+    QTRY_VERIFY(field("Никнейм")->edit()->hasFocus());
     QTest::mouseClick(field("Пароль")->edit(), Qt::LeftButton);
     QTRY_VERIFY(field("Пароль")->edit()->hasFocus());
     // The QR code for sign-in from a phone appears once the server answers.
@@ -178,7 +178,8 @@ void UiTest::registerAccount()
     button("Создать аккаунт")->click();
     QTRY_VERIFY(button("Уже есть аккаунт? Войти"));
     m_bobName = uname("bob");
-    field("Имя пользователя")->setText(m_bobName);
+    field("Имя")->setText(QStringLiteral("Боб"));
+    field("Никнейм")->setText(m_bobName);
     QTest::keyClicks(field("Пароль")->edit(), "correct horse battery");
     button("Создать аккаунт")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<QCheckBox>([](QCheckBox *) { return true; }), 15000);
@@ -196,7 +197,7 @@ void UiTest::addContactAndOpenChat()
 {
     m_alice = new Peer(m_dir.path() + "/alice");
     m_aliceName = uname("alice");
-    const QJsonObject reg = m_alice->call("register", {{"server", m_server}, {"username", m_aliceName}, {"password", "correct horse battery"},
+    const QJsonObject reg = m_alice->call("register", {{"server", m_server}, {"username", m_aliceName}, {"display_name", "Алиса"}, {"password", "correct horse battery"},
                                                        {"device_name", "peer"}, {"platform", "android"}})
                                 .toObject();
     m_aliceCode = reg.value("recovery_code").toString();
@@ -211,10 +212,10 @@ void UiTest::addContactAndOpenChat()
     QTRY_VERIFY(button("Новый контакт"));
     shot("04-contacts-empty");
     button("Новый контакт")->click();
-    QTRY_VERIFY(field("Имя (обязательно)"));
-    field("Имя (обязательно)")->setText("Алиса");
+    QTRY_VERIFY(field("Имя (необязательно)"));
+    field("Имя (необязательно)")->setText("Алиса");
     field("Фамилия (необязательно)")->setText("Смирнова");
-    field("Имя пользователя")->setText(m_aliceName);
+    field("Никнейм")->setText(m_aliceName);
     shot("05-new-contact");
     button("Добавить")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().startsWith("Алиса Смирнова"); }), 10000);

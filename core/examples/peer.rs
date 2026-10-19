@@ -48,7 +48,7 @@ fn main() {
     let c = open(&dir);
     match a[2].as_str() {
         "register" => {
-            call(&c, "register", json!({"server": a[3], "username": a[4], "password": "peer-test-passphrase", "device_name": "peer", "platform": "windows"}));
+            call(&c, "register", json!({"server": a[3], "username": a[4], "display_name": "Peer", "password": "peer-test-passphrase", "device_name": "peer", "platform": "windows"}));
             println!("registered");
         }
         "login" => {

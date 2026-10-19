@@ -118,6 +118,13 @@ impl Db {
         // FULL sync: a lost ratchet step after power loss could repeat a message key.
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;")?;
         conn.execute_batch(SCHEMA)?;
+        // Columns added after the first release; the error for an existing column is expected.
+        for sql in [
+            "ALTER TABLE contacts ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE contacts ADD COLUMN number TEXT NOT NULL DEFAULT ''",
+        ] {
+            let _ = conn.execute(sql, []);
+        }
         Ok(Db { conn })
     }
 }

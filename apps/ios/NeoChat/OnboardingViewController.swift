@@ -13,7 +13,8 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private let stack = UIStackView()
     private let heading = label("", 28, .bold)
     private let hint = label("", 15, color: Theme.muted)
-    private let username = Field("Имя пользователя")
+    private let name = Field("Имя")
+    private let username = Field("Никнейм")
     private let password = Field("Пароль", secure: true)
     private let code = Field("Код восстановления")
     private let loginCode = Field("Код из чата «NeoChat уведомления»")
@@ -72,9 +73,11 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func showForm() {
         reset()
         setSecure(false)
-        for v in [heading, hint, username, password, code, loginCode, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
+        for v in [heading, hint, name, username, password, code, loginCode, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
         stack.setCustomSpacing(18, after: error)
-        for f in [username, password, code, loginCode] { f.delegate = self }
+        for f in [name, username, password, code, loginCode] { f.delegate = self }
+        name.autocapitalizationType = .words
+        name.textContentType = .givenName
         loginCode.keyboardType = .numberPad
         loginCode.textContentType = .oneTimeCode
         loginCode.isHidden = true
@@ -88,6 +91,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func setMode(_ m: Mode) {
         mode = m
         code.isHidden = m != .recover
+        name.isHidden = m != .register
         if m != .login { loginCode.isHidden = true }
         password.placeholder = m == .recover ? "Новый пароль" : "Пароль"
         password.accessibilityLabel = password.placeholder
@@ -119,7 +123,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     @objc private func onRecover() { if !busy { setMode(.recover) } }
 
     func textFieldShouldReturn(_ f: UITextField) -> Bool {
-        let order = [username, password, code, loginCode].filter { !$0.isHidden }
+        let order = [name, username, password, code, loginCode].filter { !$0.isHidden }
         if let i = order.firstIndex(where: { $0 === f }), i + 1 < order.count { order[i + 1].becomeFirstResponder() } else { onSubmit() }
         return true
     }
@@ -135,7 +139,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         var user = (username.text ?? "").trimmingCharacters(in: .whitespaces)
         if user.hasPrefix("@") { user.removeFirst() }
         let pass = password.text ?? ""
-        if user.isEmpty { return showError("Введите имя пользователя") }
+        if user.isEmpty { return showError("Введите никнейм") }
         if pass.isEmpty { return showError("Введите пароль") }
         if mode != .login && pass.count < 8 { return showError("Пароль — не меньше 8 символов") }
         var p: JSON = ["username": user, "device_name": UIDevice.current.name, "platform": "ios"]
@@ -146,8 +150,11 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
             p["password"] = pass
             if !loginCode.isHidden { p["code"] = (loginCode.text ?? "").trimmingCharacters(in: .whitespaces) }
         case .register:
+            let n = (name.text ?? "").trimmingCharacters(in: .whitespaces)
+            if n.isEmpty { return showError("Введите имя") }
             method = "register"
             p["password"] = pass
+            p["display_name"] = n
         case .recover:
             let c = (code.text ?? "").trimmingCharacters(in: .whitespaces)
             if c.isEmpty { return showError("Введите код восстановления") }

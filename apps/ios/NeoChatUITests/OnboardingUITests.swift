@@ -13,7 +13,7 @@ final class OnboardingUITests: XCTestCase {
         shot("01-login")
         // Fill the fields in sign-in mode: in registration mode the simulator covers the
         // password field with its own strong password, which typed text cannot replace.
-        let user = app.textFields["Имя пользователя"]
+        let user = app.textFields["Никнейм"]
         user.tap()
         user.typeText("ios_ci_\(Int.random(in: 100000...999999))")
         let pass = app.secureTextFields["Пароль"]
@@ -21,6 +21,9 @@ final class OnboardingUITests: XCTestCase {
         pass.typeText("correct horse battery")
         app.buttons["Создать аккаунт"].tap()
         XCTAssertTrue(app.buttons["Уже есть аккаунт? Войти"].waitForExistence(timeout: 5))
+        let name = app.textFields["Имя"]
+        name.tap()
+        name.typeText("Тест")
         shot("02-register")
         app.buttons["Создать аккаунт"].tap()
         if !app.staticTexts["Сохраните код восстановления"].waitForExistence(timeout: 30) {

@@ -45,6 +45,10 @@ impl Inner {
                 }
                 let _ = self.run_cycle();
                 let _ = self.maybe_upload_history();
+                // Installations from before profiles learn the display name and numeric ID once.
+                if kv_get_str(&self.db().conn, "number").ok().flatten().unwrap_or_default().is_empty() {
+                    let _ = self.refresh_profile();
+                }
             }
             let fg = self.foreground.load(Ordering::SeqCst);
             self.wait(if fg { Duration::from_secs(30) } else { Duration::from_secs(300) });
@@ -134,6 +138,18 @@ impl Inner {
                     Err(e) => self.emit(json!({"type": "warning", "conversation_id": cid, "message": e.message()})),
                 }
                 self.mark_processed(event_id)?;
+                self.emit(json!({"type": "conversations_changed"}));
+                Ok(())
+            }
+            "profile" => {
+                let uid = ev["payload"]["user_id"].as_str().unwrap_or_default().to_string();
+                let (me, _) = self.me()?;
+                match if uid == me { self.refresh_profile() } else { self.refresh_user(&uid) } {
+                    Err(e @ Error::Network(_)) => return Err(e),
+                    _ => {}
+                }
+                self.mark_processed(event_id)?;
+                self.emit(json!({"type": "contacts_changed"}));
                 self.emit(json!({"type": "conversations_changed"}));
                 Ok(())
             }

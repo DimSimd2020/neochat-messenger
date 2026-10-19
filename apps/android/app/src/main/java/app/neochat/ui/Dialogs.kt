@@ -43,27 +43,26 @@ object Dialogs {
         val s = Sheet(act, "Новый контакт")
         val ctx = s.ctx
         // Fields do not take focus on open, so the keyboard does not jump up.
-        val first = FloatingField(ctx, "Имя (обязательно)")
+        val user = FloatingField(ctx, "Никнейм")
+        val first = FloatingField(ctx, "Имя (необязательно)")
         val last = FloatingField(ctx, "Фамилия (необязательно)")
-        val user = FloatingField(ctx, "Имя пользователя")
         user.edit.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         val err = errorLabel(ctx)
         val submit = PillButton(ctx, "Добавить")
-        s.add(first, 4)
+        s.add(user, 4)
+        s.add(first, 10)
         s.add(last, 10)
-        s.add(user, 10)
-        s.muted("Поиск идёт только по точному имени пользователя: публичного каталога нет.", 10)
+        s.muted("Поиск идёт только по точному никнейму: публичного каталога нет. Без своего имени контакт показывается под именем из его профиля.", 10)
         s.add(err, 8)
         s.add(submit, 14)
         submit.setOnClickListener {
-            if (first.text.isBlank()) return@setOnClickListener err.show("Введите имя")
-            if (user.text.isBlank()) return@setOnClickListener err.show("Введите имя пользователя")
+            if (user.text.isBlank()) return@setOnClickListener err.show("Введите никнейм")
             err.show("")
             submit.isEnabled = false
             val p = JSONObject().put("username", user.text.trim().removePrefix("@")).put("first_name", first.text.trim()).put("last_name", last.text.trim())
             CoreClient.call("resolve_contact", p) { v, e ->
                 submit.isEnabled = true
-                if (e != null) return@call err.show(if (e.code == "not_found") "Пользователь с таким именем не найден" else e.message)
+                if (e != null) return@call err.show(if (e.code == "not_found") "Пользователь с таким никнеймом не найден" else e.message)
                 s.dismiss()
                 act.toast("Контакт добавлен")
                 done?.invoke(v as JSONObject)
@@ -261,6 +260,30 @@ object Dialogs {
             }
         }
         reload()
+        s.show()
+    }
+
+    // ---- profile ----
+
+    fun editName(act: MainActivity, current: String, saved: () -> Unit) {
+        val s = Sheet(act, "Имя")
+        val field = FloatingField(s.ctx, "Имя")
+        field.setText(current)
+        field.edit.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        val save = PillButton(s.ctx, "Сохранить")
+        s.add(field, 4)
+        s.muted("Имя видят ваши собеседники. Никнейм и ID не меняются.", 8)
+        s.add(save, 14)
+        save.setOnClickListener {
+            if (field.text.isBlank()) return@setOnClickListener act.toast("Введите имя")
+            save.isEnabled = false
+            CoreClient.call("set_profile", JSONObject().put("display_name", field.text.trim())) { _, e ->
+                save.isEnabled = true
+                if (e != null) return@call act.toast(e.message)
+                s.dismiss()
+                saved()
+            }
+        }
         s.show()
     }
 

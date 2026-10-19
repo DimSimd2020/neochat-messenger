@@ -402,6 +402,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
             background = GlassDrawable(ctx, radius = ctx.dpf(25))
             setPadding(dp(6), dp(6), dp(6), dp(6))
         }
+        card.addView(navRow(R.drawable.ic_profile, "Изменить имя") { Dialogs.editName(act, profileName.text.toString()) { loadProfile() } })
         card.addView(navRow(R.drawable.ic_devices, "Устройства") { Dialogs.devices(act) })
         card.addView(navRow(R.drawable.ic_settings, "Настройки") { Dialogs.settings(act) })
         profilePage.addView(card, lp().apply { setMargins(dp(16), dp(24), dp(16), 0) })
@@ -428,9 +429,11 @@ class HomeScreen(private val act: MainActivity) : Screen {
         CoreClient.call("status") { v, _ ->
             val s = v as? JSONObject ?: return@call
             val user = s.str("username")
-            profileAvatar.set(user, s.str("user_id"))
-            profileName.text = user
-            profileSub.text = "@$user"
+            val display = s.str("display_name").ifEmpty { user }
+            profileAvatar.set(display, s.str("user_id"))
+            profileName.text = display
+            profileSub.text = "@$user" + s.str("number").takeIf { it.isNotEmpty() }?.let { " · ID $it" }.orEmpty()
+            profileSub.setTextIsSelectable(true)
         }
     }
 

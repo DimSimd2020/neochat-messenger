@@ -321,6 +321,7 @@ final class ProfileViewController: UIViewController {
         name.textAlignment = .center
         sub.textAlignment = .center
         let card = UIStackView(arrangedSubviews: [
+            row("pencil", "Изменить имя") { [weak self] in self?.editName() },
             row("laptopcomputer.and.iphone", "Устройства") { [weak self] in self?.presentSheet(DevicesViewController()) },
             row("gearshape", "Настройки") { [weak self] in self?.presentSheet(SettingsViewController()) },
         ])
@@ -343,10 +344,31 @@ final class ProfileViewController: UIViewController {
         ])
         Core.shared.call("status") { [weak self] r in
             guard case .success(let v) = r, let s = v as? JSON else { return }
-            self?.avatar.set(s.str("username"), seed: s.str("user_id"))
-            self?.name.text = s.str("username")
-            self?.sub.text = "@" + s.str("username")
+            let display = s.str("display_name").isEmpty ? s.str("username") : s.str("display_name")
+            self?.avatar.set(display, seed: s.str("user_id"))
+            self?.name.text = display
+            self?.sub.text = "@" + s.str("username") + (s.str("number").isEmpty ? "" : " · ID " + s.str("number"))
         }
+    }
+
+    private func editName() {
+        let a = UIAlertController(title: "Имя", message: "Имя видят ваши собеседники. Никнейм и ID не меняются.", preferredStyle: .alert)
+        a.addTextField { [weak self] f in
+            f.text = self?.name.text
+            f.autocapitalizationType = .words
+        }
+        a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        a.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self, weak a] _ in
+            let n = (a?.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespaces)
+            guard !n.isEmpty else { self?.toast("Введите имя"); return }
+            Core.shared.call("set_profile", ["display_name": n]) { r in
+                switch r {
+                case .failure(let e): self?.toast(e.message)
+                case .success: self?.name.text = n
+                }
+            }
+        })
+        present(a, animated: !Theme.reducedMotion)
     }
 
     private func row(_ icon: String, _ text: String, _ action: @escaping () -> Void) -> UIView {

@@ -116,7 +116,7 @@ func register(t *testing.T, s *Server, ts *httptest.Server, username string) *cl
 	secret := sha256.Sum256([]byte("recovery-" + username))
 	req := registerReq{
 		Username: username, Password: "correct horse battery",
-		AccountIdentityKey: rnd(identityLen), RecoveryHash: secret[:], KeyBackup: rnd(80),
+		AccountIdentityKey: rnd(identityLen), RecoveryHash: secret[:], KeyBackup: rnd(80), DisplayName: "Тест",
 		Device: fakeDevice(newUUID(), pub),
 		Roster: rosterIn{Revision: "1", Blob: []byte("roster"), Signature: rnd(64)},
 	}
@@ -186,7 +186,7 @@ func TestRegisterAndLogin(t *testing.T) {
 	c := &client{t: t, base: ts.URL}
 	mk := func(name string) registerReq {
 		h := sha256.Sum256([]byte(name))
-		return registerReq{Username: name, Password: "long enough pw", AccountIdentityKey: rnd(33), RecoveryHash: h[:], KeyBackup: rnd(80),
+		return registerReq{Username: name, Password: "long enough pw", AccountIdentityKey: rnd(33), RecoveryHash: h[:], KeyBackup: rnd(80), DisplayName: "Тест",
 			Device: fakeDevice(newUUID(), pub), Roster: rosterIn{Revision: "1", Blob: []byte("r"), Signature: rnd(64)}}
 	}
 	if st, _ := c.do("POST", "/v1/accounts", mk("alice"), nil); st != 201 {

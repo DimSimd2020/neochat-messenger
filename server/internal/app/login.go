@@ -296,7 +296,7 @@ func (s *Server) handleQRPoll(w http.ResponseWriter, r *http.Request) {
 		var d deviceIn
 		json.Unmarshal(dev, &d)
 		var username string
-		if err := tx.QueryRow(r.Context(), `SELECT username FROM users WHERE id=$1`, *userID).Scan(&username); err != nil {
+		if err := tx.QueryRow(r.Context(), `SELECT `+nicknameSQL+` FROM users WHERE id=$1`, *userID).Scan(&username); err != nil {
 			return err
 		}
 		tokens, _, err := newSession(r.Context(), tx, *userID, d.DeviceID, "")

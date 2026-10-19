@@ -73,30 +73,29 @@ final class NewContactViewController: SheetViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Новый контакт"
-        let first = Field("Имя (обязательно)")
+        let user = Field("Никнейм")
+        let first = Field("Имя (необязательно)")
         first.autocapitalizationType = .words
         let last = Field("Фамилия (необязательно)")
         last.autocapitalizationType = .words
-        let user = Field("Имя пользователя")
         let err = label("", 14, color: Theme.warning)
         err.isHidden = true
         let add = PillButton("Добавить")
-        [first, last, user].forEach(stack.addArrangedSubview)
-        muted("Поиск идёт только по точному имени пользователя: публичного каталога нет.")
+        [user, first, last].forEach(stack.addArrangedSubview)
+        muted("Поиск идёт только по точному никнейму: публичного каталога нет. Без своего имени контакт показывается под именем из его профиля.")
         stack.addArrangedSubview(err)
         stack.addArrangedSubview(add)
         add.addAction(UIAction { [weak self] _ in
             let f = (first.text ?? "").trimmingCharacters(in: .whitespaces)
             var u = (user.text ?? "").trimmingCharacters(in: .whitespaces)
             if u.hasPrefix("@") { u.removeFirst() }
-            if f.isEmpty { err.text = "Введите имя"; err.isHidden = false; return }
-            if u.isEmpty { err.text = "Введите имя пользователя"; err.isHidden = false; return }
+            if u.isEmpty { err.text = "Введите никнейм"; err.isHidden = false; return }
             add.isEnabled = false
             Core.shared.call("resolve_contact", ["username": u, "first_name": f, "last_name": (last.text ?? "").trimmingCharacters(in: .whitespaces)]) { r in
                 add.isEnabled = true
                 switch r {
                 case .failure(let e):
-                    err.text = e.code == "not_found" ? "Пользователь с таким именем не найден" : e.message
+                    err.text = e.code == "not_found" ? "Пользователь с таким никнеймом не найден" : e.message
                     err.isHidden = false
                 case .success:
                     self?.done?()

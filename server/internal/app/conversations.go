@@ -21,8 +21,9 @@ type querier interface {
 }
 
 type memberOut struct {
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
+	UserID      string `json:"user_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
 }
 
 type recipientOut struct {
@@ -111,13 +112,13 @@ func (s *Server) loadConversation(ctx context.Context, q querier, id, viewer, vi
 	if err := json.Unmarshal(leaves, &c.Leaves); err != nil {
 		return nil, err
 	}
-	rows, err := q.Query(ctx, `SELECT u.id, u.username FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=$1 ORDER BY u.username`, c.ID)
+	rows, err := q.Query(ctx, `SELECT u.id, COALESCE(NULLIF(u.nickname, ''), u.username), u.display_name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=$1 ORDER BY u.username`, c.ID)
 	if err != nil {
 		return nil, err
 	}
 	c.Members, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (memberOut, error) {
 		var m memberOut
-		return m, row.Scan(&m.UserID, &m.Username)
+		return m, row.Scan(&m.UserID, &m.Username, &m.DisplayName)
 	})
 	if err != nil {
 		return nil, err

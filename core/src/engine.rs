@@ -243,6 +243,7 @@ impl Inner {
             "qr_login_poll" => self.qr_login_poll(),
             "qr_login_approve" => self.qr_login_approve(p),
             "account_settings" => self.authed("GET", "/v1/accounts/current/settings", None),
+            "set_profile" => self.set_profile(p),
             "set_two_factor" => self
                 .authed("PUT", "/v1/accounts/current/settings", Some(&json!({"two_factor": p["enabled"].as_bool().unwrap_or(false)})))
                 .map(|_| Value::Null),
@@ -297,6 +298,8 @@ impl Inner {
         };
         Ok(json!({
             "logged_in": kv_get(c, "refresh_token")?.is_some() && kv_get(c, "user_id")?.is_some(),
+            "display_name": kv_get_str(c, "display_name")?,
+            "number": kv_get_str(c, "number")?,
             "has_device_keys": kv_get(c, "device_identity")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "user_id": kv_get_str(c, "user_id")?,
             "username": kv_get_str(c, "username")?,
@@ -317,7 +320,12 @@ impl Inner {
 
     fn register(&self, p: &Value) -> Result<Value> {
         let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
-        let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
+        let nickname = s(p, "username")?.trim().trim_start_matches('@').to_string();
+        let username = nickname.to_lowercase();
+        let display = s(p, "display_name")?.trim().to_string();
+        if display.is_empty() {
+            return Err(Error::Invalid("Введите имя".into()));
+        }
         let pw = backup::derive(&username, s(p, "password")?)?;
         let device = keys::new_device()?;
         let account = IdentityKeyPair::generate(&mut rand::rng());
@@ -332,7 +340,8 @@ impl Inner {
         };
         let (blob, sig) = roster.sign(&account)?;
         let body = json!({
-            "username": username,
+            "username": nickname,
+            "display_name": display,
             "password": pw.auth,
             "key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?),
             "account_identity_key": b64(&account.identity_key().serialize()),
@@ -382,6 +391,7 @@ impl Inner {
     }
 
     fn after_login(&self) {
+        let _ = self.refresh_profile();
         self.set_conn(STATE_ONLINE);
         self.emit(json!({"type": "account_changed"}));
         self.wake();
@@ -401,7 +411,7 @@ impl Inner {
             (kv_get_str(&db.conn, "device_id")?, kv_get_str(&db.conn, "username")?, kv_get(&db.conn, "user_id")?.is_some())
         };
         let device_id = match (device_id, stored_user, has_identity) {
-            (Some(d), Some(u), true) if u == username => d,
+            (Some(d), Some(u), true) if u.to_lowercase() == username => d,
             _ => return self.login_new_device(&server, &username, &pw, p),
         };
         let ts = (now_ms() / 1000).to_string();
@@ -764,6 +774,10 @@ impl Inner {
                 }
             }
         }
+        tx.execute(
+            "UPDATE contacts SET username=?2, profile_name=?3, number=?4 WHERE user_id=?1",
+            params![user_id, s(u, "username")?, u["display_name"].as_str().unwrap_or("").trim(), u["number"].as_str().unwrap_or("")],
+        )?;
         if let Some((first, last)) = as_contact {
             tx.execute(
                 "UPDATE contacts SET is_contact=1, first_name=?2, last_name=?3 WHERE user_id=?1",
@@ -787,6 +801,29 @@ impl Inner {
         self.contact_json(&user_id)
     }
 
+    /// Our own public profile: the username as typed, display name and numeric ID.
+    pub fn refresh_profile(&self) -> Result<()> {
+        let (me, _) = self.me()?;
+        let u = self.authed("GET", &format!("/v1/users/{me}"), None)?;
+        let db = self.db();
+        kv_set(&db.conn, "username", s(&u, "username")?.as_bytes())?;
+        kv_set(&db.conn, "display_name", u["display_name"].as_str().unwrap_or("").as_bytes())?;
+        kv_set(&db.conn, "number", u["number"].as_str().unwrap_or("").as_bytes())?;
+        drop(db);
+        self.emit(json!({"type": "account_changed"}));
+        Ok(())
+    }
+
+    fn set_profile(&self, p: &Value) -> Result<Value> {
+        let name = s(p, "display_name")?.trim().to_string();
+        if name.is_empty() {
+            return Err(Error::Invalid("Введите имя".into()));
+        }
+        self.authed("PUT", "/v1/accounts/current/profile", Some(&json!({"display_name": name})))?;
+        self.refresh_profile()?;
+        Ok(Value::Null)
+    }
+
     pub fn refresh_user(&self, user_id: &str) -> Result<()> {
         let u = self.authed("GET", &format!("/v1/users/{user_id}"), None)?;
         self.apply_user(&u, None)?;
@@ -804,8 +841,8 @@ impl Inner {
 
     fn resolve_contact(&self, p: &Value) -> Result<Value> {
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
+        // Without a name of our own the contact shows the name from their profile.
         let first = p["first_name"].as_str().unwrap_or("").trim().to_string();
-        let first = if first.is_empty() { username.clone() } else { first };
         let u = self.authed("POST", "/v1/contacts/resolve", Some(&json!({"username": username})))?;
         let (me, _) = self.me()?;
         if u["user_id"].as_str() == Some(me.as_str()) {
@@ -820,7 +857,7 @@ impl Inner {
         let db = self.db();
         db.conn
             .query_row(
-                "SELECT user_id, username, first_name, last_name, verified, key_changed, is_contact, added_at FROM contacts WHERE user_id=?1",
+                "SELECT user_id, username, first_name, last_name, verified, key_changed, is_contact, added_at, profile_name, number FROM contacts WHERE user_id=?1",
                 [user_id],
                 |r| {
                     Ok(json!({
@@ -828,7 +865,9 @@ impl Inner {
                         "username": r.get::<_, String>(1)?,
                         "first_name": r.get::<_, String>(2)?,
                         "last_name": r.get::<_, String>(3)?,
-                        "display_name": display_name(&r.get::<_, String>(2)?, &r.get::<_, String>(3)?, &r.get::<_, String>(1)?),
+                        "display_name": display_name(&alias_or_profile(&r.get::<_, String>(2)?, &r.get::<_, String>(3)?, &r.get::<_, String>(8)?), &r.get::<_, String>(3)?, &r.get::<_, String>(1)?),
+                        "profile_name": r.get::<_, String>(8)?,
+                        "number": r.get::<_, String>(9)?,
                         "verified": r.get::<_, i64>(4)? == 1,
                         "key_changed": r.get::<_, i64>(5)? == 1,
                         "is_contact": r.get::<_, i64>(6)? == 1,
@@ -843,13 +882,13 @@ impl Inner {
     fn list_contacts(&self, p: &Value) -> Result<Value> {
         let q = p["query"].as_str().unwrap_or("").trim().to_lowercase();
         let order = match p["sort"].as_str().unwrap_or("name-asc") {
-            "name-desc" => "lower(first_name || ' ' || last_name || username) DESC",
+            "name-desc" => "lower(first_name || ' ' || last_name || profile_name || username) DESC",
             "recent" => "added_at DESC",
-            _ => "lower(first_name || ' ' || last_name || username) ASC",
+            _ => "lower(first_name || ' ' || last_name || profile_name || username) ASC",
         };
         let ids: Vec<String> = {
             let db = self.db();
-            let mut st = db.conn.prepare(&format!("SELECT user_id, first_name, last_name, username FROM contacts WHERE is_contact=1 ORDER BY {order}"))?;
+            let mut st = db.conn.prepare(&format!("SELECT user_id, first_name, last_name || ' ' || profile_name, username FROM contacts WHERE is_contact=1 ORDER BY {order}"))?;
             let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?;
             let mut v = Vec::new();
             for row in rows {
@@ -867,10 +906,8 @@ impl Inner {
 
     fn update_contact(&self, p: &Value) -> Result<Value> {
         let id = s(p, "user_id")?;
+        // An empty name returns to the name from the contact's profile.
         let first = p["first_name"].as_str().unwrap_or("").trim();
-        if first.is_empty() {
-            return Err(Error::Invalid("Имя обязательно".into()));
-        }
         self.db().conn.execute(
             "UPDATE contacts SET first_name=?2, last_name=?3, is_contact=1 WHERE user_id=?1",
             params![id, first, p["last_name"].as_str().unwrap_or("").trim()],
@@ -925,6 +962,14 @@ impl Inner {
         self.contact_json(id)
     }
 }
+
+/// The name we gave a contact wins; otherwise the name from their profile.
+pub fn alias_or_profile(first: &str, last: &str, profile: &str) -> String {
+    if first.trim().is_empty() && last.trim().is_empty() { profile.to_string() } else { first.to_string() }
+}
+
+/// SQL form of `alias_or_profile` for a contacts row aliased as `c`.
+pub const NAME_SQL: &str = "CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END";
 
 pub fn display_name(first: &str, last: &str, username: &str) -> String {
     let full = format!("{} {}", first.trim(), last.trim()).trim().to_string();

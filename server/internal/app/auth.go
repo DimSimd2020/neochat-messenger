@@ -34,6 +34,9 @@ const (
 
 var usernameRe = regexp.MustCompile(`^[a-z0-9_]{3,32}$`)
 
+// nicknameRe is the username as typed: letter case is kept for display only.
+var nicknameRe = regexp.MustCompile(`^[A-Za-z0-9_]{3,32}$`)
+
 type prekeyIn struct {
 	ID        uint32 `json:"id"`
 	PublicKey []byte `json:"public_key"`
@@ -240,6 +243,7 @@ func insertPrekeys(ctx context.Context, tx pgx.Tx, deviceID string, ec, kyber []
 
 type registerReq struct {
 	Username           string   `json:"username"`
+	DisplayName        string   `json:"display_name"`
 	Password           string   `json:"password"`
 	AccountIdentityKey []byte   `json:"account_identity_key"`
 	RecoveryHash       []byte   `json:"recovery_hash"`
@@ -258,9 +262,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
-	if !usernameRe.MatchString(req.Username) {
+	nickname := strings.TrimPrefix(strings.TrimSpace(req.Username), "@")
+	if !nicknameRe.MatchString(nickname) {
 		s.fail(w, r, errf(400, "bad_username", "Имя пользователя: 3–32 символа, латинские буквы, цифры и _"))
+		return
+	}
+	req.Username = strings.ToLower(nickname)
+	displayName, err := validateDisplayName(req.DisplayName)
+	if err != nil {
+		s.fail(w, r, err)
 		return
 	}
 	if err := validatePassword(req.Password); err != nil {
@@ -288,8 +298,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	userID := newUUID()
 	var out tokensOut
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash, key_backup)
-			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7,$8)`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup)
+		_, err := tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash, key_backup, nickname, display_name)
+			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7,$8,$9,$10)`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup,
+			nickname, displayName)
 		if isUniqueViolation(err) {
 			return errf(409, "username_taken", "Это имя пользователя уже занято")
 		}

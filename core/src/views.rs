@@ -9,7 +9,8 @@ use crate::keys;
 use crate::outbox::FileMeta;
 
 const COLUMNS: &str = "m.local_id, m.id, m.conversation_id, m.sender_user_id, m.outgoing, m.kind, m.body, m.reply_to, m.file, m.status, m.error, m.sent_at,
-    COALESCE(c.first_name, CASE WHEN m.sender_user_id='system' THEN 'NeoChat' ELSE '' END), COALESCE(c.last_name, ''), COALESCE(c.username, '')";
+    COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END, CASE WHEN m.sender_user_id='system' THEN 'NeoChat' ELSE '' END),
+    COALESCE(c.last_name, ''), COALESCE(c.username, '')";
 
 impl Inner {
     /// Runs a message query; `me` is appended as the last positional parameter.
@@ -52,7 +53,7 @@ impl Inner {
                 Some(rid) => db
                     .conn
                     .query_row(
-                        "SELECT m.body, m.outgoing, COALESCE(c.first_name,''), COALESCE(c.last_name,''), COALESCE(c.username,''), m.kind FROM messages m
+                        "SELECT m.body, m.outgoing, COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END,''), COALESCE(c.last_name,''), COALESCE(c.username,''), m.kind FROM messages m
                          LEFT JOIN contacts c ON c.user_id=m.sender_user_id WHERE m.id=?1",
                         [rid],
                         |x| {

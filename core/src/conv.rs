@@ -307,7 +307,7 @@ impl Inner {
             }
             let c = db
                 .conn
-                .query_row("SELECT username, first_name, last_name, verified, key_changed FROM contacts WHERE user_id=?1", [m], |r| {
+                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))
                 })
                 .optional()?;

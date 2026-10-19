@@ -14,11 +14,12 @@ Access token передаётся в `Authorization: Bearer`, для WSS — в 
 
 ## Набор операций
 
-- `POST /v1/accounts`: username, пароль, публичные ключи первого устройства и первичный подписанный roster. Возвращает сессию и одноразовый recovery code.
+- `POST /v1/accounts`: никнейм (регистр сохраняется для показа, поиск и уникальность — без учёта регистра), имя (display_name, 1–64 символа), пароль, публичные ключи первого устройства и первичный подписанный roster. Возвращает сессию и одноразовый recovery code.
 - `POST /v1/sessions`: вход известного устройства. Оно передаёт `auth` из пароля и подпись своим ключом.
 - `POST /v1/devices/new/start`, `POST /v1/devices/new/finish`: вход нового устройства по паролю. Start проверяет `auth` и код 2FA (ответ `code_required`, если код нужен) и возвращает `key_backup`, ключ аккаунта, roster и одноразовый start_token на 5 минут. Finish принимает устройство и подписанный им roster и возвращает сессию.
 - `POST /v1/devices/qr`, `GET /v1/devices/qr/{id}` (заголовок `X-Link-Secret`), `GET /v1/devices/qr/{id}/device`, `POST /v1/devices/qr/{id}/approve`: вход компьютера по QR-коду, подтверждённый телефоном. Approve сохраняет roster и `sealed` — ключи, зашифрованные секретом из QR.
 - `GET/PUT /v1/accounts/current/settings` (`two_factor`), `GET/PUT /v1/accounts/current/history`: настройки аккаунта и непрозрачная зашифрованная копия переписки.
+- `PUT /v1/accounts/current/profile` (`display_name`): смена имени; связанные пользователи получают событие `profile`. Профиль пользователя содержит `username` (как набран), `display_name` и числовой `number` (с 100001).
 - Событие `notice` (`{"text"}`) кладёт сообщение в системный чат «NeoChat уведомления».
 - `POST /v1/sessions/refresh`, `DELETE /v1/sessions/current`: ротация refresh token / выход.
 - `GET /v1/devices`, `DELETE /v1/devices/{id}`: список и отзыв (с новым подписанным roster).

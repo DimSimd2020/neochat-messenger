@@ -82,6 +82,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/devices/qr/{id}", s.handleQRPoll)
 	m.HandleFunc("GET /v1/devices/qr/{id}/device", s.authed(s.handleQRDevice))
 	m.HandleFunc("POST /v1/devices/qr/{id}/approve", s.authed(s.handleQRApprove))
+	m.HandleFunc("PUT /v1/accounts/current/profile", s.authed(s.handlePutProfile))
 	m.HandleFunc("GET /v1/accounts/current/settings", s.authed(s.handleGetSettings))
 	m.HandleFunc("PUT /v1/accounts/current/settings", s.authed(s.handlePutSettings))
 	m.HandleFunc("GET /v1/accounts/current/history", s.authed(s.handleGetHistory))
