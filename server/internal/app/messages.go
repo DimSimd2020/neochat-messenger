@@ -125,7 +125,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, a *authCtx) 
 			a.DeviceID, req.ClientMessageID).Scan(&ack.MessageID, &storedConv, &storedFP, &cseq, &ack.AcceptedAt)
 		if err == nil {
 			if storedConv != convID || string(storedFP) != string(fp) {
-				return errf(409, "idempotency_conflict", "Этот client_message_id уже использован с другим содержимым")
+				return errf(409, "idempotency_conflict", "Это сообщение уже отправлено с другим содержимым")
 			}
 			ack.ClientMessageID = req.ClientMessageID
 			ack.ConversationSeq = strconv.FormatInt(cseq, 10)

@@ -211,11 +211,11 @@ impl Inner {
             return Ok(());
         }
         let decrypted: Result<Vec<u8>> = (|| {
-            let (ty, body) = wire.split_first().ok_or_else(|| Error::Crypto("empty envelope".into()))?;
+            let (ty, body) = wire.split_first().ok_or_else(|| Error::Crypto("Пустое зашифрованное сообщение".into()))?;
             let msg = match *ty {
                 t if t == CiphertextMessageType::PreKey as u8 => CiphertextMessage::PreKeySignalMessage(PreKeySignalMessage::try_from(body)?),
                 t if t == CiphertextMessageType::Whisper as u8 => CiphertextMessage::SignalMessage(SignalMessage::try_from(body)?),
-                _ => return Err(Error::Crypto("unknown envelope type".into())),
+                _ => return Err(Error::Crypto("Неизвестный тип зашифрованного сообщения".into())),
             };
             let mut sessions = SignalStore::new(&tx)?;
             let mut ids = SignalStore::new(&tx)?;
@@ -405,7 +405,7 @@ impl Inner {
         let url = server.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1) + "/v1/events";
         let token = self.access_token()?;
         let mut req = url.into_client_request().map_err(|e| Error::Network(e.to_string()))?;
-        req.headers_mut().insert("Authorization", format!("Bearer {token}").parse().map_err(|_| Error::Invalid("token".into()))?);
+        req.headers_mut().insert("Authorization", format!("Bearer {token}").parse().map_err(|_| Error::Invalid("Некорректный токен входа".into()))?);
         if self.conn_state.load(Ordering::SeqCst) != STATE_ONLINE {
             self.set_conn(STATE_CONNECTING);
         }

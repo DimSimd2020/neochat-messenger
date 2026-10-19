@@ -4,6 +4,14 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>ru</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>ru</string>
+	</array>
+	<key>CFBundleAllowMixedLocalizations</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Камера нужна, чтобы отсканировать QR-код при привязке нового устройства.</string>
 	<key>CFBundleDisplayName</key>
 	<string>NeoChat</string>
 	<key>CFBundleExecutable</key>

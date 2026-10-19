@@ -96,12 +96,12 @@ func validateDevice(d *deviceIn) error {
 func validatePrekeys(ec, kyber []prekeyIn) error {
 	for _, p := range ec {
 		if len(p.PublicKey) != identityLen {
-			return errf(400, "bad_request", "Некорректный prekey")
+			return errf(400, "bad_request", "Некорректный одноразовый ключ")
 		}
 	}
 	for _, p := range kyber {
 		if len(p.PublicKey) != kyberKeyLen || len(p.Signature) != signatureLen {
-			return errf(400, "bad_request", "Некорректный kyber prekey")
+			return errf(400, "bad_request", "Некорректный постквантовый ключ")
 		}
 	}
 	return nil
@@ -110,7 +110,7 @@ func validatePrekeys(ec, kyber []prekeyIn) error {
 func validateRoster(r *rosterIn) (int64, error) {
 	rev, err := strconv.ParseInt(r.Revision, 10, 64)
 	if err != nil || rev < 1 || len(r.Blob) == 0 || len(r.Blob) > 4096 || len(r.Signature) != signatureLen {
-		return 0, errf(400, "bad_request", "Некорректный roster")
+		return 0, errf(400, "bad_request", "Некорректный список устройств")
 	}
 	return rev, nil
 }
@@ -259,7 +259,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
 	if !usernameRe.MatchString(req.Username) {
-		s.fail(w, r, errf(400, "bad_username", "Username: 3–32 символа, латиница, цифры и _"))
+		s.fail(w, r, errf(400, "bad_username", "Имя пользователя: 3–32 символа, латинские буквы, цифры и _"))
 		return
 	}
 	if err := validatePassword(req.Password); err != nil {
@@ -276,7 +276,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	rev, err := validateRoster(&req.Roster)
 	if err != nil || rev != 1 {
-		s.fail(w, r, errf(400, "bad_request", "Некорректный roster"))
+		s.fail(w, r, errf(400, "bad_request", "Некорректный список устройств"))
 		return
 	}
 	pwHash, err := s.hashPassword(r.Context(), req.Password)
@@ -298,7 +298,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash)
 			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7)`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash)
 		if isUniqueViolation(err) {
-			return errf(409, "username_taken", "Этот username уже занят")
+			return errf(409, "username_taken", "Это имя пользователя уже занято")
 		}
 		if err != nil {
 			return err
@@ -343,7 +343,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, errRateLimited(time.Minute))
 		return
 	}
-	invalid := errf(401, "invalid_credentials", "Неверный username, пароль или устройство")
+	invalid := errf(401, "invalid_credentials", "Неверное имя пользователя, пароль или устройство")
 	var userID, pwHash string
 	var authKey []byte
 	err := s.db.QueryRow(r.Context(), `SELECT u.id, u.password_hash, d.auth_key FROM users u JOIN devices d ON d.user_id=u.id
@@ -503,7 +503,7 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	invalid := errf(401, "invalid_recovery", "Неверный username или код восстановления")
+	invalid := errf(401, "invalid_recovery", "Неверное имя пользователя или код восстановления")
 	var out tokensOut
 	var oldDevices, notify []string
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
@@ -523,7 +523,7 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 			return invalid
 		}
 		if rev <= rosterRev {
-			return errf(409, "roster_revision_conflict", "Устаревшая ревизия roster")
+			return errf(409, "roster_revision_conflict", "Список устройств устарел, обновите его")
 		}
 		rows, err := tx.Query(r.Context(), `UPDATE devices SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL RETURNING id`, userID)
 		if err != nil {

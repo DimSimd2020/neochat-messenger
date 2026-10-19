@@ -206,7 +206,7 @@ final class ChatsViewController: ListViewController {
 
     private func applyFilter() {
         let rows = all.filter { filter == 0 || ($0.str("kind") == (filter == 1 ? "direct" : "group")) }
-        apply(rows, empty: all.isEmpty && query.isEmpty ? "Чатов пока нет. Начните переписку с человеком по его username." : "Ничего не нашли")
+        apply(rows, empty: all.isEmpty && query.isEmpty ? "Чатов пока нет. Начните переписку с человеком по его имени пользователя." : "Ничего не нашли")
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -278,7 +278,7 @@ final class ContactsViewController: ListViewController {
         let q = query
         Core.shared.call("list_contacts", ["query": q, "sort": sort]) { [weak self] r in
             guard let self, q == self.query, case .success(let v) = r else { return }
-            self.apply(v as? [JSON] ?? [], empty: q.isEmpty ? "Контактов пока нет. Добавьте человека по его точному username." : "Никого не нашли по этому запросу.")
+            self.apply(v as? [JSON] ?? [], empty: q.isEmpty ? "Контактов пока нет. Добавьте человека по его точному имени пользователя." : "Никого не нашли по этому запросу.")
         }
     }
 

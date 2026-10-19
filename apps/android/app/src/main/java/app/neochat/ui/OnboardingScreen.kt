@@ -39,7 +39,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private var server = DEFAULT_SERVER
     private val hasKeys = status.optBoolean("has_device_keys")
     private val invite = FloatingField(ctx, "Код приглашения")
-    private val username = FloatingField(ctx, "Username")
+    private val username = FloatingField(ctx, "Имя пользователя")
     private val password = FloatingField(ctx, "Пароль", password = true)
     private val code = FloatingField(ctx, "Код восстановления")
     private val error = ctx.label("", 14f, 400, Theme.Role.WARNING)
@@ -153,7 +153,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         link.addView(ctx.label("Подтвердите на основном устройстве", 22f, 700), lp().apply { topMargin = dp(22) })
         link.addView(
             ctx.label(
-                "Это новый телефон для вашего аккаунта. Откройте NeoChat на основном устройстве: Устройства → Привязать новое, и вставьте код привязки. " +
+                "Это новый телефон для вашего аккаунта. Откройте NeoChat на основном устройстве: Устройства → Сканировать QR-код, и наведите камеру на этот код. " +
                     "Прошлая переписка на этот телефон не переносится.", 14.5f, 400, Theme.Role.MUTED
             ), lp().apply { topMargin = dp(8) }
         )
@@ -227,7 +227,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         if (busy) return
         val user = username.text.trim().removePrefix("@")
         val pass = password.text
-        if (user.isEmpty()) return showError("Введите username")
+        if (user.isEmpty()) return showError("Введите имя пользователя")
         if (pass.isEmpty()) return showError("Введите пароль")
         if (mode != Mode.LOGIN && pass.length < 8) return showError("Пароль — не меньше 8 символов")
         val p = JSONObject().put("server", server).put("username", user).put("device_name", deviceName()).put("platform", "android")

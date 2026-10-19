@@ -54,4 +54,6 @@ android {
 
 dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.0")
+    // QR decoding for device linking; Apache-2.0.
+    implementation("com.google.zxing:core:3.5.3")
 }

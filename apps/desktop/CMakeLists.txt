@@ -35,6 +35,9 @@ add_library(neochat_ui STATIC
     src/style.cpp src/style.h
     src/resources.qrc)
 add_dependencies(neochat_ui neocore)
+# Russian strings for Qt's own widgets (context menus, file dialogs), embedded in the binary.
+qt_add_resources(neochat_ui "qt_ru" PREFIX "/i18n" BASE "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_TRANSLATIONS}"
+    FILES "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_TRANSLATIONS}/qtbase_ru.qm")
 target_include_directories(neochat_ui PUBLIC "${NEOCORE_DIR}/include" src)
 target_compile_definitions(neochat_ui PUBLIC NEOCHAT_VERSION="${PROJECT_VERSION}" UNICODE _UNICODE)
 target_link_libraries(neochat_ui PUBLIC Qt6::Widgets Qt6::Svg "${NEOCORE_LIB}"

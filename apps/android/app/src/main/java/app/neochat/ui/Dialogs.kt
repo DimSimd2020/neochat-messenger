@@ -45,25 +45,25 @@ object Dialogs {
         // Fields do not take focus on open, so the keyboard does not jump up.
         val first = FloatingField(ctx, "Имя (обязательно)")
         val last = FloatingField(ctx, "Фамилия (необязательно)")
-        val user = FloatingField(ctx, "Username")
+        val user = FloatingField(ctx, "Имя пользователя")
         user.edit.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         val err = errorLabel(ctx)
         val submit = PillButton(ctx, "Добавить")
         s.add(first, 4)
         s.add(last, 10)
         s.add(user, 10)
-        s.muted("Поиск идёт только по точному username: публичного каталога нет.", 10)
+        s.muted("Поиск идёт только по точному имени пользователя: публичного каталога нет.", 10)
         s.add(err, 8)
         s.add(submit, 14)
         submit.setOnClickListener {
             if (first.text.isBlank()) return@setOnClickListener err.show("Введите имя")
-            if (user.text.isBlank()) return@setOnClickListener err.show("Введите username")
+            if (user.text.isBlank()) return@setOnClickListener err.show("Введите имя пользователя")
             err.show("")
             submit.isEnabled = false
             val p = JSONObject().put("username", user.text.trim().removePrefix("@")).put("first_name", first.text.trim()).put("last_name", last.text.trim())
             CoreClient.call("resolve_contact", p) { v, e ->
                 submit.isEnabled = true
-                if (e != null) return@call err.show(if (e.code == "not_found") "Пользователь с таким username не найден" else e.message)
+                if (e != null) return@call err.show(if (e.code == "not_found") "Пользователь с таким именем не найден" else e.message)
                 s.dismiss()
                 act.toast("Контакт добавлен")
                 done?.invoke(v as JSONObject)
@@ -112,7 +112,7 @@ object Dialogs {
         s.add(search, 10)
         val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         s.add(rows, 6)
-        val empty = ctx.label("Контактов пока нет. Добавьте человека по username.", 14f, 400, Theme.Role.MUTED)
+        val empty = ctx.label("Контактов пока нет. Добавьте человека по имени пользователя.", 14f, 400, Theme.Role.MUTED)
         s.add(empty, 6)
         val create = PillButton(ctx, "Создать группу")
         create.visibility = View.GONE
@@ -211,12 +211,14 @@ object Dialogs {
         val linkBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
         linkBox.addView(ctx.label("Привязать новое устройство", 15.5f, 600), lp())
         linkBox.addView(
-            ctx.label("На новом устройстве выберите «Привязать», затем вставьте сюда скопированный код привязки.", 13.5f, 400, Theme.Role.MUTED),
+            ctx.label("Войдите в аккаунт на новом устройстве и отсканируйте QR-код с его экрана. Если камеры нет, вставьте скопированный код привязки.", 13.5f, 400, Theme.Role.MUTED),
             lp().apply { topMargin = ctx.dp(6) }
         )
+        val scan = PillButton(ctx, "Сканировать QR-код")
+        linkBox.addView(scan, lp().apply { topMargin = ctx.dp(12) })
         val code = FloatingField(ctx, "Код привязки")
         linkBox.addView(code, lp().apply { topMargin = ctx.dp(10) })
-        val approve = PillButton(ctx, "Подтвердить привязку")
+        val approve = PillButton(ctx, "Подтвердить привязку", primary = false)
         linkBox.addView(approve, lp().apply { topMargin = ctx.dp(12) })
         s.add(linkBox, 18)
 
@@ -255,16 +257,24 @@ object Dialogs {
                 }
             }
         }
-        approve.setOnClickListener {
-            val qr = code.text.trim()
-            if (!qr.startsWith("neochat-link:")) return@setOnClickListener act.toast("Это не код привязки NeoChat")
+        fun link(qr: String) {
+            if (!qr.startsWith("neochat-link:")) return act.toast("Это не код привязки NeoChat")
             approve.isEnabled = false
+            scan.isEnabled = false
             CoreClient.call("link_approve", JSONObject().put("qr", qr)) { _, e ->
                 approve.isEnabled = true
+                scan.isEnabled = true
                 if (e != null) return@call act.toast(e.message)
                 code.setText("")
                 act.toast("Устройство привязано")
                 reload()
+            }
+        }
+        approve.setOnClickListener { link(code.text.trim()) }
+        scan.setOnClickListener {
+            act.withPermission(android.Manifest.permission.CAMERA) { granted ->
+                if (!granted) return@withPermission act.toast("Нет доступа к камере. Разрешите его в настройках или вставьте код вручную")
+                QrScanner(act, "neochat-link:") { link(it) }.show()
             }
         }
         reload()

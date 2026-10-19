@@ -276,7 +276,7 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
     m_empty = new QWidget;
     auto *el = new QVBoxLayout(m_empty);
     el->setContentsMargins(24, 24, 24, 24);
-    m_emptyText = new ui::Label(QStringLiteral("Чатов пока нет. Начните переписку с человеком по его username."), 14, 400, ui::Label::Muted);
+    m_emptyText = new ui::Label(QStringLiteral("Чатов пока нет. Начните переписку с человеком по его имени пользователя."), 14, 400, ui::Label::Muted);
     m_emptyText->setWordWrap(true);
     m_emptyText->setAlignment(Qt::AlignCenter);
     auto *start = new ui::Button(QStringLiteral("Новый чат"), ui::Button::Secondary);

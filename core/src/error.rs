@@ -83,24 +83,24 @@ impl From<rusqlite::Error> for Error {
 }
 
 impl From<libsignal_protocol::SignalProtocolError> for Error {
-    fn from(e: libsignal_protocol::SignalProtocolError) -> Self {
-        Error::Crypto(format!("Ошибка шифрования: {e}"))
+    fn from(_: libsignal_protocol::SignalProtocolError) -> Self {
+        Error::Crypto("Ошибка шифрования".into())
     }
 }
 
 impl From<serde_json::Error> for Error {
-    fn from(e: serde_json::Error) -> Self {
-        Error::Invalid(format!("Некорректные данные: {e}"))
+    fn from(_: serde_json::Error) -> Self {
+        Error::Invalid("Некорректные данные".into())
     }
 }
 
 impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Invalid(format!("Ошибка файла: {e}"))
+    fn from(_: std::io::Error) -> Self {
+        Error::Invalid("Не удалось прочитать или записать файл".into())
     }
 }
 
 /// Maps any displayable library error into a crypto error.
-pub fn crypto<E: std::fmt::Display>(e: E) -> Error {
-    Error::Crypto(format!("Ошибка шифрования: {e}"))
+pub fn crypto<E: std::fmt::Display>(_: E) -> Error {
+    Error::Crypto("Ошибка шифрования".into())
 }

@@ -35,6 +35,8 @@ class MainActivity : Activity(), Sheet.Host {
     private var bottom = 0
     private var ime = 0
     override val bottomInset get() = maxOf(bottom, ime)
+    val topInset get() = top
+    var scanner: QrScanner? = null
 
     private var home: HomeScreen? = null
     private var chat: ChatScreen? = null
@@ -226,6 +228,26 @@ class MainActivity : Activity(), Sheet.Host {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         results.remove(requestCode)?.invoke(resultCode, data) ?: super.onActivityResult(requestCode, resultCode, data)
+    }
+
+    private val permissionResults = HashMap<Int, (Boolean) -> Unit>()
+
+    /** Asks for a runtime permission once and reports whether it is granted. */
+    fun withPermission(permission: String, cb: (Boolean) -> Unit) {
+        if (checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED) return cb(true)
+        val code = nextRequest++
+        permissionResults[code] = cb
+        requestPermissions(arrayOf(permission), code)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        permissionResults.remove(requestCode)?.invoke(grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
+
+    override fun onPause() {
+        // The camera must not stay open behind another app.
+        scanner?.dismiss()
+        super.onPause()
     }
 
     override fun onResume() {

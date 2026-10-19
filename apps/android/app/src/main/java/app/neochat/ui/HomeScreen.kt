@@ -142,7 +142,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private val filterChips = listOf(Chip(ctx, "Все"), Chip(ctx, "Личные"), Chip(ctx, "Группы"))
     private var filter = 0
     private val chatList = RecyclerView(ctx)
-    private val chatEmpty = ctx.label("Чатов пока нет. Начните переписку с человеком по его username.", 14.5f, 400, Theme.Role.MUTED)
+    private val chatEmpty = ctx.label("Чатов пока нет. Начните переписку с человеком по его имени пользователя.", 14.5f, 400, Theme.Role.MUTED)
     private var allChats: List<JSONObject> = emptyList()
     private var chatGen = 0
     private val chatAdapter = RowAdapter { row, c -> bindChat(row, c) }
@@ -357,7 +357,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
             if (e != null || gen != contactGen) return@call
             val rows = (v as? JSONArray)?.objects() ?: emptyList()
             contactAdapter.rows = rows
-            contactEmpty.text = if (q.isEmpty()) "Контактов пока нет. Добавьте человека по его точному username." else "Никого не нашли по этому запросу."
+            contactEmpty.text = if (q.isEmpty()) "Контактов пока нет. Добавьте человека по его точному имени пользователя." else "Никого не нашли по этому запросу."
             contactEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
             if (animate) fadeIn(contactList)
         }

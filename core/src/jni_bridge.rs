@@ -21,8 +21,8 @@ fn read(env: &mut JNIEnv, s: &JString) -> String {
 pub extern "system" fn Java_app_neochat_core_NativeCore_open<'l>(mut env: JNIEnv<'l>, _c: JClass<'l>, config: JString<'l>, listener: JObject<'l>) -> jlong {
     let cfg = read(&mut env, &config);
     let res = (|| -> crate::Result<Core> {
-        let vm = env.get_java_vm().map_err(|e| crate::Error::Invalid(e.to_string()))?;
-        let listener = env.new_global_ref(listener).map_err(|e| crate::Error::Invalid(e.to_string()))?;
+        let vm = env.get_java_vm().map_err(|_| crate::Error::Invalid("Не удалось подключить ядро".into()))?;
+        let listener = env.new_global_ref(listener).map_err(|_| crate::Error::Invalid("Не удалось подключить ядро".into()))?;
         let cfg: Value = serde_json::from_str(&cfg)?;
         Core::open(
             &cfg,

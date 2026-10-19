@@ -42,7 +42,7 @@ impl Api {
                     "POST" => self.agent.post(&url),
                     "PUT" => self.agent.put(&url),
                     "DELETE" => self.agent.delete(&url).force_send_body(),
-                    _ => return Err(Error::Invalid("bad method".into())),
+                    _ => return Err(Error::Invalid("Неподдерживаемый запрос".into())),
                 };
                 if let Some(a) = &auth {
                     req = req.header("Authorization", a);

@@ -262,7 +262,7 @@ func (s *Server) handleLinkStart(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	invalid := errf(401, "invalid_credentials", "Неверный username или пароль")
+	invalid := errf(401, "invalid_credentials", "Неверное имя пользователя или пароль")
 	var userID, pwHash string
 	err := s.db.QueryRow(r.Context(), `SELECT id, password_hash FROM users WHERE username=$1`, req.Username).Scan(&userID, &pwHash)
 	if errors.Is(err, pgx.ErrNoRows) {

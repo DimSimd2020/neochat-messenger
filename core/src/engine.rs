@@ -46,8 +46,8 @@ pub struct Core {
 
 impl Core {
     pub fn open(config: &Value, cb: EventCallback) -> Result<Core> {
-        let data_dir = PathBuf::from(config["data_dir"].as_str().ok_or_else(|| Error::Invalid("data_dir required".into()))?);
-        let key = hex::decode(config["db_key"].as_str().unwrap_or("")).map_err(|_| Error::Invalid("db_key must be hex".into()))?;
+        let data_dir = PathBuf::from(config["data_dir"].as_str().ok_or_else(|| Error::Invalid("Не указан каталог данных".into()))?);
+        let key = hex::decode(config["db_key"].as_str().unwrap_or("")).map_err(|_| Error::Invalid("Некорректный ключ хранилища".into()))?;
         for d in ["files", "outgoing", "tmp"] {
             std::fs::create_dir_all(data_dir.join(d))?;
         }
@@ -194,8 +194,8 @@ impl Inner {
     }
 
     pub fn store_tokens(&self, conn: &rusqlite::Connection, v: &Value) -> Result<()> {
-        let access = v["access_token"].as_str().ok_or_else(|| Error::Invalid("no token".into()))?;
-        let refresh = v["refresh_token"].as_str().ok_or_else(|| Error::Invalid("no token".into()))?;
+        let access = v["access_token"].as_str().ok_or_else(|| Error::Invalid("Сервер не выдал токен входа".into()))?;
+        let refresh = v["refresh_token"].as_str().ok_or_else(|| Error::Invalid("Сервер не выдал токен входа".into()))?;
         let ttl = v["access_expires_in"].as_i64().unwrap_or(900);
         kv_set(conn, "access_token", access.as_bytes())?;
         kv_set(conn, "refresh_token", refresh.as_bytes())?;
@@ -717,7 +717,7 @@ impl Inner {
         let u = self.authed("POST", "/v1/contacts/resolve", Some(&json!({"username": username})))?;
         let (me, _) = self.me()?;
         if u["user_id"].as_str() == Some(me.as_str()) {
-            return Err(Error::Invalid("Это ваш собственный username".into()));
+            return Err(Error::Invalid("Это ваше собственное имя пользователя".into()));
         }
         let c = self.apply_user(&u, Some((&first, p["last_name"].as_str().unwrap_or(""))))?;
         self.emit(json!({"type": "contacts_changed"}));
@@ -841,7 +841,7 @@ pub fn display_name(first: &str, last: &str, username: &str) -> String {
 
 /// QR modules as rows of '1' (dark) and '0' so every client draws the same code.
 fn qr_rows(text: &str) -> Result<Vec<String>> {
-    let code = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::M).map_err(|e| Error::Invalid(format!("QR: {e}")))?;
+    let code = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::M).map_err(|_| Error::Invalid("Не удалось построить QR-код".into()))?;
     let w = code.width();
     let colors = code.to_colors();
     Ok(colors.chunks(w).map(|row| row.iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect()).collect())

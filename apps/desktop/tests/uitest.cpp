@@ -21,6 +21,7 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTranslator>
 #include <QUuid>
 
 extern "C" {
@@ -142,6 +143,10 @@ private:
 
 void UiTest::initTestCase()
 {
+    // Qt's own widgets (context menus, file dialogs) must speak Russian too.
+    QTranslator qtRu;
+    QVERIFY(qtRu.load(QStringLiteral(":/i18n/qtbase_ru.qm")));
+    QVERIFY(!qtRu.translate("QLineEdit", "&Copy").isEmpty());
     m_server = qEnvironmentVariable("NEOCHAT_E2E_SERVER");
     // The onboarding form has no server field; point it at the test server.
     qputenv("NEOCHAT_SERVER", m_server.toUtf8());
@@ -171,7 +176,7 @@ void UiTest::registerAccount()
     QTRY_VERIFY(field("Код приглашения"));
     m_bobName = uname("bob");
     field("Код приглашения")->setText(takeInvite());
-    field("Username")->setText(m_bobName);
+    field("Имя пользователя")->setText(m_bobName);
     QTest::keyClicks(field("Пароль")->edit(), "correct horse battery");
     button("Создать аккаунт")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<QCheckBox>([](QCheckBox *) { return true; }), 15000);
@@ -207,7 +212,7 @@ void UiTest::addContactAndOpenChat()
     QTRY_VERIFY(field("Имя (обязательно)"));
     field("Имя (обязательно)")->setText("Алиса");
     field("Фамилия (необязательно)")->setText("Смирнова");
-    field("Username")->setText(m_aliceName);
+    field("Имя пользователя")->setText(m_aliceName);
     shot("05-new-contact");
     button("Добавить")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().startsWith("Алиса Смирнова"); }), 10000);

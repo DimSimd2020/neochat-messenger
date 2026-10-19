@@ -9,12 +9,16 @@
 #include <QLockFile>
 #include <QMessageBox>
 #include <QStandardPaths>
+#include <QTranslator>
 
 int main(int argc, char *argv[])
 {
     QApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
     QApplication app(argc, argv);
     Q_INIT_RESOURCE(resources);
+    QTranslator qtRu;
+    if (qtRu.load(QStringLiteral(":/i18n/qtbase_ru.qm")))
+        QApplication::installTranslator(&qtRu);
     QApplication::setOrganizationName("NeoChat");
     QApplication::setApplicationName("NeoChat");
     QApplication::setApplicationVersion(NEOCHAT_VERSION);

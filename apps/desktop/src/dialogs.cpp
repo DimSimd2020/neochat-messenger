@@ -190,7 +190,7 @@ void contacts(const DialogHost &h)
                 list->add(row);
             }
             list->fit();
-            empty->setText(arr.isEmpty() ? (search->edit()->text().isEmpty() ? QStringLiteral("Контактов пока нет. Добавьте человека по его точному username.")
+            empty->setText(arr.isEmpty() ? (search->edit()->text().isEmpty() ? QStringLiteral("Контактов пока нет. Добавьте человека по его точному имени пользователя.")
                                                                             : QStringLiteral("Никого не нашли по этому запросу."))
                                          : QString());
             empty->setVisible(arr.isEmpty());
@@ -227,14 +227,14 @@ void newContact(const DialogHost &h, std::function<void()> added)
     auto *sheet = new Sheet(h.host, QStringLiteral("Новый контакт"), 420);
     auto *first = new ui::TextField(QStringLiteral("Имя (обязательно)"));
     auto *last = new ui::TextField(QStringLiteral("Фамилия (необязательно)"));
-    auto *user = new ui::TextField(QStringLiteral("Username"));
+    auto *user = new ui::TextField(QStringLiteral("Имя пользователя"));
     auto *err = new ui::Label({}, 13.5, 400, ui::Label::Warning);
     err->setWordWrap(true);
     err->hide();
     auto *submit = new ui::Button(QStringLiteral("Добавить"));
     for (QWidget *w : {static_cast<QWidget *>(first), static_cast<QWidget *>(last), static_cast<QWidget *>(user), static_cast<QWidget *>(err)})
         sheet->body()->addWidget(w);
-    sheet->body()->addWidget(mutedText(QStringLiteral("Поиск идёт только по точному username: публичного каталога нет.")));
+    sheet->body()->addWidget(mutedText(QStringLiteral("Поиск идёт только по точному имени пользователя: публичного каталога нет.")));
     sheet->body()->addWidget(submit);
     auto go = [=] {
         if (first->text().trimmed().isEmpty()) {
@@ -242,7 +242,7 @@ void newContact(const DialogHost &h, std::function<void()> added)
             return err->show();
         }
         if (user->text().trimmed().isEmpty()) {
-            err->setText(QStringLiteral("Введите username"));
+            err->setText(QStringLiteral("Введите имя пользователя"));
             return err->show();
         }
         err->hide();
@@ -253,7 +253,7 @@ void newContact(const DialogHost &h, std::function<void()> added)
                                    submit->setEnabled(true);
                                    sheet->setBusy(false);
                                    if (!e.ok()) {
-                                       err->setText(e.code == "not_found" ? QStringLiteral("Пользователь с таким username не найден") : e.message);
+                                       err->setText(e.code == "not_found" ? QStringLiteral("Пользователь с таким именем не найден") : e.message);
                                        return err->show();
                                    }
                                    if (h.toast)
@@ -290,7 +290,7 @@ void newChat(const DialogHost &h)
     sheet->body()->addWidget(search);
     auto *list = new RowList(340);
     sheet->body()->addWidget(list);
-    auto *empty = mutedText(QStringLiteral("Контактов пока нет. Добавьте человека по username."));
+    auto *empty = mutedText(QStringLiteral("Контактов пока нет. Добавьте человека по имени пользователя."));
     empty->hide();
     sheet->body()->addWidget(empty);
     auto *create = new ui::Button(QStringLiteral("Создать группу"));
@@ -389,7 +389,7 @@ void devices(const DialogHost &h)
     sheet->body()->addWidget(mutedText(QStringLiteral("Отзыв устройства прекращает доставку новых сообщений на него. "
                                                       "Уже скачанные на нём копии удалённо не стираются.")));
     auto *linkTitle = new ui::Label(QStringLiteral("Привязать новое устройство"), 15, QFont::DemiBold);
-    auto *linkHint = mutedText(QStringLiteral("На новом устройстве выберите «Привязать», затем вставьте сюда скопированный код привязки."));
+    auto *linkHint = mutedText(QStringLiteral("Войдите в аккаунт на новом устройстве, скопируйте там код привязки и вставьте его сюда."));
     auto *code = new ui::TextField(QStringLiteral("Код привязки"));
     auto *approve = new ui::Button(QStringLiteral("Подтвердить привязку"));
     for (QWidget *w : {static_cast<QWidget *>(linkTitle), static_cast<QWidget *>(linkHint), static_cast<QWidget *>(code), static_cast<QWidget *>(approve)})

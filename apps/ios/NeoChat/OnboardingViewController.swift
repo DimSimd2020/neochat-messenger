@@ -16,7 +16,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private let stack = UIStackView()
     private let heading = label("", 28, .bold)
     private let hint = label("", 15, color: Theme.muted)
-    private let username = Field("Username")
+    private let username = Field("Имя пользователя")
     private let password = Field("Пароль", secure: true)
     private let invite = Field("Код приглашения")
     private let code = Field("Код восстановления")
@@ -138,7 +138,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         var user = (username.text ?? "").trimmingCharacters(in: .whitespaces)
         if user.hasPrefix("@") { user.removeFirst() }
         let pass = password.text ?? ""
-        if user.isEmpty { return showError("Введите username") }
+        if user.isEmpty { return showError("Введите имя пользователя") }
         if pass.isEmpty { return showError("Введите пароль") }
         if mode != .login && pass.count < 8 { return showError("Пароль — не меньше 8 символов") }
         var p: JSON = ["server": server, "username": user, "device_name": UIDevice.current.name, "platform": "ios"]
@@ -246,7 +246,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func showLink(_ res: JSON) {
         reset()
         stack.addArrangedSubview(label("Подтвердите на основном устройстве", 24, .bold))
-        stack.addArrangedSubview(label("Это новый телефон для вашего аккаунта. Откройте NeoChat на основном устройстве: Устройства → Привязать новое, и вставьте код привязки. Прошлая переписка на этот телефон не переносится.", 15, color: Theme.muted))
+        stack.addArrangedSubview(label("Это новый телефон для вашего аккаунта. Откройте NeoChat на основном устройстве: Устройства → Сканировать QR-код, и наведите камеру на этот код. Прошлая переписка на этот телефон не переносится.", 15, color: Theme.muted))
         let qr = QrView(rows: res["qr_rows"] as? [String] ?? [])
         let holder = UIView()
         qr.translatesAutoresizingMaskIntoConstraints = false

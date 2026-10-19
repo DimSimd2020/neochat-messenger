@@ -92,7 +92,7 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     // The server address is built in; NEOCHAT_SERVER overrides it for local test servers.
     m_serverUrl = qEnvironmentVariable("NEOCHAT_SERVER", QString::fromLatin1(kDefaultServer));
     m_invite = new ui::TextField(QStringLiteral("Код приглашения"));
-    m_username = new ui::TextField(QStringLiteral("Username"));
+    m_username = new ui::TextField(QStringLiteral("Имя пользователя"));
     m_password = new ui::TextField(QStringLiteral("Пароль"));
     m_password->setPassword(true);
     m_code = new ui::TextField(QStringLiteral("Код восстановления"));
@@ -262,7 +262,7 @@ void Onboarding::submit()
     const QString username = m_username->text().trimmed().remove(QRegularExpression("^@"));
     const QString password = m_password->text();
     if (username.isEmpty())
-        return showError(QStringLiteral("Введите username"));
+        return showError(QStringLiteral("Введите имя пользователя"));
     if (password.isEmpty())
         return showError(QStringLiteral("Введите пароль"));
     if (m_mode != Login && password.size() < 8)

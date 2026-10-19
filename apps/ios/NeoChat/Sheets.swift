@@ -77,12 +77,12 @@ final class NewContactViewController: SheetViewController {
         first.autocapitalizationType = .words
         let last = Field("Фамилия (необязательно)")
         last.autocapitalizationType = .words
-        let user = Field("Username")
+        let user = Field("Имя пользователя")
         let err = label("", 14, color: Theme.warning)
         err.isHidden = true
         let add = PillButton("Добавить")
         [first, last, user].forEach(stack.addArrangedSubview)
-        muted("Поиск идёт только по точному username: публичного каталога нет.")
+        muted("Поиск идёт только по точному имени пользователя: публичного каталога нет.")
         stack.addArrangedSubview(err)
         stack.addArrangedSubview(add)
         add.addAction(UIAction { [weak self] _ in
@@ -90,13 +90,13 @@ final class NewContactViewController: SheetViewController {
             var u = (user.text ?? "").trimmingCharacters(in: .whitespaces)
             if u.hasPrefix("@") { u.removeFirst() }
             if f.isEmpty { err.text = "Введите имя"; err.isHidden = false; return }
-            if u.isEmpty { err.text = "Введите username"; err.isHidden = false; return }
+            if u.isEmpty { err.text = "Введите имя пользователя"; err.isHidden = false; return }
             add.isEnabled = false
             Core.shared.call("resolve_contact", ["username": u, "first_name": f, "last_name": (last.text ?? "").trimmingCharacters(in: .whitespaces)]) { r in
                 add.isEnabled = true
                 switch r {
                 case .failure(let e):
-                    err.text = e.code == "not_found" ? "Пользователь с таким username не найден" : e.message
+                    err.text = e.code == "not_found" ? "Пользователь с таким именем не найден" : e.message
                     err.isHidden = false
                 case .success:
                     self?.done?()
@@ -166,7 +166,7 @@ final class NewChatViewController: SheetViewController {
             guard let self, case .success(let v) = r else { return }
             self.list.arrangedSubviews.forEach { $0.removeFromSuperview() }
             let contacts = v as? [JSON] ?? []
-            if contacts.isEmpty { self.list.addArrangedSubview(label("Контактов пока нет. Добавьте человека по username.", 14, color: Theme.muted)) }
+            if contacts.isEmpty { self.list.addArrangedSubview(label("Контактов пока нет. Добавьте человека по имени пользователя.", 14, color: Theme.muted)) }
             for c in contacts {
                 let uid = c.str("user_id")
                 let on = self.selected.contains(uid)
@@ -239,22 +239,32 @@ final class DevicesViewController: SheetViewController {
                 self.muted("Отзыв устройства прекращает доставку новых сообщений на него. Уже скачанные на нём копии удалённо не стираются.")
                 if primary {
                     self.heading("Привязать новое устройство")
-                    self.muted("На новом устройстве войдите в аккаунт, затем вставьте сюда скопированный код привязки.")
+                    self.muted("Войдите в аккаунт на новом устройстве и отсканируйте QR-код с его экрана. Если камеры нет, вставьте скопированный код привязки.")
+                    let scan = PillButton("Сканировать QR-код")
                     let code = Field("Код привязки")
-                    let approve = PillButton("Подтвердить привязку")
+                    let approve = PillButton("Подтвердить привязку", primary: false)
+                    self.stack.addArrangedSubview(scan)
                     self.stack.addArrangedSubview(code)
                     self.stack.addArrangedSubview(approve)
-                    approve.addAction(UIAction { [weak self] _ in
-                        let qr = (code.text ?? "").trimmingCharacters(in: .whitespaces)
+                    let link: (String) -> Void = { [weak self] qr in
                         guard qr.hasPrefix("neochat-link:") else { self?.toast("Это не код привязки NeoChat"); return }
                         approve.isEnabled = false
+                        scan.isEnabled = false
                         Core.shared.call("link_approve", ["qr": qr]) { r in
                             approve.isEnabled = true
+                            scan.isEnabled = true
                             switch r {
                             case .failure(let e): self?.toast(e.message)
                             case .success: self?.toast("Устройство привязано"); self?.reload()
                             }
                         }
+                    }
+                    scan.addAction(UIAction { [weak self] _ in
+                        guard let self else { return }
+                        QrScannerViewController.present(from: self, prefix: "neochat-link:", onResult: link)
+                    }, for: .touchUpInside)
+                    approve.addAction(UIAction { _ in
+                        link((code.text ?? "").trimmingCharacters(in: .whitespaces))
                     }, for: .touchUpInside)
                 }
             }
@@ -290,7 +300,7 @@ final class SettingsViewController: SheetViewController {
             UserDefaults.standard.set(on, forKey: "notifications")
         }
         stack.addArrangedSubview(notify)
-        muted("В уведомлении видно только название чата. Push-уведомления недоступны для этой подписи: новые сообщения приходят, когда приложение открыто или iOS разрешает фоновое обновление.")
+        muted("В уведомлении видно только название чата. Мгновенные уведомления недоступны в этой сборке: новые сообщения приходят, когда приложение открыто или iOS разрешает фоновое обновление.")
         var receiptsSwitch: UISwitch?
         let receipts = toggleRow("Отчёты о прочтении", on: true) { on in
             Core.shared.call("set_settings", ["read_receipts": on]) { [weak self] r in

@@ -35,3 +35,4 @@ targets:
       - sdk: QuickLook.framework
       - sdk: BackgroundTasks.framework
       - sdk: UserNotifications.framework
+      - sdk: AVFoundation.framework
