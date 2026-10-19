@@ -1,0 +1,253 @@
+//! End-to-end tests against a running NeoChat server.
+//!
+//! Run through `scripts/e2e.sh`, which starts PostgreSQL, the Go server and
+//! passes NEOCHAT_E2E_SERVER and NEOCHAT_E2E_INVITES (comma-separated).
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use neocore::Core;
+use serde_json::{Value, json};
+
+struct Env {
+    server: String,
+    invites: Mutex<Vec<String>>,
+}
+
+static ENV: std::sync::OnceLock<Option<Arc<Env>>> = std::sync::OnceLock::new();
+
+/// Shared by all tests so every invite is used once.
+fn env() -> Option<Arc<Env>> {
+    ENV.get_or_init(|| {
+        let server = std::env::var("NEOCHAT_E2E_SERVER").ok()?;
+        let invites = std::env::var("NEOCHAT_E2E_INVITES").ok()?.split(',').map(|s| s.trim().to_string()).collect();
+        Some(Arc::new(Env { server, invites: Mutex::new(invites) }))
+    })
+    .clone()
+}
+
+struct Client {
+    core: Option<Core>,
+    dir: PathBuf,
+    key: String,
+    events: Arc<Mutex<Vec<Value>>>,
+}
+
+impl Client {
+    fn new() -> Client {
+        let dir = std::env::temp_dir().join(format!("neocore-e2e-{}", uuid::Uuid::new_v4()));
+        let mut c = Client { core: None, dir, key: hex::encode(rand::random::<[u8; 32]>()), events: Default::default() };
+        c.open();
+        c
+    }
+
+    fn open(&mut self) {
+        let ev = self.events.clone();
+        let core = Core::open(
+            &json!({"data_dir": self.dir.to_string_lossy(), "db_key": self.key, "foreground": false}),
+            Box::new(move |s| ev.lock().unwrap().push(serde_json::from_str(s).unwrap())),
+        )
+        .expect("open core");
+        self.core = Some(core);
+    }
+
+    fn reopen(&mut self) {
+        self.core = None;
+        self.open();
+    }
+
+    fn call(&self, m: &str, p: Value) -> Value {
+        self.core.as_ref().unwrap().call(m, &p).unwrap_or_else(|e| panic!("{m}: {e}"))
+    }
+
+    fn try_call(&self, m: &str, p: Value) -> neocore::Result<Value> {
+        self.core.as_ref().unwrap().call(m, &p)
+    }
+
+    fn sync(&self) {
+        self.call("sync_now", json!({}));
+    }
+
+    fn messages(&self, conv: &str) -> Vec<Value> {
+        self.call("list_messages", json!({"conversation_id": conv, "limit": 200})).as_array().unwrap().clone()
+    }
+
+    fn texts(&self, conv: &str) -> Vec<String> {
+        self.messages(conv).iter().filter_map(|m| m["text"].as_str().map(str::to_string)).collect()
+    }
+}
+
+fn register(e: &Env, name: &str) -> (Client, String) {
+    let c = Client::new();
+    let invite = e.invites.lock().unwrap().pop().expect("enough invites");
+    let res = c.call(
+        "register",
+        json!({"server": e.server, "invite": invite, "username": name, "password": "correct horse battery", "device_name": "test", "platform": "windows"}),
+    );
+    assert!(res["recovery_code"].as_str().unwrap().len() > 40);
+    (c, res["recovery_code"].as_str().unwrap().to_string())
+}
+
+fn uname(prefix: &str) -> String {
+    format!("{prefix}_{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+}
+
+fn uid(c: &Client) -> String {
+    c.call("status", json!({}))["user_id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn direct_chat_restart_receipts_and_dedupe() {
+    let Some(e) = env() else { return };
+    let (mut alice, _) = register(&e, &uname("alice"));
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+
+    let contact = alice.call("resolve_contact", json!({"username": bname, "first_name": "Боб"}));
+    assert_eq!(contact["display_name"], "Боб");
+    let conv = alice.call("open_direct", json!({"user_id": contact["user_id"]}));
+    let cid = conv["id"].as_str().unwrap().to_string();
+
+    alice.call("send_text", json!({"conversation_id": cid, "text": "Привет, Боб!"}));
+    alice.sync();
+    let sent = alice.messages(&cid);
+    assert_eq!(sent.last().unwrap()["status"], "sent", "{sent:?}");
+
+    bob.sync();
+    assert_eq!(bob.texts(&cid), vec!["Привет, Боб!"]);
+    let bconv = bob.call("get_conversation", json!({"conversation_id": cid}));
+    assert_eq!(bconv["unread"], 1);
+
+    // Bob's delivered receipt and reply reach Alice.
+    bob.call("send_text", json!({"conversation_id": cid, "text": "Привет!"}));
+    bob.sync();
+    alice.sync();
+    let a = alice.messages(&cid);
+    assert_eq!(a.iter().map(|m| m["text"].as_str().unwrap()).collect::<Vec<_>>(), vec!["Привет, Боб!", "Привет!"]);
+    assert_eq!(a[0]["status"], "delivered", "{a:?}");
+
+    // Read receipt.
+    bob.call("mark_read", json!({"conversation_id": cid}));
+    bob.sync();
+    alice.sync();
+    assert_eq!(alice.messages(&cid)[0]["status"], "read");
+
+    // Sessions and keys survive a restart.
+    alice.reopen();
+    alice.call("send_text", json!({"conversation_id": cid, "text": "после перезапуска"}));
+    alice.sync();
+    bob.sync();
+    assert_eq!(bob.texts(&cid).last().unwrap(), "после перезапуска");
+
+    // Replaying the whole feed must not duplicate messages.
+    bob.core.as_ref().unwrap().inner.db().conn.execute("DELETE FROM kv WHERE k='cursor'", []).unwrap();
+    bob.sync();
+    assert_eq!(bob.texts(&cid).len(), 3);
+}
+
+#[test]
+fn group_membership_and_files() {
+    let Some(e) = env() else { return };
+    let (alice, _) = register(&e, &uname("alice"));
+    let (bname, cname) = (uname("bob"), uname("carol"));
+    let (bob, _) = register(&e, &bname);
+    let (carol, _) = register(&e, &cname);
+    let b = alice.call("resolve_contact", json!({"username": bname}));
+    let c = alice.call("resolve_contact", json!({"username": cname}));
+    let g = alice.call("create_group", json!({"title": "Наши", "member_ids": [b["user_id"], c["user_id"]]}));
+    let gid = g["id"].as_str().unwrap().to_string();
+    alice.call("send_text", json!({"conversation_id": gid, "text": "всем привет"}));
+    alice.sync();
+    bob.sync();
+    carol.sync();
+    assert_eq!(bob.texts(&gid), vec!["всем привет"]);
+    assert_eq!(carol.texts(&gid), vec!["всем привет"]);
+    assert_eq!(bob.call("get_conversation", json!({"conversation_id": gid}))["title"], "Наши");
+
+    // Carol is removed; later messages do not reach her.
+    alice.call("group_set_members", json!({"conversation_id": gid, "member_ids": [b["user_id"]]}));
+    alice.call("send_text", json!({"conversation_id": gid, "text": "без Кэрол"}));
+    alice.sync();
+    bob.sync();
+    carol.sync();
+    assert_eq!(bob.texts(&gid), vec!["всем привет", "без Кэрол"]);
+    assert_eq!(carol.texts(&gid), vec!["всем привет"]);
+    assert_eq!(carol.call("get_conversation", json!({"conversation_id": gid}))["left"], true);
+    assert!(carol.try_call("send_text", json!({"conversation_id": gid, "text": "x"})).is_err());
+
+    // Encrypted file: Bob downloads and gets identical bytes.
+    let src = std::env::temp_dir().join(format!("nc-e2e-{}.bin", uuid::Uuid::new_v4()));
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+    let m = alice.call("send_file", json!({"conversation_id": gid, "path": src.to_string_lossy(), "mime": "application/octet-stream"}));
+    alice.sync();
+    bob.sync();
+    let path = bob.call("download_file", json!({"message_id": m["id"]}))["path"].as_str().unwrap().to_string();
+    assert_eq!(std::fs::read(path).unwrap(), data);
+
+    // Bob leaves; Alice is alone and sending reports no recipients.
+    bob.call("group_leave", json!({"conversation_id": gid}));
+    alice.sync();
+    let ag = alice.call("get_conversation", json!({"conversation_id": gid}));
+    assert_eq!(ag["member_count"], 1, "{ag}");
+}
+
+#[test]
+fn linked_device_and_recovery() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let (alice, _) = register(&e, &aname);
+    let bname = uname("bob");
+    let (bob, bob_code) = register(&e, &bname);
+
+    // Second device for Alice, approved by the primary through the QR text.
+    let alice2 = Client::new();
+    let qr = alice2.call(
+        "link_start",
+        json!({"server": e.server, "username": aname, "password": "correct horse battery", "device_name": "phone", "platform": "android"}),
+    )["qr"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(alice2.call("link_poll", json!({}))["status"], "pending");
+    alice.call("link_approve", json!({"qr": qr}));
+    assert_eq!(alice2.call("link_poll", json!({}))["status"], "approved");
+    assert_eq!(alice.call("devices", json!({}))["devices"].as_array().unwrap().len(), 2);
+
+    let b = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
+    let a = bob.call("resolve_contact", json!({"username": aname}));
+    assert_eq!(bob.call("open_direct", json!({"user_id": a["user_id"]}))["id"].as_str().unwrap(), cid);
+    bob.call("send_text", json!({"conversation_id": cid, "text": "двум устройствам"}));
+    bob.sync();
+    alice.sync();
+    alice2.sync();
+    assert_eq!(alice.texts(&cid), vec!["двум устройствам"]);
+    assert_eq!(alice2.texts(&cid), vec!["двум устройствам"]);
+
+    // A message from the secondary shows as outgoing on the primary.
+    alice2.call("send_text", json!({"conversation_id": cid, "text": "с телефона"}));
+    alice2.sync();
+    alice.sync();
+    let last = alice.messages(&cid).last().unwrap().clone();
+    assert_eq!(last["text"], "с телефона");
+    assert_eq!(last["outgoing"], true);
+
+    // Bob recovers his account: Alice must see the key change and cannot send until she accepts.
+    let bob2 = Client::new();
+    bob2.call(
+        "recover",
+        json!({"server": e.server, "username": bname, "recovery_code": bob_code, "new_password": "new long password", "device_name": "new", "platform": "windows"}),
+    );
+    alice.sync();
+    let err = alice.try_call("send_text", json!({"conversation_id": cid, "text": "кто ты?"})).unwrap_err();
+    assert_eq!(err.code(), "key_changed");
+    alice.call("accept_key_change", json!({"user_id": uid(&bob2)}));
+    alice.call("send_text", json!({"conversation_id": cid, "text": "снова привет"}));
+    alice.sync();
+    bob2.sync();
+    // History is not restored on the recovered device; only the new message arrives.
+    assert_eq!(bob2.texts(&cid), vec!["снова привет"]);
+    // The old device is revoked.
+    assert!(bob.try_call("sync_now", json!({})).is_err() || !bob.call("status", json!({}))["logged_in"].as_bool().unwrap());
+}

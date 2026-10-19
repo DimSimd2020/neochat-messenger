@@ -1,0 +1,41 @@
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.mobileprovision
+*.keystore
+*.jks
+secrets/
+
+# Build output and machine-local settings
+build/
+out/
+dist/
+.gradle/
+.idea/
+.vs/
+local.properties
+*.user
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Local databases, generated application packages and logs
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
+*.apk
+*.aab
+*.ipa
+*.dSYM/
+
+# Rust build output
+target/
