@@ -1,0 +1,40 @@
+[Unit]
+Description=NeoChat server
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=neochat
+Group=neochat
+ExecStart=/opt/neochat/neochat serve
+Environment=NEOCHAT_DATABASE_URL=postgres:///neochat?host=/run/postgresql
+Environment=NEOCHAT_LISTEN=127.0.0.1:8090
+Environment=NEOCHAT_DATA_DIR=/var/lib/neochat
+Environment=NEOCHAT_ARGON_MEMORY_KIB=65536
+Environment=NEOCHAT_ARGON_PARALLEL=1
+Restart=on-failure
+RestartSec=2
+MemoryMax=300M
+# Hardening: no privileges, read-only system, only the data directory is writable.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+StateDirectory=neochat
+StateDirectoryMode=0700
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

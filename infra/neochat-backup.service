@@ -1,0 +1,7 @@
+[Unit]
+Description=NeoChat database backup
+
+[Service]
+Type=oneshot
+User=postgres
+ExecStart=/bin/sh -c 'umask 077; f=/var/backups/neochat/neochat-$(date +%%Y%%m%%d-%%H%%M).dump; pg_dump -Fc neochat > "$f.tmp" && mv "$f.tmp" "$f"; find /var/backups/neochat -name "*.dump" -mtime +7 -delete'
