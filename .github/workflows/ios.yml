@@ -45,6 +45,7 @@ jobs:
       - name: Build (unsigned)
         working-directory: apps/ios
         run: |
+          set -o pipefail
           xcodebuild -project NeoChat.xcodeproj -scheme NeoChat -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -n 200
@@ -54,6 +55,10 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/NeoChat.app Payload/
+          # The core must be linked statically into the app binary.
+          if otool -L Payload/NeoChat.app/NeoChat | grep -q neocore; then echo "core linked dynamically"; exit 1; fi
+          nm -gU Payload/NeoChat.app/NeoChat >/dev/null 2>&1 || true
+          ls -la Payload/NeoChat.app/NeoChat
           zip -qry NeoChat-unsigned.ipa Payload
           ls -la NeoChat-unsigned.ipa
 

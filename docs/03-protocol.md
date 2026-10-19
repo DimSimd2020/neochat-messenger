@@ -14,7 +14,7 @@ Access token передаётся в `Authorization: Bearer`, для WSS — в 
 
 ## Набор операций
 
-- `POST /v1/accounts`: приглашение, username, парольная фраза, публичные ключи первого устройства и первичный подписанный roster. Возвращает сессию и одноразовый recovery code.
+- `POST /v1/accounts`: приглашение, username, пароль, публичные ключи первого устройства и первичный подписанный roster. Возвращает сессию и одноразовый recovery code.
 - `POST /v1/sessions`: проверка пароля. Известное устройство доказывает владение ключом; новое получает только ограниченную pending-сессию для привязки.
 - `POST /v1/sessions/refresh`, `DELETE /v1/sessions/current`: ротация refresh token / выход.
 - `GET /v1/devices`, `POST /v1/devices/link`, `POST /v1/devices/{id}/approve`, `DELETE /v1/devices/{id}`: ограниченный QR-flow, подтверждение основным устройством, отзыв. Пароль сам по себе не добавляет доверенное устройство.

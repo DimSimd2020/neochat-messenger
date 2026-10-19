@@ -23,8 +23,8 @@ targets:
         INFOPLIST_FILE: NeoChat/Info.plist
         SWIFT_OBJC_BRIDGING_HEADER: NeoChat/NeoChat-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/../../core/include
-        LIBRARY_SEARCH_PATHS: $(SRCROOT)/../../core/target/aarch64-apple-ios/release
-        OTHER_LDFLAGS: -lneocore
+        # Link the static core explicitly: the same folder also holds a dylib.
+        OTHER_LDFLAGS: $(SRCROOT)/../../core/target/aarch64-apple-ios/release/libneocore.a
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
