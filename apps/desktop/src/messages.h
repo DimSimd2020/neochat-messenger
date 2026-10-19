@@ -3,6 +3,8 @@
 #include <QAbstractListModel>
 #include <QDate>
 #include <QElapsedTimer>
+#include <QHash>
+#include <QPixmap>
 #include <QJsonObject>
 #include <QListView>
 #include <QSet>
@@ -49,8 +51,27 @@ private:
 
 // Geometry of one message row, shared by painting and hit testing.
 struct MessageLayout {
-    QRectF bubble, name, avatar, text, meta, reply, file, download, retry;
+    QRectF bubble, name, avatar, text, meta, reply, file, download, retry, image, pollInfo;
+    QList<QRectF> options; // poll answers
     qreal height = 0;
+};
+
+// Photos in bubbles: the thumbnail from the message at once, the decrypted file
+// once download_file has it. `changed` asks views to repaint.
+class ImageCache : public QObject {
+    Q_OBJECT
+public:
+    static ImageCache *instance();
+    QPixmap thumb(const QJsonObject &m);
+    QPixmap full(const QJsonObject &m); // null until loaded; starts the download
+
+signals:
+    void changed();
+
+private:
+    using QObject::QObject;
+    QHash<QString, QPixmap> m_thumbs, m_full;
+    QHash<QString, qint64> m_pending; // id -> request time (ms since epoch)
 };
 
 class MessageDelegate : public QStyledItemDelegate {
@@ -84,6 +105,7 @@ protected:
     void contextMenuEvent(QContextMenuEvent *e) override;
     void keyPressEvent(QKeyEvent *e) override;
     void paintEvent(QPaintEvent *e) override;
+    bool viewportEvent(QEvent *e) override;
     // The backdrop is fixed to the window: repaint instead of moving pixels.
     void scrollContentsBy(int, int) override { viewport()->update(); }
 
@@ -94,6 +116,9 @@ private:
     void openFile(const QJsonObject &m);
     void saveFile(const QJsonObject &m);
     void retry(const QJsonObject &m);
+    void openImage(const QJsonObject &m);
+    void vote(const QJsonObject &m, int option);
+    QString linkAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const;
     void placeJump();
     QJsonObject messageAt(const QPoint &pos, MessageLayout *lay = nullptr) const;
 

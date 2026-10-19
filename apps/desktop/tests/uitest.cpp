@@ -14,7 +14,9 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QBuffer>
 #include <QCheckBox>
+#include <QPainter>
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -297,6 +299,44 @@ void UiTest::receiptsAndGroup()
     auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
     QTRY_VERIFY_WITH_TIMEOUT(!panel->conversation(gid).isEmpty(), 20000);
     shot("11-group-in-list");
+
+    // Markdown and a photo with its thumbnail in the direct chat.
+    QImage img(1200, 800, QImage::Format_RGB32);
+    QPainter ip(&img);
+    QLinearGradient lg(0, 0, 1200, 800);
+    lg.setColorAt(0, QColor("#2F6FE4"));
+    lg.setColorAt(1, QColor("#35C7A5"));
+    ip.fillRect(img.rect(), lg);
+    ip.setBrush(QColor("#FFE08A"));
+    ip.drawEllipse(QPointF(900, 220), 120, 120);
+    ip.end();
+    const QString photo = m_dir.path() + "/lake.jpg";
+    QVERIFY(img.save(photo, "JPEG", 85));
+    QByteArray jpeg;
+    QBuffer buf(&jpeg);
+    buf.open(QIODevice::WriteOnly);
+    img.scaled(160, 160, Qt::KeepAspectRatio, Qt::SmoothTransformation).save(&buf, "JPEG", 55);
+    m_alice->call("send_text", {{"conversation_id", m_conv}, {"text", "**План:** выезд в _десять_, ~~в шесть~~ нет. Код `A-17`, карта https://neochat.app/map"}});
+    m_alice->call("send_file", {{"conversation_id", m_conv}, {"path", photo}, {"mime", "image/jpeg"}, {"thumb", QString::fromLatin1(jpeg.toBase64())}, {"width", 1200}, {"height", 800}});
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("file").toObject().value("image").toBool(), 20000);
+    QTest::qWait(2500); // the full image replaces the thumbnail
+    shot("11a-markdown-photo");
+
+    // A poll in the group.
+    m_alice->call("send_poll", {{"conversation_id", gid}, {"question", "Во сколько выезжаем?"}, {"options", QJsonArray{"9:00", "10:00", "11:00"}}, {"anonymous", false}});
+    m_alice->call("sync_now");
+    panel->select(gid);
+    emit panel->activated(gid);
+    QTRY_VERIFY_WITH_TIMEOUT(view->conversation() == gid && lastMessage(view).value("kind").toString() == "poll", 20000);
+    m_alice->call("vote_poll", {{"message_id", lastMessage(view).value("id")}, {"choices", QJsonArray{1}}});
+    m_alice->call("sync_now");
+    Core::instance()->call("vote_poll", {{"message_id", lastMessage(view).value("id")}, {"choices", QJsonArray{1}}});
+    QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("poll").toObject().value("voters").toInt() == 2, 20000);
+    shot("11b-poll");
+    panel->select(m_conv);
+    emit panel->activated(m_conv);
+    QTRY_VERIFY(view->conversation() == m_conv);
 }
 
 void UiTest::themeSettingsAndSidebar()

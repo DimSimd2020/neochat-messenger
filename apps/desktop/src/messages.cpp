@@ -9,13 +9,24 @@
 #include <QContextMenuEvent>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QAbstractTextDocumentLayout>
 #include <QFileDialog>
+#include <QFontDatabase>
+#include <QGraphicsOpacityEffect>
+#include <QHelpEvent>
+#include <QImageReader>
 #include <QJsonArray>
+#include <QKeyEvent>
 #include <QLocale>
 #include <QMenu>
 #include <QPainter>
+#include <QPropertyAnimation>
 #include <QScrollBar>
 #include <QStandardPaths>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <QToolTip>
 #include <QUrl>
 
 namespace {
@@ -96,8 +107,193 @@ QString messageText(const QJsonObject &m)
 
 QFont textFont() { return Theme::instance()->font(15.5); }
 QFont metaFont() { return Theme::instance()->font(11.5); }
+QFont pollFont() { return Theme::instance()->font(15.5, QFont::DemiBold); }
+
+bool isImage(const QJsonObject &m)
+{
+    return m.value("kind").toString() == "file" && m.value("file").toObject().value("image").toBool();
+}
+
+QString votesText(int n)
+{
+    const int m10 = n % 10, m100 = n % 100;
+    const char *word = (m10 == 1 && m100 != 11) ? "голос" : (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) ? "голоса" : "голосов";
+    return QString::number(n) + " " + QString::fromUtf8(word);
+}
+
+// Rich text of a message built from the core's markdown spans; cached per text and font.
+QTextDocument *textDoc(const QJsonObject &m)
+{
+    static QHash<QString, QTextDocument *> cache;
+    const QFont font = textFont();
+    const QString key = m.value("id").toString() + '|' + font.family() + '|' + QString::number(font.pointSizeF()) + '|' + messageText(m);
+    if (QTextDocument *d = cache.value(key))
+        return d;
+    if (cache.size() > 3000) {
+        qDeleteAll(cache);
+        cache.clear();
+    }
+    auto *d = new QTextDocument;
+    d->setDocumentMargin(0);
+    d->setDefaultFont(font);
+    QTextOption o;
+    o.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    d->setDefaultTextOption(o);
+    QTextCursor cur(d);
+    const QJsonArray spans = m.value("spans").toArray();
+    if (spans.isEmpty())
+        cur.insertText(messageText(m));
+    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    if (font.pixelSize() > 0)
+        mono.setPixelSize(qRound(font.pixelSize() * 0.9));
+    else
+        mono.setPointSizeF(font.pointSizeF() * 0.9);
+    for (const auto &v : spans) {
+        const QJsonObject s = v.toObject();
+        QTextCharFormat f;
+        if (s.value("code").toBool() || s.value("pre").toBool()) {
+            f.setFont(mono);
+            f.setBackground(QColor(127, 127, 127, 48));
+        }
+        if (s.value("bold").toBool())
+            f.setFontWeight(QFont::Bold);
+        if (s.value("italic").toBool())
+            f.setFontItalic(true);
+        if (s.value("strike").toBool())
+            f.setFontStrikeOut(true);
+        if (s.contains("link")) {
+            f.setAnchor(true);
+            f.setAnchorHref(s.value("link").toString());
+            f.setFontUnderline(true);
+        }
+        QString t = s.value("text").toString();
+        if (s.value("pre").toBool()) {
+            // A code block always stands on its own lines.
+            if (!cur.atBlockStart())
+                cur.insertBlock();
+            cur.insertText(t, f);
+            cur.insertBlock();
+            cur.setCharFormat({});
+            continue;
+        }
+        cur.insertText(t, f);
+    }
+    // Drop the empty line a trailing code block leaves behind.
+    if (cur.block().text().isEmpty() && cur.block().previous().isValid()) {
+        cur.deletePreviousChar();
+    }
+    cache.insert(key, d);
+    return d;
+}
+
+// Full-window photo viewer: click, Esc or Space closes; fades unless motion is reduced.
+class PhotoViewer : public QWidget {
+public:
+    PhotoViewer(QWidget *win, const QImage &img) : QWidget(win), m_img(img)
+    {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setFocusPolicy(Qt::StrongFocus);
+        setAccessibleName(QStringLiteral("Просмотр фото. Esc — закрыть"));
+        setGeometry(win->rect());
+        win->installEventFilter(this);
+        auto *fx = new QGraphicsOpacityEffect(this);
+        fx->setOpacity(0);
+        setGraphicsEffect(fx);
+        m_fade = new QPropertyAnimation(fx, "opacity", this);
+        show();
+        raise();
+        setFocus(Qt::OtherFocusReason);
+        fade(1);
+    }
+
+protected:
+    bool eventFilter(QObject *o, QEvent *e) override
+    {
+        if (o == parent() && e->type() == QEvent::Resize)
+            setGeometry(parentWidget()->rect());
+        return false;
+    }
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        p.fillRect(rect(), QColor(4, 9, 20, 236));
+        const QRectF avail = QRectF(rect()).adjusted(32, 32, -32, -32);
+        const qreal s = qMin(qMin(avail.width() / m_img.width(), avail.height() / m_img.height()), 1.0 / devicePixelRatioF());
+        QSizeF sz = QSizeF(m_img.size()) * s;
+        p.drawImage(QRectF(avail.center() - QPointF(sz.width() / 2, sz.height() / 2), sz), m_img);
+    }
+    void mousePressEvent(QMouseEvent *) override { fade(0); }
+    void keyPressEvent(QKeyEvent *e) override
+    {
+        if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Space || e->key() == Qt::Key_Return)
+            fade(0);
+    }
+
+private:
+    void fade(qreal to)
+    {
+        m_fade->stop();
+        m_fade->setDuration(Theme::ms(180));
+        m_fade->setEndValue(to);
+        if (to == 0)
+            connect(m_fade, &QPropertyAnimation::finished, this, &QWidget::close);
+        m_fade->start();
+    }
+    QImage m_img;
+    QPropertyAnimation *m_fade;
+};
 
 } // namespace
+
+// ---- images ----
+
+ImageCache *ImageCache::instance()
+{
+    static ImageCache *c = new ImageCache(qApp);
+    return c;
+}
+
+QPixmap ImageCache::thumb(const QJsonObject &m)
+{
+    const QString id = m.value("id").toString();
+    auto it = m_thumbs.find(id);
+    if (it != m_thumbs.end())
+        return *it;
+    QPixmap px;
+    px.loadFromData(QByteArray::fromBase64(m.value("file").toObject().value("thumb").toString().toLatin1()));
+    m_thumbs.insert(id, px);
+    return px;
+}
+
+QPixmap ImageCache::full(const QJsonObject &m)
+{
+    const QString id = m.value("id").toString();
+    auto it = m_full.find(id);
+    if (it != m_full.end())
+        return *it;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // Large originals are fetched only on demand; failures retry after 30 s.
+    if (m.value("file").toObject().value("size").toDouble() > 25e6 || now - m_pending.value(id, 0) < 30000)
+        return {};
+    m_pending.insert(id, now);
+    Core::instance()->call("download_file", {{"message_id", id}}, this, [this, id](const QJsonValue &v, const CoreError &e) {
+        if (!e.ok())
+            return;
+        QImageReader reader(v.toObject().value("path").toString());
+        reader.setAutoTransform(true);
+        const QSize sz = reader.size();
+        if (sz.isValid() && qMax(sz.width(), sz.height()) > 1100)
+            reader.setScaledSize(sz.scaled(1100, 1100, Qt::KeepAspectRatio));
+        const QImage img = reader.read();
+        if (img.isNull())
+            return;
+        m_full.insert(id, QPixmap::fromImage(img));
+        m_pending.remove(id);
+        emit changed();
+    });
+    return {};
+}
 
 // ---- model ----
 
@@ -113,8 +309,12 @@ QVariant MessageModel::data(const QModelIndex &index, int role) const
             return dateTitle(it.date);
         const QJsonObject &m = it.msg;
         QString s = m.value("sender_name").toString() + ", " + QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm") + ": ";
-        if (m.value("kind").toString() == "file")
+        if (isImage(m))
+            s += QStringLiteral("фото. ");
+        else if (m.value("kind").toString() == "file")
             s += QStringLiteral("файл ") + m.value("file").toObject().value("name").toString() + ". ";
+        else if (m.value("kind").toString() == "poll")
+            s += QStringLiteral("опрос. ");
         s += messageText(m);
         const QString st = statusText(m);
         if (m.value("outgoing").toBool() && !st.isEmpty())
@@ -237,17 +437,42 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         w = qMax(w, L.reply.width());
         h += 46;
     }
-    if (m.value("kind").toString() == "file") {
+    const QString kind = m.value("kind").toString();
+    const QString text = messageText(m);
+    if (isImage(m)) {
+        const QJsonObject f = m.value("file").toObject();
+        qreal iw = f.value("width").toDouble(), ih = f.value("height").toDouble();
+        if (iw <= 0 || ih <= 0)
+            iw = 4, ih = 3;
+        const qreal s = qMin(qMin(maxBubble - 8, 340.0) / iw, 360.0 / ih);
+        const qreal top = L.reply.isNull() ? 4 : h;
+        L.image = QRectF(0, top, qMax(140.0, iw * s), qMax(90.0, ih * s));
+        w = qMax(w, L.image.width() + 8 - 2 * kPadH);
+        h = top + L.image.height() + 6;
+    } else if (kind == "file") {
         L.file = QRectF(0, h + 3, qMin(inner, 300.0), 62);
         w = qMax(w, L.file.width());
         h += 70;
     }
-    const QString text = messageText(m);
-    if (!text.isEmpty()) {
-        const QRectF br = QFontMetricsF(textFont()).boundingRect(QRectF(0, 0, inner, 1e6), Qt::TextWordWrap, text);
-        L.text = QRectF(0, h, qMin(inner, br.width() + 1), br.height());
-        w = qMax(w, L.text.width());
+    if (kind == "poll") {
+        const qreal pw = qMin(inner, 320.0);
+        const QRectF br = QFontMetricsF(pollFont()).boundingRect(QRectF(0, 0, pw, 1e6), Qt::TextWordWrap, text);
+        L.text = QRectF(0, h, pw, br.height());
         h += br.height() + 2;
+        L.pollInfo = QRectF(0, h, pw, 18);
+        h += 24;
+        for (int i = 0; i < m.value("poll").toObject().value("options").toArray().size(); ++i) {
+            L.options << QRectF(0, h, pw, 40);
+            h += 42;
+        }
+        w = qMax(w, pw);
+    } else if (!text.isEmpty()) {
+        QTextDocument *d = textDoc(m);
+        if (d->textWidth() != inner)
+            d->setTextWidth(inner);
+        L.text = QRectF(0, h, qMin(inner, std::ceil(d->idealWidth()) + 1), d->size().height());
+        w = qMax(w, L.text.width());
+        h += L.text.height() + 2;
     }
     const QFontMetricsF mf(metaFont());
     const QString time = QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm");
@@ -270,7 +495,12 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     place(L.reply, false);
     place(L.file, false);
     place(L.text, false);
+    place(L.pollInfo, false);
+    for (QRectF &o : L.options)
+        place(o, false);
     place(L.meta, true);
+    if (!L.image.isNull())
+        L.image.moveTo(L.bubble.left() + 4, y + L.image.top());
     if (!L.file.isNull())
         L.download = QRectF(L.file.right() - 36, L.file.center().y() - 18, 36, 36);
     if (showAvatar && it.groupEnd)
@@ -400,10 +630,85 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         ui::paintIcon(p, L.download.adjusted(9, 9, -9, -9), f.value("downloaded").toBool() ? "forward" : "download", fg);
     }
 
-    if (!L.text.isNull()) {
-        p->setFont(textFont());
+    if (!L.image.isNull()) {
+        QPixmap px = ImageCache::instance()->full(m);
+        if (px.isNull())
+            px = ImageCache::instance()->thumb(m);
+        p->save();
+        QPainterPath clip;
+        clip.addRoundedRect(L.image, 14, 14);
+        p->setClipPath(clip);
+        p->fillRect(L.image, c.selected);
+        if (!px.isNull()) {
+            // Cover the frame, cropping the overflow evenly.
+            p->setRenderHint(QPainter::SmoothPixmapTransform);
+            const qreal k = qMax(L.image.width() / px.width(), L.image.height() / px.height());
+            const QSizeF src = L.image.size() / k;
+            p->drawPixmap(L.image, px, QRectF(QPointF((px.width() - src.width()) / 2, (px.height() - src.height()) / 2), src));
+        }
+        p->restore();
+    }
+
+    if (!L.options.isEmpty()) {
+        const QJsonObject poll = m.value("poll").toObject();
+        const QJsonArray opts = poll.value("options").toArray();
+        const QJsonArray my = poll.value("my_choices").toArray();
+        const bool closed = poll.value("closed").toBool(), multiple = poll.value("multiple").toBool();
+        const int total = poll.value("voters").toInt();
+        const bool results = closed || !my.isEmpty();
+        p->setFont(pollFont());
         p->setPen(fg);
         p->drawText(L.text, Qt::TextWordWrap, messageText(m));
+        QString info = closed ? QStringLiteral("Опрос завершён") : poll.value("anonymous").toBool() ? QStringLiteral("Анонимный опрос") : QStringLiteral("Открытый опрос");
+        if (multiple)
+            info += QStringLiteral(" · несколько ответов");
+        info += QStringLiteral(" · ") + votesText(total);
+        p->setFont(Theme::instance()->font(12.5));
+        p->setPen(meta);
+        p->drawText(L.pollInfo, Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(p->font()).elidedText(info, Qt::ElideRight, L.pollInfo.width()));
+        const QColor strong = out ? c.onOutgoing : c.accent;
+        for (int i = 0; i < L.options.size() && i < opts.size(); ++i) {
+            const QRectF r = L.options[i];
+            const QJsonObject o = opts[i].toObject();
+            const bool chosen = my.contains(i);
+            const int votes = o.value("votes").toInt();
+            const qreal textX = r.left() + (results ? 48 : 30);
+            p->setFont(Theme::instance()->font(14.5, chosen ? QFont::DemiBold : QFont::Normal));
+            p->setPen(fg);
+            p->drawText(QRectF(textX, r.top(), r.right() - textX, results ? 26 : r.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                        QFontMetricsF(p->font()).elidedText(o.value("text").toString(), Qt::ElideRight, r.right() - textX));
+            if (results) {
+                const int pct = total ? qRound(100.0 * votes / total) : 0;
+                p->setFont(Theme::instance()->font(13, QFont::DemiBold));
+                p->setPen(chosen ? strong : meta);
+                p->drawText(QRectF(r.left(), r.top(), 44, 26), Qt::AlignLeft | Qt::AlignVCenter, QString::number(pct) + "%");
+                const QRectF track(textX, r.bottom() - 10, r.right() - textX, 4);
+                QColor tc = meta;
+                tc.setAlpha(60);
+                p->setPen(Qt::NoPen);
+                p->setBrush(tc);
+                p->drawRoundedRect(track, 2, 2);
+                p->setBrush(strong);
+                if (votes > 0)
+                    p->drawRoundedRect(QRectF(track.topLeft(), QSizeF(qMax(4.0, track.width() * votes / qMax(total, 1)), 4)), 2, 2);
+            } else {
+                const QRectF box(r.left() + 2, r.center().y() - 9, 18, 18);
+                p->setPen(QPen(meta, 1.6));
+                p->setBrush(Qt::NoBrush);
+                if (multiple)
+                    p->drawRoundedRect(box, 5, 5);
+                else
+                    p->drawEllipse(box);
+            }
+        }
+    } else if (!L.text.isNull()) {
+        QTextDocument *d = textDoc(m);
+        QAbstractTextDocumentLayout::PaintContext ctx;
+        ctx.palette.setColor(QPalette::Text, fg);
+        p->save();
+        p->translate(L.text.topLeft());
+        d->documentLayout()->draw(p, ctx);
+        p->restore();
     }
 
     p->setFont(metaFont());
@@ -478,6 +783,7 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
         }
     });
     connect(Theme::instance(), &Theme::changed, viewport(), qOverload<>(&QWidget::update));
+    connect(ImageCache::instance(), &ImageCache::changed, viewport(), qOverload<>(&QWidget::update));
     connect(Theme::instance(), &Theme::fontChanged, this, [this] {
         const int d = verticalScrollBar()->maximum() - verticalScrollBar()->value();
         doItemsLayout();
@@ -668,6 +974,10 @@ QJsonObject MessageView::messageAt(const QPoint &pos, MessageLayout *lay) const
     L.bubble.translate(vr.topLeft());
     L.download.translate(vr.topLeft());
     L.retry.translate(vr.topLeft());
+    L.text.translate(vr.topLeft());
+    L.image.translate(vr.topLeft());
+    for (QRectF &o : L.options)
+        o.translate(vr.topLeft());
     if (lay)
         *lay = L;
     return it.msg;
@@ -677,7 +987,11 @@ void MessageView::mouseMoveEvent(QMouseEvent *e)
 {
     MessageLayout L;
     const QJsonObject m = messageAt(e->pos(), &L);
-    const bool hand = !m.isEmpty() && (L.download.contains(e->pos()) || L.retry.contains(e->pos()));
+    bool hand = !m.isEmpty() && (L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) ||
+                                 !linkAt(m, L, e->pos()).isEmpty());
+    if (!m.isEmpty() && !m.value("poll").toObject().value("closed").toBool())
+        for (const QRectF &o : L.options)
+            hand = hand || o.contains(e->pos());
     viewport()->setCursor(hand ? Qt::PointingHandCursor : Qt::ArrowCursor);
     QListView::mouseMoveEvent(e);
 }
@@ -691,8 +1005,90 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
             openFile(m);
         else if (L.retry.contains(e->pos()))
             retry(m);
+        else if (L.image.contains(e->pos()))
+            openImage(m);
+        const QString link = linkAt(m, L, e->pos());
+        if (!link.isEmpty())
+            QDesktopServices::openUrl(QUrl(link));
+        for (int i = 0; i < L.options.size(); ++i)
+            if (L.options[i].contains(e->pos()))
+                vote(m, i);
     }
     QListView::mouseReleaseEvent(e);
+}
+
+QString MessageView::linkAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const
+{
+    if (L.text.isNull() || !L.options.isEmpty() || !L.text.contains(pos))
+        return {};
+    const QString href = textDoc(m)->documentLayout()->anchorAt(pos - L.text.topLeft());
+    return href.startsWith("https://") || href.startsWith("http://") ? href : QString();
+}
+
+bool MessageView::viewportEvent(QEvent *e)
+{
+    if (e->type() == QEvent::ToolTip) {
+        auto *he = static_cast<QHelpEvent *>(e);
+        MessageLayout L;
+        const QJsonObject m = messageAt(he->pos(), &L);
+        const QJsonArray opts = m.value("poll").toObject().value("options").toArray();
+        for (int i = 0; i < L.options.size() && i < opts.size(); ++i) {
+            if (!L.options[i].contains(he->pos()))
+                continue;
+            QStringList who;
+            for (const auto &v : opts[i].toObject().value("voters").toArray())
+                who << v.toString();
+            if (!who.isEmpty()) {
+                QToolTip::showText(he->globalPos(), who.join(", "), viewport());
+                return true;
+            }
+        }
+        const QString link = linkAt(m, L, he->pos());
+        if (!link.isEmpty()) {
+            QToolTip::showText(he->globalPos(), link, viewport());
+            return true;
+        }
+        QToolTip::hideText();
+        return true;
+    }
+    return QListView::viewportEvent(e);
+}
+
+void MessageView::vote(const QJsonObject &m, int option)
+{
+    const QJsonObject poll = m.value("poll").toObject();
+    if (poll.value("closed").toBool())
+        return;
+    QJsonArray choices;
+    if (poll.value("multiple").toBool()) {
+        // Multiple choice: a click toggles the answer.
+        const QJsonArray my = poll.value("my_choices").toArray();
+        for (const auto &v : my)
+            if (v.toInt() != option)
+                choices << v;
+        if (!my.contains(option))
+            choices << option;
+    } else {
+        choices << option;
+    }
+    Core::instance()->call("vote_poll", {{"message_id", m.value("id")}, {"choices", choices}}, this, [this](const QJsonValue &, const CoreError &e) {
+        if (!e.ok())
+            emit toast(e.message);
+    });
+}
+
+void MessageView::openImage(const QJsonObject &m)
+{
+    Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &v, const CoreError &e) {
+        if (!e.ok())
+            return emit toast(e.message);
+        QImageReader reader(v.toObject().value("path").toString());
+        reader.setAutoTransform(true);
+        const QImage img = reader.read();
+        if (img.isNull())
+            return emit toast(QStringLiteral("Не удалось открыть фото"));
+        new PhotoViewer(window(), img);
+    });
 }
 
 void MessageView::keyPressEvent(QKeyEvent *e)
@@ -705,7 +1101,7 @@ void MessageView::keyPressEvent(QKeyEvent *e)
             return;
         }
         if ((e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) && m.value("kind").toString() == "file") {
-            openFile(m);
+            isImage(m) ? openImage(m) : openFile(m);
             return;
         }
     }
@@ -725,6 +1121,15 @@ void MessageView::contextMenuEvent(QContextMenuEvent *e)
         menu.addAction(QStringLiteral("Ответить"), this, [this, m] { emit replyRequested(m); });
     if (!messageText(m).isEmpty())
         menu.addAction(QStringLiteral("Копировать текст"), this, [m] { QApplication::clipboard()->setText(messageText(m)); });
+    if (isImage(m))
+        menu.addAction(QStringLiteral("Открыть фото"), this, [this, m] { openImage(m); });
+    if (kind == "poll" && m.value("outgoing").toBool() && !m.value("poll").toObject().value("closed").toBool())
+        menu.addAction(QStringLiteral("Завершить опрос"), this, [this, m] {
+            Core::instance()->call("close_poll", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
+                if (!e.ok())
+                    emit toast(e.message);
+            });
+        });
     if (kind == "file") {
         menu.addAction(QStringLiteral("Открыть файл"), this, [this, m] { openFile(m); });
         menu.addAction(QStringLiteral("Сохранить как…"), this, [this, m] { saveFile(m); });

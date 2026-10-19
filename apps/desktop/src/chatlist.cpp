@@ -352,7 +352,7 @@ void ChatPanel::apply(const QList<QJsonObject> &all, bool animate)
         const QString kind = c.value("kind").toString();
         if (filter == 1 && kind != "direct")
             continue;
-        if (filter == 2 && kind != "group")
+        if (filter == 2 && kind != "group" && kind != "channel")
             continue;
         rows << c;
     }

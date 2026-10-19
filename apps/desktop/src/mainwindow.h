@@ -44,7 +44,7 @@ private:
     void setSidebarHidden(bool hidden, bool animated = true);
     void updateLayoutMode();
     void sendText(const QString &text, const QString &replyTo);
-    void sendFiles(const QStringList &paths);
+    void sendFiles(const QStringList &paths, bool photos);
     void markRead();
     void toast(const QString &text);
     void notify(const QJsonObject &ev);

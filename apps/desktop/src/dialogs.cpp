@@ -273,15 +273,20 @@ void newChat(const DialogHost &h)
     auto *modeBar = new QHBoxLayout;
     auto *direct = new ui::Button(QStringLiteral("Личный"), ui::Button::Secondary);
     auto *group = new ui::Button(QStringLiteral("Группа"), ui::Button::Flat);
+    auto *channel = new ui::Button(QStringLiteral("Канал"), ui::Button::Flat);
     auto *addContact = new ui::Button(QStringLiteral("Новый контакт"), ui::Button::Flat);
     modeBar->addWidget(direct);
     modeBar->addWidget(group);
+    modeBar->addWidget(channel);
     modeBar->addStretch();
     modeBar->addWidget(addContact);
     sheet->body()->addLayout(modeBar);
     auto *title = new ui::TextField(QStringLiteral("Название группы"));
     title->hide();
     sheet->body()->addWidget(title);
+    auto *about = new ui::TextField(QStringLiteral("Описание (необязательно)"));
+    about->hide();
+    sheet->body()->addWidget(about);
     auto *search = new ui::SearchField(QStringLiteral("Поиск контактов"));
     sheet->body()->addWidget(search);
     auto *list = new RowList(340);
@@ -293,8 +298,13 @@ void newChat(const DialogHost &h)
     create->hide();
     sheet->body()->addWidget(create);
 
-    auto isGroup = std::make_shared<bool>(false);
+    auto isGroup = std::make_shared<bool>(false); // group or channel: several people are picked
+    auto isChannel = std::make_shared<bool>(false);
     auto selected = std::make_shared<QSet<QString>>();
+    auto createText = [=] {
+        const QString base = *isChannel ? QStringLiteral("Создать канал") : QStringLiteral("Создать группу");
+        return selected->isEmpty() ? base : base + QStringLiteral(" (%1)").arg(selected->size());
+    };
     auto reload = std::make_shared<std::function<void()>>();
     *reload = [=] {
         Core::instance()->call("list_contacts", {{"query", search->edit()->text()}}, sheet, [=](const QJsonValue &v, const CoreError &e) {
@@ -312,17 +322,17 @@ void newChat(const DialogHost &h)
                 QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
                     if (*isGroup) {
                         if (row->isChecked()) {
-                            if (selected->size() >= 15) {
+                            if (selected->size() >= (*isChannel ? 199 : 49)) {
                                 row->setChecked(false);
                                 if (h.toast)
-                                    h.toast(QStringLiteral("В группе может быть до 15 других участников"));
+                                    h.toast(*isChannel ? QStringLiteral("В канале может быть до 199 подписчиков") : QStringLiteral("В группе может быть до 49 других участников"));
                                 return;
                             }
                             selected->insert(uid);
                         } else {
                             selected->remove(uid);
                         }
-                        create->setText(selected->isEmpty() ? QStringLiteral("Создать группу") : QStringLiteral("Создать группу (%1)").arg(selected->size()));
+                        create->setText(createText());
                         return;
                     }
                     Core::instance()->call("open_direct", {{"user_id", uid}}, sheet, [=](const QJsonValue &cv, const CoreError &ce) {
@@ -339,30 +349,40 @@ void newChat(const DialogHost &h)
             list->setVisible(!arr.isEmpty());
         });
     };
-    auto setGroup = [=](bool g) {
-        *isGroup = g;
-        direct->setKind(g ? ui::Button::Flat : ui::Button::Secondary);
-        group->setKind(g ? ui::Button::Secondary : ui::Button::Flat);
-        title->setVisible(g);
-        create->setVisible(g);
-        sheet->setTitle(g ? QStringLiteral("Новая группа") : QStringLiteral("Новый чат"));
+    // 0 — direct chat, 1 — group, 2 — channel.
+    auto setMode = [=](int mode) {
+        *isGroup = mode != 0;
+        *isChannel = mode == 2;
+        direct->setKind(mode == 0 ? ui::Button::Secondary : ui::Button::Flat);
+        group->setKind(mode == 1 ? ui::Button::Secondary : ui::Button::Flat);
+        channel->setKind(mode == 2 ? ui::Button::Secondary : ui::Button::Flat);
+        title->setLabel(mode == 2 ? QStringLiteral("Название канала") : QStringLiteral("Название группы"));
+        title->setVisible(mode != 0);
+        about->setVisible(mode != 0);
+        create->setVisible(mode != 0);
+        create->setText(createText());
+        static const char *const titles[] = {"Новый чат", "Новая группа", "Новый канал"};
+        sheet->setTitle(QString::fromUtf8(titles[mode]));
         (*reload)();
     };
-    QObject::connect(direct, &QAbstractButton::clicked, sheet, [=] { setGroup(false); });
-    QObject::connect(group, &QAbstractButton::clicked, sheet, [=] { setGroup(true); });
+    QObject::connect(direct, &QAbstractButton::clicked, sheet, [=] { setMode(0); });
+    QObject::connect(group, &QAbstractButton::clicked, sheet, [=] { setMode(1); });
+    QObject::connect(channel, &QAbstractButton::clicked, sheet, [=] { setMode(2); });
     QObject::connect(addContact, &QAbstractButton::clicked, sheet, [=] { newContact(h, [=] { (*reload)(); }); });
     QObject::connect(search->edit(), &QLineEdit::textChanged, sheet, [=] { (*reload)(); });
     QObject::connect(create, &QAbstractButton::clicked, sheet, [=] {
         if (title->text().trimmed().isEmpty())
-            return h.toast(QStringLiteral("Введите название группы"));
-        if (selected->isEmpty())
+            return h.toast(*isChannel ? QStringLiteral("Введите название канала") : QStringLiteral("Введите название группы"));
+        if (selected->isEmpty() && !*isChannel)
             return h.toast(QStringLiteral("Выберите участников"));
         QJsonArray ids;
         for (const auto &id : *selected)
             ids << id;
         create->setEnabled(false);
         sheet->setBusy(true);
-        Core::instance()->call("create_group", {{"title", title->text().trimmed()}, {"member_ids", ids}}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+        const QJsonObject p{{"title", title->text().trimmed()}, {"description", about->text().trimmed()}, {"member_ids", ids},
+                            {"kind", *isChannel ? "channel" : "group"}};
+        Core::instance()->call("create_group", p, sheet, [=](const QJsonValue &v, const CoreError &e) {
             create->setEnabled(true);
             sheet->setBusy(false);
             if (!e.ok())
@@ -588,7 +608,7 @@ void conversationInfo(const DialogHost &h, const QString &cid)
                 delete it;
             }
             const QJsonObject c = v.toObject();
-            const bool group = c.value("kind").toString() == "group";
+            const bool group = c.value("kind").toString() == "group" || c.value("kind").toString() == "channel";
             sheet->setTitle(c.value("title").toString());
             if (!c.value("notice").isNull() && !c.value("notice").toString().isEmpty()) {
                 auto *n = new ui::Label(c.value("notice").toString(), 13.5, QFont::DemiBold, ui::Label::Warning);
@@ -640,62 +660,140 @@ void conversationInfo(const DialogHost &h, const QString &cid)
                 });
                 return;
             }
+            const bool channel = c.value("kind").toString() == "channel";
             const QJsonArray members = c.value("members").toArray();
-            lay->addWidget(new ui::Label(QStringLiteral("Участники: %1").arg(c.value("member_count").toInt()), 15, QFont::DemiBold));
-            auto *list = new RowList(260);
             const bool owner = c.value("is_owner").toBool();
+            const bool admin = c.value("is_admin").toBool();
+            const bool active = !c.value("left").toBool() && !c.value("archived").toBool();
             const QString ownerId = c.value("owner_id").toString();
-            for (const auto &x : members) {
-                const QJsonObject m = x.toObject();
-                QString sub = m.value("me").toBool() ? QStringLiteral("это вы") : "@" + m.value("username").toString();
-                if (m.value("user_id").toString() == ownerId)
-                    sub += QStringLiteral(" · владелец");
-                auto *row = new PersonRow(m.value("display_name").toString(), sub, m.value("user_id").toString());
-                if (m.value("key_changed").toBool())
-                    row->warning = QStringLiteral("Ключ изменился — сверьте код в личном чате");
-                list->add(row);
-                if (owner && !m.value("me").toBool()) {
-                    const QString uid = m.value("user_id").toString();
-                    QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
-                        QMenu menu(row);
-                        menu.addAction(QStringLiteral("Исключить из группы"), sheet, [=] {
-                            QJsonArray ids;
-                            for (const auto &y : members) {
-                                const QJsonObject o = y.toObject();
-                                if (!o.value("me").toBool() && o.value("user_id").toString() != uid)
-                                    ids << o.value("user_id");
-                            }
-                            Core::instance()->call("group_set_members", {{"conversation_id", cid}, {"member_ids", ids}}, sheet, [=](const QJsonValue &, const CoreError &ge) {
-                                if (!ge.ok())
-                                    return fail(h, ge);
-                                h.toast(QStringLiteral("Участник исключён. Новые сообщения ему не придут"));
-                                (*build)();
-                            });
-                        });
-                        menu.exec(row->mapToGlobal(QPoint(60, row->height())));
-                    });
+            QSet<QString> admins;
+            for (const auto &a : c.value("admins").toArray())
+                admins.insert(a.toString());
+            // Everyone except me, optionally without one person or with one more.
+            auto others = [members](const QString &without, const QString &with) {
+                QJsonArray ids;
+                for (const auto &y : members) {
+                    const QJsonObject o = y.toObject();
+                    if (!o.value("me").toBool() && o.value("user_id").toString() != without)
+                        ids << o.value("user_id");
                 }
+                if (!with.isEmpty())
+                    ids << with;
+                return ids;
+            };
+            auto setMembers = [=](QJsonObject p, const QString &done) {
+                p["conversation_id"] = cid;
+                Core::instance()->call("group_set_members", p, sheet, [=](const QJsonValue &, const CoreError &ge) {
+                    if (!ge.ok())
+                        return fail(h, ge);
+                    h.toast(done);
+                    (*build)();
+                });
+            };
+            auto adminIds = [admins](const QString &without, const QString &with) {
+                QJsonArray ids;
+                for (const auto &a : admins)
+                    if (a != without)
+                        ids << a;
+                if (!with.isEmpty())
+                    ids << with;
+                return ids;
+            };
+
+            lay->addWidget(new ui::Label(channel ? QStringLiteral("Канал") : QStringLiteral("Группа"), 14, 400, ui::Label::Muted));
+            const QString description = c.value("description").toString();
+            if (!description.isEmpty()) {
+                auto *d = new ui::Label(description, 14.5);
+                d->setWordWrap(true);
+                d->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                lay->addWidget(d);
             }
-            list->fit();
-            lay->addWidget(list);
-            if (owner && !c.value("left").toBool()) {
-                auto *rename = new ui::TextField(QStringLiteral("Название группы"));
+            if (c.value("can_edit_info").toBool() && active) {
+                auto *rename = new ui::TextField(channel ? QStringLiteral("Название канала") : QStringLiteral("Название группы"));
                 rename->setText(c.value("title").toString());
+                auto *about = new ui::TextField(QStringLiteral("Описание"));
+                about->setText(description);
+                auto *save = new ui::Button(QStringLiteral("Сохранить название и описание"), ui::Button::Secondary);
                 lay->addWidget(rename);
-                auto *row = new QHBoxLayout;
-                auto *save = new ui::Button(QStringLiteral("Переименовать"), ui::Button::Secondary);
-                auto *add = new ui::Button(QStringLiteral("Добавить участников"), ui::Button::Secondary);
-                row->addWidget(save);
-                row->addWidget(add);
-                lay->addLayout(row);
+                lay->addWidget(about);
+                lay->addWidget(save);
                 QObject::connect(save, &QAbstractButton::clicked, sheet, [=] {
-                    Core::instance()->call("group_rename", {{"conversation_id", cid}, {"title", rename->text().trimmed()}}, sheet, [=](const QJsonValue &, const CoreError &re) {
+                    const QJsonObject p{{"conversation_id", cid}, {"title", rename->text().trimmed()}, {"description", about->text().trimmed()}};
+                    Core::instance()->call("group_set_info", p, sheet, [=](const QJsonValue &, const CoreError &re) {
                         if (!re.ok())
                             return fail(h, re);
-                        h.toast(QStringLiteral("Название изменено"));
+                        h.toast(QStringLiteral("Сохранено"));
                         (*build)();
                     });
                 });
+            }
+
+            lay->addWidget(new ui::Label((channel ? QStringLiteral("Подписчики: %1") : QStringLiteral("Участники: %1")).arg(c.value("member_count").toInt()), 15, QFont::DemiBold));
+            auto *list = new RowList(260);
+            for (const auto &x : members) {
+                const QJsonObject m = x.toObject();
+                const QString uid = m.value("user_id").toString();
+                QString sub = m.value("me").toBool() ? QStringLiteral("это вы") : "@" + m.value("username").toString();
+                if (uid == ownerId)
+                    sub += QStringLiteral(" · владелец");
+                else if (admins.contains(uid))
+                    sub += QStringLiteral(" · админ");
+                if (!m.value("tag").toString().isEmpty())
+                    sub += QStringLiteral(" · ") + m.value("tag").toString();
+                auto *row = new PersonRow(m.value("display_name").toString(), sub, uid);
+                if (m.value("key_changed").toBool())
+                    row->warning = QStringLiteral("Ключ изменился — сверьте код в личном чате");
+                list->add(row);
+                if (!admin || !active)
+                    continue;
+                const QString name = m.value("display_name").toString();
+                const QString tag = m.value("tag").toString();
+                const bool me = m.value("me").toBool();
+                QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
+                    QMenu menu(row);
+                    menu.addAction(QStringLiteral("Тег…"), sheet, [=] {
+                        auto *ts = new Sheet(h.host, QStringLiteral("Тег: ") + name, 380);
+                        auto *field = new ui::TextField(QStringLiteral("Например, «дизайн» или «модератор»"));
+                        field->setText(tag);
+                        auto *ok = new ui::Button(QStringLiteral("Сохранить"));
+                        ts->body()->addWidget(field);
+                        ts->body()->addWidget(mutedText(QStringLiteral("Тег виден всем рядом с именем. Пустое поле убирает тег.")));
+                        ts->body()->addWidget(ok);
+                        auto go = [=] {
+                            Core::instance()->call("group_set_tag", {{"conversation_id", cid}, {"user_id", uid}, {"tag", field->text().trimmed()}}, ts,
+                                                   [=](const QJsonValue &, const CoreError &te) {
+                                                       if (!te.ok())
+                                                           return fail(h, te);
+                                                       ts->close();
+                                                       (*build)();
+                                                   });
+                        };
+                        QObject::connect(ok, &QAbstractButton::clicked, ts, go);
+                        QObject::connect(field->edit(), &QLineEdit::returnPressed, ts, go);
+                        ts->open();
+                    });
+                    if (owner && !me) {
+                        if (admins.contains(uid))
+                            menu.addAction(QStringLiteral("Снять права админа"), sheet, [=] {
+                                setMembers({{"member_ids", others({}, {})}, {"admin_ids", adminIds(uid, {})}}, QStringLiteral("Права админа сняты"));
+                            });
+                        else
+                            menu.addAction(QStringLiteral("Назначить админом"), sheet, [=] {
+                                setMembers({{"member_ids", others({}, {})}, {"admin_ids", adminIds({}, uid)}}, QStringLiteral("Назначен админ"));
+                            });
+                    }
+                    if (!me && uid != ownerId && (owner || !admins.contains(uid)))
+                        menu.addAction(channel ? QStringLiteral("Удалить из канала") : QStringLiteral("Исключить из группы"), sheet, [=] {
+                            setMembers({{"member_ids", others(uid, {})}}, QStringLiteral("Исключён. Новые сообщения ему не придут"));
+                        });
+                    menu.exec(row->mapToGlobal(QPoint(60, row->height())));
+                });
+            }
+            list->fit();
+            lay->addWidget(list);
+            if (admin && active) {
+                auto *add = new ui::Button(channel ? QStringLiteral("Добавить подписчиков") : QStringLiteral("Добавить участников"), ui::Button::Secondary);
+                lay->addWidget(add);
                 QObject::connect(add, &QAbstractButton::clicked, sheet, [=] {
                     Core::instance()->call("list_contacts", {}, sheet, [=](const QJsonValue &lv, const CoreError &le) {
                         if (!le.ok())
@@ -710,31 +808,47 @@ void conversationInfo(const DialogHost &h, const QString &cid)
                             if (current.contains(uid))
                                 continue;
                             menu.addAction(ct.value("display_name").toString() + "  @" + ct.value("username").toString(), sheet, [=] {
-                                QJsonArray ids;
-                                for (const auto &z : members)
-                                    if (!z.toObject().value("me").toBool())
-                                        ids << z.toObject().value("user_id");
-                                ids << uid;
-                                Core::instance()->call("group_set_members", {{"conversation_id", cid}, {"member_ids", ids}}, sheet, [=](const QJsonValue &, const CoreError &ge) {
-                                    if (!ge.ok())
-                                        return fail(h, ge);
-                                    h.toast(QStringLiteral("Участник добавлен. Прошлые сообщения ему не видны"));
-                                    (*build)();
-                                });
+                                setMembers({{"member_ids", others({}, uid)}}, QStringLiteral("Добавлен. Прошлые сообщения ему не видны"));
                             });
                         }
                         if (menu.isEmpty())
-                            menu.addAction(QStringLiteral("Все контакты уже в группе"))->setEnabled(false);
+                            menu.addAction(QStringLiteral("Все контакты уже здесь"))->setEnabled(false);
                         menu.exec(add->mapToGlobal(QPoint(0, add->height())));
                     });
                 });
             }
+            if (admin && active && !channel) {
+                lay->addWidget(new ui::Label(QStringLiteral("Права участников"), 15, QFont::DemiBold));
+                const QJsonObject st = c.value("settings").toObject();
+                const QList<QPair<QString, QString>> rights{{"members_can_send", QStringLiteral("Писать сообщения")},
+                                                            {"members_can_media", QStringLiteral("Отправлять фото и файлы")},
+                                                            {"members_can_polls", QStringLiteral("Создавать опросы")},
+                                                            {"members_can_info", QStringLiteral("Менять название и описание")}};
+                for (const auto &r : rights) {
+                    auto *t = new ui::Toggle(r.second);
+                    t->setChecked(st.value(r.first).toBool());
+                    const QString key = r.first;
+                    QObject::connect(t, &QAbstractButton::toggled, sheet, [=](bool on) {
+                        Core::instance()->call("group_set_settings", {{"conversation_id", cid}, {key, on}}, sheet, [=](const QJsonValue &, const CoreError &se) {
+                            if (!se.ok()) {
+                                fail(h, se);
+                                (*build)();
+                            }
+                        });
+                    });
+                    lay->addWidget(t);
+                }
+                lay->addWidget(mutedText(QStringLiteral("Владелец и админы могут всё. Сервер не пропускает сообщения тех, кому писать нельзя.")));
+            } else if (channel) {
+                lay->addWidget(mutedText(QStringLiteral("В канале пишут только владелец и админы. Подписчики читают и голосуют в опросах.")));
+            }
             lay->addWidget(mutedText(QStringLiteral("Файлы хранятся на сервере в зашифрованном виде 30 дней.")));
             if (!c.value("left").toBool()) {
-                auto *leave = new ui::Button(QStringLiteral("Выйти из группы"), ui::Button::Danger);
+                auto *leave = new ui::Button(channel ? QStringLiteral("Выйти из канала") : QStringLiteral("Выйти из группы"), ui::Button::Danger);
                 QObject::connect(leave, &QAbstractButton::clicked, sheet, [=] {
                     QMenu menu(leave);
-                    const QString what = owner ? QStringLiteral("Выйти: группа станет архивной для всех") : QStringLiteral("Выйти: новые сообщения перестанут приходить");
+                    const QString what = owner ? (channel ? QStringLiteral("Выйти: канал станет архивным для всех") : QStringLiteral("Выйти: группа станет архивной для всех"))
+                                               : QStringLiteral("Выйти: новые сообщения перестанут приходить");
                     menu.addAction(what, sheet, [=] {
                         Core::instance()->call("group_leave", {{"conversation_id", cid}}, sheet, [=](const QJsonValue &, const CoreError &ge) {
                             if (!ge.ok())
@@ -749,6 +863,62 @@ void conversationInfo(const DialogHost &h, const QString &cid)
         });
     };
     (*build)();
+    sheet->open();
+}
+
+// ---- polls ----
+
+void newPoll(const DialogHost &h, const QString &cid)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Новый опрос"), 440);
+    auto *question = new ui::TextField(QStringLiteral("Вопрос"));
+    sheet->body()->addWidget(question);
+    sheet->body()->addWidget(new ui::Label(QStringLiteral("Варианты ответа"), 15, QFont::DemiBold));
+    auto *box = new QVBoxLayout;
+    box->setSpacing(8);
+    sheet->body()->addLayout(box);
+    auto *more = new ui::Button(QStringLiteral("Добавить вариант"), ui::Button::Flat);
+    auto options = std::make_shared<QList<ui::TextField *>>();
+    auto add = [=] {
+        if (options->size() >= 10)
+            return;
+        auto *f = new ui::TextField(QStringLiteral("Вариант %1").arg(options->size() + 1));
+        box->addWidget(f);
+        *options << f;
+        more->setVisible(options->size() < 10);
+        f->edit()->setFocus();
+    };
+    add();
+    add();
+    question->edit()->setFocus();
+    sheet->body()->addWidget(more);
+    auto *anonymous = new ui::Toggle(QStringLiteral("Анонимное голосование"));
+    anonymous->setChecked(true);
+    auto *multiple = new ui::Toggle(QStringLiteral("Несколько ответов"));
+    sheet->body()->addWidget(anonymous);
+    sheet->body()->addWidget(multiple);
+    auto *send = new ui::Button(QStringLiteral("Отправить опрос"));
+    sheet->body()->addWidget(send);
+    QObject::connect(more, &QAbstractButton::clicked, sheet, add);
+    QObject::connect(send, &QAbstractButton::clicked, sheet, [=] {
+        QJsonArray opts;
+        for (auto *f : *options)
+            if (!f->text().trimmed().isEmpty())
+                opts << f->text().trimmed();
+        if (question->text().trimmed().isEmpty())
+            return h.toast(QStringLiteral("Введите вопрос"));
+        if (opts.size() < 2)
+            return h.toast(QStringLiteral("Нужно хотя бы два варианта"));
+        send->setEnabled(false);
+        const QJsonObject p{{"conversation_id", cid}, {"question", question->text().trimmed()}, {"options", opts},
+                            {"anonymous", anonymous->isChecked()}, {"multiple", multiple->isChecked()}};
+        Core::instance()->call("send_poll", p, sheet, [=](const QJsonValue &, const CoreError &e) {
+            send->setEnabled(true);
+            if (!e.ok())
+                return fail(h, e);
+            sheet->close();
+        });
+    });
     sheet->open();
 }
 

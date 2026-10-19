@@ -22,4 +22,5 @@ void devices(const DialogHost &h);
 void settings(const DialogHost &h);
 void profile(const DialogHost &h);
 void conversationInfo(const DialogHost &h, const QString &conversationId);
+void newPoll(const DialogHost &h, const QString &conversationId);
 }

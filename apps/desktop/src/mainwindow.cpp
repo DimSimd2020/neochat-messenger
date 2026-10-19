@@ -14,6 +14,10 @@
 #include <QCloseEvent>
 #include <QDir>
 #include <QFileDialog>
+#include <QCursor>
+#include <QStandardPaths>
+#include <QImageReader>
+#include <QBuffer>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QMenu>
@@ -35,6 +39,41 @@ QString participants(int n)
     const int m10 = n % 10, m100 = n % 100;
     const char *word = (m10 == 1 && m100 != 11) ? "участник" : (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) ? "участника" : "участников";
     return QString::number(n) + " " + QString::fromUtf8(word);
+}
+
+QString subscribers(int n)
+{
+    const int m10 = n % 10, m100 = n % 100;
+    const char *word = (m10 == 1 && m100 != 11) ? "подписчик" : (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) ? "подписчика" : "подписчиков";
+    return QString::number(n) + " " + QString::fromUtf8(word);
+}
+
+// Small JPEG preview for photo bubbles; kept tiny so it fits the encrypted envelope.
+QString photoThumb(const QString &path, QSize *size)
+{
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    QSize sz = reader.size();
+    if (!sz.isValid())
+        return {};
+    if (reader.transformation() & QImageIOHandler::TransformationRotate90)
+        sz.transpose();
+    *size = sz;
+    if (qMax(sz.width(), sz.height()) > 640)
+        reader.setScaledSize(reader.size().scaled(640, 640, Qt::KeepAspectRatio));
+    const QImage img = reader.read();
+    if (img.isNull())
+        return {};
+    for (int side : {160, 120, 90}) {
+        QByteArray jpeg;
+        QBuffer buf(&jpeg);
+        buf.open(QIODevice::WriteOnly);
+        img.scaled(side, side, Qt::KeepAspectRatio, Qt::SmoothTransformation).save(&buf, "JPEG", 55);
+        const QByteArray b64 = jpeg.toBase64();
+        if (b64.size() <= 12000)
+            return QString::fromLatin1(b64);
+    }
+    return {};
 }
 
 QString memberNames(const QJsonArray &members)
@@ -409,11 +448,25 @@ MainWindow::MainWindow()
             dialogs::conversationInfo(host(), m_current.value("id").toString());
     });
     connect(m_composer, &Composer::send, this, &MainWindow::sendText);
-    connect(m_composer, &Composer::filesDropped, this, &MainWindow::sendFiles);
+    connect(m_composer, &Composer::filesDropped, this, [this](const QStringList &paths) { sendFiles(paths, true); });
     connect(m_composer, &Composer::attach, this, [this] {
-        const QStringList files = QFileDialog::getOpenFileNames(this, QStringLiteral("Прикрепить файл"));
-        if (!files.isEmpty())
-            sendFiles(files);
+        // Ask what is attached first: photos go to the gallery-like picker and arrive as photos.
+        QMenu menu(this);
+        menu.addAction(QStringLiteral("Фото"), this, [this] {
+            const QStringList files = QFileDialog::getOpenFileNames(this, QStringLiteral("Выберите фото"),
+                                                                    QStandardPaths::writableLocation(QStandardPaths::PicturesLocation),
+                                                                    QStringLiteral("Изображения (*.jpg *.jpeg *.png *.webp *.gif *.bmp *.heic)"));
+            if (!files.isEmpty())
+                sendFiles(files, true);
+        });
+        menu.addAction(QStringLiteral("Файл"), this, [this] {
+            const QStringList files = QFileDialog::getOpenFileNames(this, QStringLiteral("Прикрепить файл"));
+            if (!files.isEmpty())
+                sendFiles(files, false);
+        });
+        if (m_current.value("can_polls").toBool() && m_current.value("kind").toString() != "direct")
+            menu.addAction(QStringLiteral("Опрос"), this, [this] { dialogs::newPoll(host(), m_current.value("id").toString()); });
+        menu.exec(QCursor::pos());
     });
     connect(m_composer, &Composer::draftChanged, this, [this](const QString &text) {
         if (!m_current.isEmpty())
@@ -610,10 +663,13 @@ void MainWindow::refreshHeader()
 void MainWindow::applyConversation(const QJsonObject &c)
 {
     const bool group = c.value("kind").toString() == "group";
+    const bool channel = c.value("kind").toString() == "channel";
     QString count, names;
     if (group) {
         count = participants(c.value("member_count").toInt());
         names = memberNames(c.value("members").toArray());
+    } else if (channel) {
+        count = subscribers(c.value("member_count").toInt());
     } else {
         for (const auto &x : c.value("members").toArray())
             if (!x.toObject().value("me").toBool())
@@ -624,7 +680,7 @@ void MainWindow::applyConversation(const QJsonObject &c)
         count = QStringLiteral("Коды входа и новые устройства");
     m_header->title->set(c.value("title").toString(), count, names, c.value("id").toString());
     const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
-    m_composer->setVisible(!gone);
+    m_composer->setVisible(!gone && c.value("can_post").toBool(true));
     m_composer->setBlocked(!c.value("key_changed_users").toArray().isEmpty());
     updateNotice();
 }
@@ -636,6 +692,9 @@ void MainWindow::updateNotice()
         text = m_current.value("notice").toString();
         if (!m_current.value("key_changed_users").toArray().isEmpty())
             action = QStringLiteral("Сверить код");
+    } else if (!m_current.isEmpty() && m_current.value("kind").toString() == "group" && !m_current.value("can_post").toBool(true) &&
+               !m_current.value("left").toBool()) {
+        text = QStringLiteral("Писать здесь могут только владелец и админы");
     } else if (m_connection == "offline") {
         text = QStringLiteral("Нет сети. Сообщения отправятся после подключения");
     }
@@ -726,13 +785,21 @@ void MainWindow::sendText(const QString &text, const QString &replyTo)
     });
 }
 
-void MainWindow::sendFiles(const QStringList &paths)
+void MainWindow::sendFiles(const QStringList &paths, bool photos)
 {
     if (m_current.isEmpty())
         return;
     QMimeDatabase mime;
     for (const QString &path : paths) {
-        QJsonObject p{{"conversation_id", m_current.value("id")}, {"path", path}, {"mime", mime.mimeTypeForFile(path).name()}};
+        const QString type = mime.mimeTypeForFile(path).name();
+        QJsonObject p{{"conversation_id", m_current.value("id")}, {"path", path}, {"mime", type}};
+        QSize size;
+        const QString thumb = photos && type.startsWith("image/") ? photoThumb(path, &size) : QString();
+        if (!thumb.isEmpty()) {
+            p["thumb"] = thumb;
+            p["width"] = size.width();
+            p["height"] = size.height();
+        }
         Core::instance()->call("send_file", p, this, [this](const QJsonValue &, const CoreError &e) {
             if (!e.ok())
                 toast(e.message);
