@@ -11,14 +11,16 @@ final class OnboardingUITests: XCTestCase {
 
     func testRegisterAndReachChats() throws {
         shot("01-login")
-        app.buttons["Создать аккаунт"].tap()
-        XCTAssertTrue(app.buttons["Уже есть аккаунт? Войти"].waitForExistence(timeout: 5))
+        // Fill the fields in sign-in mode: in registration mode the simulator covers the
+        // password field with its own strong password, which typed text cannot replace.
         let user = app.textFields["Имя пользователя"]
         user.tap()
         user.typeText("ios_ci_\(Int.random(in: 100000...999999))")
         let pass = app.secureTextFields["Пароль"]
         pass.tap()
         pass.typeText("correct horse battery")
+        app.buttons["Создать аккаунт"].tap()
+        XCTAssertTrue(app.buttons["Уже есть аккаунт? Войти"].waitForExistence(timeout: 5))
         shot("02-register")
         app.buttons["Создать аккаунт"].tap()
         if !app.staticTexts["Сохраните код восстановления"].waitForExistence(timeout: 30) {
