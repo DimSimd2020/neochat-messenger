@@ -93,13 +93,16 @@ object Dialogs {
     fun newChat(act: MainActivity) {
         val s = Sheet(act, "Новый чат")
         val ctx = s.ctx
-        var group = false
+        var group = false // group or channel: several people are picked
+        var channel = false
         val selected = LinkedHashSet<String>()
         val modes = LinearLayout(ctx)
         val direct = Chip(ctx, "Личный").apply { isSelected = true }
         val grp = Chip(ctx, "Группа")
+        val chn = Chip(ctx, "Канал")
         modes.addView(direct)
         modes.addView(grp, lp(WRAP, WRAP).apply { marginStart = ctx.dp(4) })
+        modes.addView(chn, lp(WRAP, WRAP).apply { marginStart = ctx.dp(4) })
         modes.addView(View(ctx), lp(0, 1, 1f))
         val addContact = Chip(ctx, "Новый контакт")
         modes.addView(addContact)
@@ -107,6 +110,9 @@ object Dialogs {
         val title = FloatingField(ctx, "Название группы")
         title.visibility = View.GONE
         s.add(title, 10)
+        val about = FloatingField(ctx, "Описание (необязательно)")
+        about.visibility = View.GONE
+        s.add(about, 10)
         val search = SearchBox(ctx, "Поиск контактов")
         s.add(search, 10)
         val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -114,6 +120,10 @@ object Dialogs {
         val empty = ctx.label("Контактов пока нет. Добавьте человека по имени пользователя.", 14f, 400, Theme.Role.MUTED)
         s.add(empty, 6)
         val create = PillButton(ctx, "Создать группу")
+        fun createText(): String {
+            val base = if (channel) "Создать канал" else "Создать группу"
+            return if (selected.isEmpty()) base else "$base (${selected.size})"
+        }
         create.visibility = View.GONE
         s.add(create, 12)
 
@@ -143,26 +153,34 @@ object Dialogs {
                             return@setOnClickListener
                         }
                         if (uid in selected) selected.remove(uid)
-                        else if (selected.size >= 15) return@setOnClickListener act.toast("В группе может быть до 15 других участников")
+                        else if (selected.size >= (if (channel) 199 else 49))
+                            return@setOnClickListener act.toast(if (channel) "В канале может быть до 199 подписчиков" else "В группе может быть до 49 других участников")
                         else selected.add(uid)
                         row.setChecked(uid in selected)
-                        create.setText(if (selected.isEmpty()) "Создать группу" else "Создать группу (${selected.size})")
+                        create.setText(createText())
                     }
                     rows.addView(row, lp())
                 }
             }
         }
-        val setGroup = { g: Boolean ->
-            group = g
-            direct.isSelected = !g
-            grp.isSelected = g
-            title.visibility = if (g) View.VISIBLE else View.GONE
-            create.visibility = if (g) View.VISIBLE else View.GONE
-            s.setTitle(if (g) "Новая группа" else "Новый чат")
+        // 0 — direct chat, 1 — group, 2 — channel.
+        val setMode = { mode: Int ->
+            group = mode != 0
+            channel = mode == 2
+            direct.isSelected = mode == 0
+            grp.isSelected = mode == 1
+            chn.isSelected = mode == 2
+            title.setLabel(if (channel) "Название канала" else "Название группы")
+            title.visibility = if (group) View.VISIBLE else View.GONE
+            about.visibility = if (group) View.VISIBLE else View.GONE
+            create.visibility = if (group) View.VISIBLE else View.GONE
+            create.setText(createText())
+            s.setTitle(arrayOf("Новый чат", "Новая группа", "Новый канал")[mode])
             reload()
         }
-        direct.setOnClickListener { setGroup(false) }
-        grp.setOnClickListener { setGroup(true) }
+        direct.setOnClickListener { setMode(0) }
+        grp.setOnClickListener { setMode(1) }
+        chn.setOnClickListener { setMode(2) }
         addContact.setOnClickListener { newContact(act) { reload() } }
         search.edit.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(e: Editable?) = reload()
@@ -170,10 +188,12 @@ object Dialogs {
             override fun onTextChanged(e: CharSequence?, a: Int, b: Int, c: Int) {}
         })
         create.setOnClickListener {
-            if (title.text.isBlank()) return@setOnClickListener act.toast("Введите название группы")
-            if (selected.isEmpty()) return@setOnClickListener act.toast("Выберите участников")
+            if (title.text.isBlank()) return@setOnClickListener act.toast(if (channel) "Введите название канала" else "Введите название группы")
+            if (selected.isEmpty() && !channel) return@setOnClickListener act.toast("Выберите участников")
             create.isEnabled = false
-            CoreClient.call("create_group", JSONObject().put("title", title.text.trim()).put("member_ids", JSONArray(selected.toList()))) { v, e ->
+            val p = JSONObject().put("title", title.text.trim()).put("description", about.text.trim()).put("member_ids", JSONArray(selected.toList()))
+                .put("kind", if (channel) "channel" else "group")
+            CoreClient.call("create_group", p) { v, e ->
                 create.isEnabled = true
                 if (e != null) return@call act.toast(e.message)
                 s.dismiss()
@@ -426,74 +446,126 @@ object Dialogs {
                     return@call
                 }
                 val owner = c.optBoolean("is_owner")
+                val admin = c.optBoolean("is_admin")
+                val channel = c.str("kind") == "channel"
                 val gone = c.optBoolean("left") || c.optBoolean("archived")
-                head.subtitle.text = "Группа"
+                val ownerId = c.str("owner_id")
+                val admins = c.optJSONArray("admins")?.let { a -> (0 until a.length()).map { a.optString(it) } }?.toSet() ?: emptySet()
+                // Everyone except me, optionally without one person or with one more.
+                fun others(without: String = "", with: String = "") =
+                    JSONArray(members.filter { !it.optBoolean("me") && it.str("user_id") != without }.map { it.str("user_id") } + listOf(with).filter { it.isNotEmpty() })
+                fun setMembers(p: JSONObject, done: String) {
+                    CoreClient.call("group_set_members", p.put("conversation_id", cid)) { _, ge ->
+                        if (ge != null) return@call act.toast(ge.message)
+                        act.toast(done)
+                        reload()
+                    }
+                }
+                head.subtitle.text = if (channel) "Канал" else "Группа"
                 add(head)
-                add(ctx.label("Участники: ${c.optInt("member_count")}", 15.5f, 600), 16)
+                if (c.str("description").isNotEmpty()) add(ctx.label(c.str("description"), 14.5f).apply { setTextIsSelectable(true) }, 10)
+                if (c.optBoolean("can_edit_info") && !gone) {
+                    val rename = FloatingField(ctx, if (channel) "Название канала" else "Название группы")
+                    rename.setText(c.str("title"))
+                    add(rename, 16)
+                    val about = FloatingField(ctx, "Описание")
+                    about.setText(c.str("description"))
+                    add(about, 10)
+                    val save = PillButton(ctx, "Сохранить название и описание", primary = false)
+                    add(save, 10)
+                    save.setOnClickListener {
+                        if (rename.text.isBlank()) return@setOnClickListener act.toast("Введите название")
+                        val p = JSONObject().put("conversation_id", cid).put("title", rename.text.trim()).put("description", about.text.trim())
+                        CoreClient.call("group_set_info", p) { _, re ->
+                            if (re != null) return@call act.toast(re.message)
+                            act.toast("Сохранено")
+                            reload()
+                        }
+                    }
+                }
+                add(ctx.label((if (channel) "Подписчики: " else "Участники: ") + c.optInt("member_count"), 15.5f, 600), 16)
                 for (m in members) {
+                    val uid = m.str("user_id")
                     val row = ListRow(ctx, 40)
-                    row.avatar.set(m.str("display_name"), m.str("user_id"))
+                    row.avatar.set(m.str("display_name"), uid)
                     row.title.text = m.str("display_name")
                     if (m.optBoolean("key_changed")) {
                         row.subtitle.text = "Ключ изменился — сверьте код в личном чате"
                         row.subtitle.role(Theme.Role.WARNING)
-                    } else row.subtitle.text = if (m.optBoolean("me")) "это вы" else "@" + m.str("username")
+                    } else {
+                        var sub = if (m.optBoolean("me")) "это вы" else "@" + m.str("username")
+                        if (uid == ownerId) sub += " · владелец" else if (uid in admins) sub += " · админ"
+                        if (m.str("tag").isNotEmpty()) sub += " · " + m.str("tag")
+                        row.subtitle.text = sub
+                    }
                     row.contentDescription = "${row.title.text}, ${row.subtitle.text}"
-                    if (owner && !gone && !m.optBoolean("me")) row.setOnClickListener {
-                        PopupMenu(act, row).add("Исключить из группы", danger = true) {
-                            val ids = JSONArray(members.filter { !it.optBoolean("me") && it.str("user_id") != m.str("user_id") }.map { it.str("user_id") })
-                            CoreClient.call("group_set_members", JSONObject().put("conversation_id", cid).put("member_ids", ids)) { _, ge ->
-                                if (ge != null) return@call act.toast(ge.message)
-                                act.toast("Участник исключён. Новые сообщения ему не придут")
-                                reload()
+                    val me = m.optBoolean("me")
+                    if (admin && !gone) row.setOnClickListener {
+                        val menu = PopupMenu(act, row)
+                        menu.add("Тег…") { editTag(act, cid, uid, m.str("display_name"), m.str("tag")) { reload() } }
+                        if (owner && !me) {
+                            if (uid in admins) menu.add("Снять права админа") {
+                                setMembers(JSONObject().put("member_ids", others()).put("admin_ids", JSONArray(admins.filter { it != uid })), "Права админа сняты")
+                            } else menu.add("Назначить админом") {
+                                setMembers(JSONObject().put("member_ids", others()).put("admin_ids", JSONArray(admins.toList() + uid)), "Назначен админ")
                             }
-                        }.show()
+                        }
+                        if (!me && uid != ownerId && (owner || uid !in admins)) menu.add(if (channel) "Удалить из канала" else "Исключить из группы", danger = true) {
+                            setMembers(JSONObject().put("member_ids", others(without = uid)), "Исключён. Новые сообщения ему не придут")
+                        }
+                        menu.show()
                     } else row.isClickable = false
                     add(row, 2)
                 }
-                if (owner && !gone) {
-                    val rename = FloatingField(ctx, "Название группы")
-                    rename.setText(c.str("title"))
-                    add(rename, 16)
-                    val buttons = LinearLayout(ctx)
-                    val save = PillButton(ctx, "Переименовать", primary = false)
-                    val addBtn = PillButton(ctx, "Добавить участников", primary = false)
-                    buttons.addView(save, lp(0, WRAP, 1f).apply { marginEnd = ctx.dp(5) })
-                    buttons.addView(addBtn, lp(0, WRAP, 1f).apply { marginStart = ctx.dp(5) })
-                    add(buttons, 10)
-                    save.setOnClickListener {
-                        if (rename.text.isBlank()) return@setOnClickListener act.toast("Введите название группы")
-                        CoreClient.call("group_rename", JSONObject().put("conversation_id", cid).put("title", rename.text.trim())) { _, re ->
-                            if (re != null) return@call act.toast(re.message)
-                            act.toast("Название изменено")
-                            reload()
-                        }
-                    }
+                if (admin && !gone) {
+                    val addBtn = PillButton(ctx, if (channel) "Добавить подписчиков" else "Добавить участников", primary = false)
+                    add(addBtn, 12)
                     addBtn.setOnClickListener {
                         CoreClient.call("list_contacts") { lv, le ->
                             if (le != null) return@call act.toast(le.message)
                             val inGroup = members.map { it.str("user_id") }.toSet()
                             val candidates = (lv as JSONArray).objects().filter { it.str("user_id") !in inGroup }
                             val menu = PopupMenu(act, addBtn)
-                            if (candidates.isEmpty()) menu.add("Все контакты уже в группе") {}
+                            if (candidates.isEmpty()) menu.add("Все контакты уже здесь") {}
                             for (cand in candidates) menu.add(cand.str("display_name")) {
-                                val ids = JSONArray(members.filter { !it.optBoolean("me") }.map { it.str("user_id") } + cand.str("user_id"))
-                                CoreClient.call("group_set_members", JSONObject().put("conversation_id", cid).put("member_ids", ids)) { _, ge ->
-                                    if (ge != null) return@call act.toast(ge.message)
-                                    act.toast("Участник добавлен. Прошлые сообщения ему не видны")
-                                    reload()
-                                }
+                                setMembers(JSONObject().put("member_ids", others(with = cand.str("user_id"))), "Добавлен. Прошлые сообщения ему не видны")
                             }
                             menu.show()
                         }
                     }
                 }
+                if (admin && !gone && !channel) {
+                    add(ctx.label("Права участников", 15.5f, 600), 18)
+                    val st = c.optJSONObject("settings") ?: JSONObject()
+                    for ((key, label) in listOf(
+                        "members_can_send" to "Писать сообщения",
+                        "members_can_media" to "Отправлять фото и файлы",
+                        "members_can_polls" to "Создавать опросы",
+                        "members_can_info" to "Менять название и описание",
+                    )) {
+                        val t = ToggleRow(ctx, label)
+                        t.setChecked(st.optBoolean(key), false)
+                        t.onToggle = { on ->
+                            CoreClient.call("group_set_settings", JSONObject().put("conversation_id", cid).put(key, on)) { _, se ->
+                                if (se != null) {
+                                    act.toast(se.message)
+                                    reload()
+                                }
+                            }
+                        }
+                        add(t, 0)
+                    }
+                    muted("Владелец и админы могут всё. Сервер не пропускает сообщения тех, кому писать нельзя.")
+                } else if (channel) {
+                    muted("В канале пишут только владелец и админы. Подписчики читают и голосуют в опросах.", 12)
+                }
                 muted("Файлы хранятся на сервере в зашифрованном виде 30 дней.", 16)
                 if (!gone) {
-                    val leave = PillButton(ctx, "Выйти из группы", primary = false)
+                    val leave = PillButton(ctx, if (channel) "Выйти из канала" else "Выйти из группы", primary = false)
                     leave.label.role(Theme.Role.WARNING)
                     leave.setOnClickListener {
-                        val what = if (owner) "Выйти: группа станет архивной для всех" else "Выйти: новые сообщения перестанут приходить"
+                        val what = if (owner) (if (channel) "Выйти: канал станет архивным для всех" else "Выйти: группа станет архивной для всех")
+                        else "Выйти: новые сообщения перестанут приходить"
                         PopupMenu(act, leave).add(what, danger = true) {
                             CoreClient.call("group_leave", JSONObject().put("conversation_id", cid)) { _, ge ->
                                 if (ge != null) return@call act.toast(ge.message)
@@ -506,6 +578,73 @@ object Dialogs {
             }
         }
         reload()
+        s.show()
+    }
+
+    private fun editTag(act: MainActivity, cid: String, uid: String, name: String, current: String, done: () -> Unit) {
+        val s = Sheet(act, "Тег: $name")
+        val field = FloatingField(s.ctx, "Например, «дизайн» или «модератор»")
+        field.setText(current)
+        s.add(field, 4)
+        s.muted("Тег виден всем рядом с именем. Пустое поле убирает тег.", 10)
+        val ok = PillButton(s.ctx, "Сохранить")
+        s.add(ok, 14)
+        ok.setOnClickListener {
+            CoreClient.call("group_set_tag", JSONObject().put("conversation_id", cid).put("user_id", uid).put("tag", field.text.trim())) { _, e ->
+                if (e != null) return@call act.toast(e.message)
+                s.dismiss()
+                done()
+            }
+        }
+        s.show()
+    }
+
+    // ---- polls ----
+
+    fun newPoll(act: MainActivity, cid: String) {
+        val s = Sheet(act, "Новый опрос")
+        val ctx = s.ctx
+        val question = FloatingField(ctx, "Вопрос")
+        s.add(question, 4)
+        s.heading("Варианты ответа", 14)
+        val box = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        s.add(box, 6)
+        val options = ArrayList<FloatingField>()
+        val more = PillButton(ctx, "Добавить вариант", primary = false)
+        fun addOption() {
+            if (options.size >= 10) return
+            val f = FloatingField(ctx, "Вариант ${options.size + 1}")
+            box.addView(f, lp().apply { topMargin = ctx.dp(if (options.isEmpty()) 0 else 8) })
+            options += f
+            more.visibility = if (options.size < 10) View.VISIBLE else View.GONE
+        }
+        addOption()
+        addOption()
+        s.add(more, 10)
+        more.setOnClickListener {
+            addOption()
+            options.last().edit.requestFocus()
+        }
+        val anonymous = ToggleRow(ctx, "Анонимное голосование")
+        anonymous.setChecked(true, false)
+        val multiple = ToggleRow(ctx, "Несколько ответов")
+        s.add(anonymous, 8)
+        s.add(multiple, 0)
+        val send = PillButton(ctx, "Отправить опрос")
+        s.add(send, 12)
+        send.setOnClickListener {
+            val opts = options.map { it.text.trim() }.filter { it.isNotEmpty() }
+            if (question.text.isBlank()) return@setOnClickListener act.toast("Введите вопрос")
+            if (opts.size < 2) return@setOnClickListener act.toast("Нужно хотя бы два варианта")
+            send.isEnabled = false
+            val p = JSONObject().put("conversation_id", cid).put("question", question.text.trim()).put("options", JSONArray(opts))
+                .put("anonymous", anonymous.checked).put("multiple", multiple.checked)
+            CoreClient.call("send_poll", p) { _, e ->
+                send.isEnabled = true
+                if (e != null) return@call act.toast(e.message)
+                s.dismiss()
+            }
+        }
         s.show()
     }
 }

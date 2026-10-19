@@ -566,7 +566,15 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     if (!L.name.isNull()) {
         p->setFont(Theme::instance()->font(12.5, QFont::DemiBold));
         p->setPen(c.accent);
-        p->drawText(L.name, Qt::AlignLeft | Qt::AlignVCenter, m.value("sender_name").toString());
+        const QString name = m.value("sender_name").toString();
+        p->drawText(L.name, Qt::AlignLeft | Qt::AlignVCenter, name);
+        const QString tag = m.value("sender_tag").toString();
+        if (!tag.isEmpty()) {
+            p->setFont(Theme::instance()->font(12));
+            p->setPen(c.muted);
+            const qreal nx = QFontMetricsF(Theme::instance()->font(12.5, QFont::DemiBold)).horizontalAdvance(name) + 8;
+            p->drawText(L.name.adjusted(nx, 0, 0, 0), Qt::AlignLeft | Qt::AlignVCenter, tag);
+        }
     }
     if (!L.avatar.isNull())
         ui::paintAvatar(p, L.avatar, m.value("sender_name").toString(), m.value("sender_user_id").toString());

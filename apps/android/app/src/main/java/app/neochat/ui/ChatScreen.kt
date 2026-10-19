@@ -6,16 +6,37 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Matrix
+import android.graphics.Outline
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.media.ExifInterface
 import android.net.Uri
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.InputType
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.text.method.LinkMovementMethod
+import android.text.style.BackgroundColorSpan
+import android.text.style.StrikethroughSpan
+import android.text.style.StyleSpan
+import android.text.style.TypefaceSpan
+import android.text.style.URLSpan
+import android.util.Base64
+import android.util.LruCache
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -76,6 +97,142 @@ fun statusText(m: JSONObject) = when (m.str("status")) {
     "read" -> "Прочитано"
     "failed" -> "Не отправлено"
     else -> ""
+}
+
+/** Telegram-like formatting from the core's markdown spans. */
+fun spanned(m: JSONObject): CharSequence {
+    val spans = m.optJSONArray("spans")
+    if (spans == null || spans.length() == 0) return m.str("text")
+    val b = SpannableStringBuilder()
+    for (s in spans.objects()) {
+        val pre = s.optBoolean("pre")
+        // A code block always stands on its own lines.
+        if (pre && b.isNotEmpty() && b[b.length - 1] != '\n') b.append('\n')
+        val st = b.length
+        b.append(s.str("text"))
+        val en = b.length
+        fun set(span: Any) = b.setSpan(span, st, en, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        if (s.optBoolean("bold")) set(StyleSpan(Typeface.BOLD))
+        if (s.optBoolean("italic")) set(StyleSpan(Typeface.ITALIC))
+        if (s.optBoolean("strike")) set(StrikethroughSpan())
+        if (pre || s.optBoolean("code")) {
+            set(TypefaceSpan("monospace"))
+            set(BackgroundColorSpan(0x30808080))
+        }
+        if (s.has("link")) set(URLSpan(s.str("link")))
+        if (pre) b.append('\n')
+    }
+    while (b.isNotEmpty() && b[b.length - 1] == '\n') b.delete(b.length - 1, b.length)
+    return b
+}
+
+fun isImage(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?.optBoolean("image") == true
+
+private fun votesText(n: Int): String {
+    val m10 = n % 10
+    val m100 = n % 100
+    return "$n " + when {
+        m10 == 1 && m100 != 11 -> "голос"
+        m10 in 2..4 && m100 !in 12..14 -> "голоса"
+        else -> "голосов"
+    }
+}
+
+/** Decoded photos: thumbnails from messages and downscaled originals. */
+object Photos {
+    val full = object : LruCache<String, Bitmap>(32 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap) = value.byteCount
+    }
+    private val thumbs = LruCache<String, Bitmap>(300)
+    private val pending = HashMap<String, Long>()
+
+    fun thumb(m: JSONObject): Bitmap? {
+        val id = m.str("id")
+        thumbs.get(id)?.let { return it }
+        val b64 = m.optJSONObject("file")?.str("thumb").orEmpty()
+        if (b64.isEmpty()) return null
+        val bytes = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull() ?: return null
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        thumbs.put(id, bmp)
+        return bmp
+    }
+
+    /** Downloads (once per 30 s on failure) and decodes the original in the background. */
+    fun load(m: JSONObject, done: (Bitmap) -> Unit) {
+        val id = m.str("id")
+        val now = System.currentTimeMillis()
+        if ((m.optJSONObject("file")?.optLong("size") ?: 0) > 25_000_000 || now - (pending[id] ?: 0) < 30_000) return
+        pending[id] = now
+        CoreClient.call("download_file", JSONObject().put("message_id", id)) { v, e ->
+            if (e != null) return@call
+            val path = (v as JSONObject).str("path")
+            Thread {
+                val bmp = decode(path, 1280)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    if (bmp == null) return@post
+                    pending.remove(id)
+                    full.put(id, bmp)
+                    done(bmp)
+                }
+            }.start()
+        }
+    }
+
+    /** Decodes with subsampling to about `maxSide` and applies the EXIF rotation. */
+    fun decode(path: String, maxSide: Int): Bitmap? = runCatching {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, o)
+        var sample = 1
+        while (maxOf(o.outWidth, o.outHeight) / (sample * 2) >= maxSide) sample *= 2
+        val bmp = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+        val deg = rotation(path)
+        if (deg == 0) bmp else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(deg.toFloat()) }, true)
+    }.getOrNull()
+
+    fun rotation(path: String): Int = runCatching {
+        when (ExifInterface(path).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    }.getOrDefault(0)
+
+    /** Small JPEG preview sent inside the message; kept tiny so it fits the encrypted envelope. */
+    fun makeThumb(path: String): Triple<String, Int, Int>? {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, o)
+        if (o.outWidth <= 0 || o.outHeight <= 0) return null
+        val deg = rotation(path)
+        val (w, h) = if (deg == 90 || deg == 270) o.outHeight to o.outWidth else o.outWidth to o.outHeight
+        val src = decode(path, 320) ?: return null
+        for (side in intArrayOf(160, 120, 90)) {
+            val k = side.toFloat() / maxOf(src.width, src.height)
+            val small = Bitmap.createScaledBitmap(src, maxOf(1, (src.width * k).toInt()), maxOf(1, (src.height * k).toInt()), true)
+            val out = java.io.ByteArrayOutputStream()
+            small.compress(Bitmap.CompressFormat.JPEG, 55, out)
+            val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            if (b64.length <= 12000) return Triple(b64, w, h)
+        }
+        return null
+    }
+}
+
+/** Thin result bar of a poll answer. */
+private class PollBar(ctx: Context) : View(ctx) {
+    var fraction = 0f
+    var track = 0
+    var fill = 0
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    override fun onDraw(c: Canvas) {
+        val r = height / 2f
+        paint.color = track
+        c.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), r, r, paint)
+        if (fraction > 0f) {
+            paint.color = fill
+            c.drawRoundRect(0f, 0f, maxOf(height.toFloat(), width * fraction), height.toFloat(), r, r, paint)
+        }
+    }
 }
 
 private fun hhmm(ms: Long) = SimpleDateFormat("HH:mm", RU).format(Date(ms))
@@ -280,18 +437,26 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             title.text = conv.str("title")
             avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId })
             val members = conv.optJSONArray("members") ?: JSONArray()
-            subtitle.text = if (conv.str("kind") == "group") memberCount(conv.optInt("member_count"))
-            else members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
+            val channel = conv.str("kind") == "channel"
+            subtitle.text = when (conv.str("kind")) {
+                "group" -> memberCount(conv.optInt("member_count"))
+                "channel" -> memberCount(conv.optInt("member_count"), true)
+                else -> members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
+            }
             val system = conv.str("kind") == "system"
             if (system) subtitle.text = "Системные сообщения"
             val left = conv.optBoolean("left") || conv.optBoolean("archived") || system
-            composer.visibility = if (left) View.GONE else View.VISIBLE
-            gone.visibility = if (left) View.VISIBLE else View.GONE
+            val muteComposer = left || !conv.optBoolean("can_post", true)
+            composer.visibility = if (muteComposer) View.GONE else View.VISIBLE
+            gone.visibility = if (muteComposer) View.VISIBLE else View.GONE
             gone.text = when {
                 system -> "Сюда приходят коды входа и сообщения о новых устройствах"
-                conv.optBoolean("archived") -> "Группа в архиве. Новые сообщения недоступны"
-                else -> "Вы вышли из этой группы"
+                conv.optBoolean("archived") -> if (channel) "Канал в архиве. Новые публикации недоступны" else "Группа в архиве. Новые сообщения недоступны"
+                conv.optBoolean("left") -> if (channel) "Вы вышли из канала" else "Вы вышли из этой группы"
+                channel -> "Публикуют только владелец и админы канала"
+                else -> "Писать здесь могут только владелец и админы"
             }
+            if (muteComposer) hideKeyboard()
             blocked = (conv.optJSONArray("key_changed_users")?.length() ?: 0) > 0 || !conv.optBoolean("can_send", true)
             updateSend(false)
             val n = conv.str("notice").takeIf { conv.opt("notice") is String }
@@ -308,13 +473,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
     }
 
-    private fun memberCount(n: Int): String {
+    private fun memberCount(n: Int, channel: Boolean = false): String {
         val m10 = n % 10
         val m100 = n % 100
         val w = when {
-            m10 == 1 && m100 != 11 -> "участник"
-            m10 in 2..4 && m100 !in 12..14 -> "участника"
-            else -> "участников"
+            m10 == 1 && m100 != 11 -> if (channel) "подписчик" else "участник"
+            m10 in 2..4 && m100 !in 12..14 -> if (channel) "подписчика" else "участника"
+            else -> if (channel) "подписчиков" else "участников"
         }
         return "$n $w"
     }
@@ -511,6 +676,12 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private val fileMeta = ctx.label("", 12.5f, 400)
         private val fileAction = ImageView(ctx)
         private val text = ctx.label("", 15.5f)
+        private val photo = ImageView(ctx)
+        private val poll = LinearLayout(ctx)
+        private val pollQuestion = ctx.label("", 16f, 700)
+        private val pollInfo = ctx.label("", 12.5f)
+        private val pollOptions = LinearLayout(ctx)
+        private val meta = LinearLayout(ctx)
         private val time = ctx.label("", 11.5f)
         private val status = ImageView(ctx)
         private val retry = ctx.label("Не отправлено · Повторить", 12.5f, 600, Theme.Role.WARNING)
@@ -551,6 +722,23 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             file.addView(fileAction, LayoutParams(dp(40), dp(40)))
             file.minimumWidth = dp(220)
             bubble.addView(file, LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(4) })
+            photo.scaleType = ImageView.ScaleType.CENTER_CROP
+            photo.outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(v: View, o: Outline) = o.setRoundRect(0, 0, v.width, v.height, ctx.dpf(19))
+            }
+            photo.clipToOutline = true
+            photo.contentDescription = "Фото"
+            photo.isClickable = true
+            photo.setOnClickListener { openPhoto(m) }
+            photo.setOnLongClickListener { menu(m, bubble); true }
+            bubble.addView(photo, LayoutParams(dp(200), dp(150)))
+            poll.orientation = VERTICAL
+            poll.minimumWidth = dp(240)
+            poll.addView(pollQuestion)
+            poll.addView(pollInfo, LayoutParams(WRAP, WRAP).apply { topMargin = dp(2) })
+            pollOptions.orientation = VERTICAL
+            poll.addView(pollOptions, LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
+            bubble.addView(poll, LayoutParams(WRAP, WRAP))
             // Bubbles take at most ~78% of the screen width.
             val maxText = (ctx.resources.displayMetrics.widthPixels * 0.78f).toInt() - dp(29 + 38)
             text.maxWidth = maxText
@@ -558,8 +746,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             fileName.maxWidth = maxText - dp(46 + 60)
             text.setTextIsSelectable(false)
             text.setLineSpacing(0f, 1.2f)
+            text.setOnLongClickListener { menu(m, bubble); true }
+            pollQuestion.maxWidth = maxText
             bubble.addView(text, LayoutParams(WRAP, WRAP))
-            val meta = LinearLayout(ctx).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.END }
+            meta.gravity = Gravity.CENTER_VERTICAL or Gravity.END
             meta.addView(time)
             meta.addView(status, LayoutParams(dp(16), dp(16)).apply { marginStart = dp(4) })
             bubble.addView(meta, LayoutParams(WRAP, WRAP).apply { gravity = Gravity.END; topMargin = dp(2) })
@@ -573,19 +763,20 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             bubble.isClickable = true
             bubble.isLongClickable = true
             bubble.setOnLongClickListener { menu(m, bubble); true }
-            bubble.setOnClickListener { if (m.str("kind") == "file") openFile(m) }
+            bubble.setOnClickListener { if (isImage(m)) openPhoto(m) else if (m.str("kind") == "file") openFile(m) }
         }
 
         fun bind(item: Item) {
             m = item.m
             val out = m.optBoolean("outgoing")
             val group = conv.str("kind") == "group"
+            val kind = m.str("kind")
             gravity = (if (out) Gravity.END else Gravity.START) or Gravity.BOTTOM
             setPadding(if (out) dp(48) else dp(4), if (item.firstInRun) dp(8) else dp(3), if (out) dp(4) else dp(32), 0)
             av.visibility = if (group && !out) (if (item.lastInRun) VISIBLE else INVISIBLE) else GONE
             av.set(m.str("sender_name"), m.str("sender_user_id"))
             sender.visibility = if (group && !out && item.firstInRun) VISIBLE else GONE
-            sender.text = m.str("sender_name")
+            sender.text = m.str("sender_name") + m.str("sender_tag").let { if (it.isEmpty()) "" else " · $it" }
             (col.layoutParams as LayoutParams).gravity = if (out) Gravity.END else Gravity.START
             col.gravity = if (out) Gravity.END else Gravity.START
             val undecryptable = m.str("kind") == "undecryptable"
@@ -608,7 +799,29 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 quoteText.text = if (rep.str("kind") == "file") "Файл" else rep.str("text").replace('\n', ' ')
             }
             val f = m.optJSONObject("file")
-            file.visibility = if (f != null) VISIBLE else GONE
+            val image = isImage(m)
+            file.visibility = if (f != null && !image) VISIBLE else GONE
+            photo.visibility = if (image) VISIBLE else GONE
+            bubble.setPadding(if (image) dp(4) else dp(15), if (image) dp(4) else dp(9), if (image) dp(4) else dp(14), dp(7))
+            text.setPadding(if (image) dp(11) else 0, if (image) dp(6) else 0, if (image) dp(10) else 0, 0)
+            meta.setPadding(0, 0, if (image) dp(10) else 0, 0)
+            if (image && f != null) {
+                val maxW = minOf(text.maxWidth + dp(29), dp(300)).toFloat()
+                var iw = f.optDouble("width", 0.0).toFloat()
+                var ih = f.optDouble("height", 0.0).toFloat()
+                if (iw <= 0f || ih <= 0f) { iw = 4f; ih = 3f }
+                val k = minOf(maxW / iw, dp(340) / ih)
+                val plp = photo.layoutParams
+                plp.width = maxOf(dp(140), (iw * k).toInt())
+                plp.height = maxOf(dp(90), (ih * k).toInt())
+                photo.layoutParams = plp
+                val id = m.str("id")
+                val cached = Photos.full.get(id)
+                photo.setImageBitmap(cached ?: Photos.thumb(m))
+                if (cached == null) Photos.load(m) { bmp -> if (m.str("id") == id) photo.setImageBitmap(bmp) }
+            }
+            poll.visibility = if (kind == "poll") VISIBLE else GONE
+            if (kind == "poll") bindPoll(m, fg, muted)
             if (f != null) {
                 fileName.text = f.str("name")
                 fileMeta.text = sizeText(f.optLong("size")) + " · " + kindText(f.str("mime"), f.str("name"))
@@ -618,8 +831,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 undecryptable -> "Сообщение не удалось расшифровать"
                 else -> m.str("text")
             }
-            text.visibility = if (body.isEmpty()) GONE else VISIBLE
-            text.text = body
+            text.visibility = if (body.isEmpty() || kind == "poll") GONE else VISIBLE
+            val rich = if (undecryptable) body else spanned(m)
+            text.text = rich
+            text.setLinkTextColor(fg)
+            text.movementMethod = if (rich is Spanned && rich.getSpans(0, rich.length, URLSpan::class.java).isNotEmpty()) LinkMovementMethod.getInstance() else null
             if (undecryptable) text.setTextColor(Theme.p.warning)
             time.text = hhmm(m.optLong("sent_at"))
             val st = m.str("status")
@@ -641,13 +857,120 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             retry.visibility = if (out && st == "failed") VISIBLE else GONE
             bubble.contentDescription = buildString {
                 append(m.str("sender_name")).append(", ").append(time.text).append(": ")
-                if (f != null) append("файл ").append(f.str("name")).append(". ")
+                if (image) append("фото. ") else if (f != null) append("файл ").append(f.str("name")).append(". ")
+                if (kind == "poll") append("опрос. ")
                 append(body)
                 if (out && statusText(m).isNotEmpty()) append(". ").append(statusText(m))
                 if (group && out && m.optInt("delivered_count") > 0) append(", доставлено: ").append(m.optInt("delivered_count"))
             }
             invalidate()
         }
+
+        private fun bindPoll(m: JSONObject, fg: Int, muted: Int) {
+            val p = m.optJSONObject("poll") ?: JSONObject()
+            val opts = p.optJSONArray("options")?.objects() ?: emptyList()
+            val my = p.optJSONArray("my_choices")?.let { a -> (0 until a.length()).map { a.optInt(it) } } ?: emptyList()
+            val closed = p.optBoolean("closed")
+            val multiple = p.optBoolean("multiple")
+            val total = p.optInt("voters")
+            val results = closed || my.isNotEmpty()
+            pollQuestion.text = m.str("text")
+            pollQuestion.setTextColor(fg)
+            pollInfo.setTextColor(muted)
+            pollInfo.text = (if (closed) "Опрос завершён" else if (p.optBoolean("anonymous", true)) "Анонимный опрос" else "Открытый опрос") +
+                (if (multiple) " · несколько ответов" else "") + " · " + votesText(total)
+            val strong = if (m.optBoolean("outgoing")) Theme.p.onAccent else Theme.p.accent
+            pollOptions.removeAllViews()
+            for ((i, o) in opts.withIndex()) {
+                val votes = o.optInt("votes")
+                val chosen = i in my
+                val pct = if (total > 0) Math.round(100f * votes / total) else 0
+                val row = LinearLayout(ctx).apply { orientation = VERTICAL; minimumHeight = dp(44); gravity = Gravity.CENTER_VERTICAL }
+                val line = LinearLayout(ctx).apply { gravity = Gravity.CENTER_VERTICAL }
+                if (results) {
+                    line.addView(ctx.label("$pct%", 13f, 700).apply { setTextColor(if (chosen) strong else muted) }, lp(dp(46), WRAP))
+                } else {
+                    val mark = View(ctx)
+                    mark.background = GradientDrawable().apply {
+                        if (multiple) cornerRadius = ctx.dpf(5) else shape = GradientDrawable.OVAL
+                        setStroke(dp(2), muted)
+                    }
+                    line.addView(mark, lp(dp(18), dp(18)).apply { marginEnd = dp(12) })
+                }
+                line.addView(ctx.label(o.str("text"), 15f, if (chosen) 600 else 400).apply { setTextColor(fg) }, lp(0, WRAP, 1f))
+                row.addView(line, lp())
+                if (results) {
+                    val bar = PollBar(ctx)
+                    bar.fraction = if (total > 0) votes.toFloat() / total else 0f
+                    bar.fill = strong
+                    bar.track = (muted and 0x00FFFFFF) or 0x40000000
+                    row.addView(bar, lp(MATCH, dp(4)).apply { setMargins(dp(46), dp(5), 0, 0) })
+                }
+                val voters = o.optJSONArray("voters")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList()
+                row.contentDescription = o.str("text") + (if (results) ", $pct%" else "") + (if (chosen) ", ваш выбор" else "") +
+                    (if (voters.isNotEmpty()) ", " + voters.joinToString() else "")
+                if (!closed) {
+                    row.isClickable = true
+                    row.setOnClickListener { vote(m, i) }
+                }
+                if (voters.isNotEmpty()) row.setOnLongClickListener { act.toast(voters.joinToString()); true }
+                pollOptions.addView(row, lp())
+            }
+        }
+    }
+
+    private fun vote(m: JSONObject, option: Int) {
+        val p = m.optJSONObject("poll") ?: return
+        if (p.optBoolean("closed")) return
+        val my = p.optJSONArray("my_choices")?.let { a -> (0 until a.length()).map { a.optInt(it) } } ?: emptyList()
+        // Multiple choice: a tap toggles the answer.
+        val choices = if (p.optBoolean("multiple")) (if (option in my) my - option else my + option) else listOf(option)
+        CoreClient.call("vote_poll", JSONObject().put("message_id", m.str("id")).put("choices", JSONArray(choices))) { _, e ->
+            if (e != null) act.toast(e.message)
+        }
+    }
+
+    // ---- photo viewer ----
+
+    private var viewer: View? = null
+
+    private fun openPhoto(m: JSONObject) {
+        CoreClient.call("download_file", JSONObject().put("message_id", m.str("id"))) { v, e ->
+            if (e != null) return@call act.toast(e.message)
+            val path = (v as JSONObject).str("path")
+            val side = maxOf(ctx.resources.displayMetrics.widthPixels, ctx.resources.displayMetrics.heightPixels)
+            Thread {
+                val bmp = Photos.decode(path, side)
+                act.runOnUiThread { if (bmp == null) act.toast("Не удалось открыть фото") else showViewer(bmp) }
+            }.start()
+        }
+    }
+
+    /** Full-screen photo over the chat: tap or Back closes; fades unless motion is reduced. */
+    private fun showViewer(bmp: Bitmap) {
+        closeViewer()
+        hideKeyboard()
+        val v = FrameLayout(ctx)
+        v.setBackgroundColor(0xF2040914.toInt())
+        v.isClickable = true
+        v.contentDescription = "Просмотр фото. Нажмите, чтобы закрыть"
+        val img = ImageView(ctx)
+        img.setImageBitmap(bmp)
+        img.scaleType = ImageView.ScaleType.FIT_CENTER
+        img.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        v.addView(img, flp(MATCH, MATCH).apply { setMargins(dp(8), column.paddingTop + dp(8), dp(8), column.paddingBottom + dp(8)) })
+        v.setOnClickListener { closeViewer() }
+        root.addView(v, flp(MATCH, MATCH))
+        viewer = v
+        v.alpha = 0f
+        v.animate().alpha(1f).setDuration(Theme.ms(180)).start()
+    }
+
+    private fun closeViewer() {
+        val v = viewer ?: return
+        viewer = null
+        v.animate().cancel()
+        v.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { root.removeView(v) }.start()
     }
 
     private fun menu(m: JSONObject, anchor: View) {
@@ -658,6 +981,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         if (ok && m.str("text").isNotEmpty()) pm.add("Копировать текст") {
             ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("NeoChat", m.str("text")))
             if (android.os.Build.VERSION.SDK_INT < 33) act.toast("Текст скопирован")
+        }
+        if (isImage(m)) pm.add("Открыть фото") { openPhoto(m) }
+        if (m.str("kind") == "poll" && m.optBoolean("outgoing") && m.optJSONObject("poll")?.optBoolean("closed") != true) pm.add("Завершить опрос") {
+            CoreClient.call("close_poll", JSONObject().put("message_id", m.str("id"))) { _, e -> if (e != null) act.toast(e.message) }
         }
         if (m.str("kind") == "file") {
             pm.add("Открыть файл") { openFile(m) }
@@ -733,8 +1060,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         capsule.gravity = Gravity.BOTTOM
         capsule.background = GlassDrawable(ctx, radius = ctx.dpf(31))
         capsule.setPadding(dp(4), dp(4), dp(4), dp(4))
-        val attach = IconButton(ctx, R.drawable.ic_attach, "Прикрепить файл")
-        attach.setOnClickListener { pickFile() }
+        val attach = IconButton(ctx, R.drawable.ic_attach, "Прикрепить")
+        // Ask what is attached first: photos open the gallery and arrive as photos.
+        attach.setOnClickListener {
+            val pm = PopupMenu(act, attach).add("Фото") { pickPhotos() }.add("Файл") { pickFile() }
+            if (conv.optBoolean("can_polls") && conv.str("kind") != "direct") pm.add("Опрос") { Dialogs.newPoll(act, conversationId) }
+            pm.show()
+        }
         capsule.addView(attach)
         edit.hint = "Написать сообщение…"
         edit.contentDescription = "Текст сообщения"
@@ -835,6 +1167,18 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
     }
 
+    private fun pickPhotos() {
+        val intent = if (android.os.Build.VERSION.SDK_INT >= 33) Intent(MediaStore.ACTION_PICK_IMAGES).putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, 10)
+        else Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        act.startForResult(intent) { code, data ->
+            if (code != Activity.RESULT_OK || data == null) return@startForResult
+            val uris = ArrayList<Uri>()
+            data.clipData?.let { c -> for (i in 0 until c.itemCount) uris += c.getItemAt(i).uri }
+            data.data?.let { if (uris.isEmpty()) uris += it }
+            for (u in uris) sendUri(u, photo = true)
+        }
+    }
+
     private fun pickFile() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
             .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
@@ -848,7 +1192,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     /** Copies the picked document to app storage, hands it to the core, then removes the copy. */
-    private fun sendUri(uri: Uri) {
+    private fun sendUri(uri: Uri, photo: Boolean = false) {
         val cr = ctx.contentResolver
         var name = "file"
         var size = -1L
@@ -864,12 +1208,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val dir = File(ctx.cacheDir, "outgoing").apply { mkdirs() }
             val tmp = File.createTempFile("send", ".bin", dir)
             val copied = runCatching { cr.openInputStream(uri)!!.use { i -> tmp.outputStream().use { i.copyTo(it) } } }.isSuccess
+            val thumb = if (copied && photo && mime.startsWith("image/")) Photos.makeThumb(tmp.absolutePath) else null
             act.runOnUiThread {
                 if (!copied) {
                     tmp.delete()
                     return@runOnUiThread act.toast("Не удалось прочитать файл")
                 }
                 val p = JSONObject().put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
+                if (thumb != null) p.put("thumb", thumb.first).put("width", thumb.second).put("height", thumb.third)
                 CoreClient.call("send_file", p) { _, e ->
                     tmp.delete()
                     if (e != null) act.toast(e.message)
@@ -892,6 +1238,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     override fun onBack(): Boolean {
+        if (viewer != null) {
+            closeViewer()
+            return true
+        }
         if (searchOpen) {
             toggleSearch()
             return true

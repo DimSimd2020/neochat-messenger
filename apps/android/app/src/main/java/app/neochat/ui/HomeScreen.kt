@@ -265,7 +265,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
         chatAdapter.rows = allChats.filter {
             when (filter) {
                 1 -> it.str("kind") == "direct"
-                2 -> it.str("kind") == "group"
+                2 -> it.str("kind") == "group" || it.str("kind") == "channel"
                 else -> true
             }
         }
