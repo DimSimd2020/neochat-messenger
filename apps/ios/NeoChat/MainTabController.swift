@@ -345,7 +345,7 @@ final class ProfileViewController: UIViewController {
             guard case .success(let v) = r, let s = v as? JSON else { return }
             self?.avatar.set(s.str("username"), seed: s.str("user_id"))
             self?.name.text = s.str("username")
-            self?.sub.text = "@" + s.str("username") + " · " + (s.bool("primary") ? "основное устройство" : "дополнительное устройство")
+            self?.sub.text = "@" + s.str("username")
         }
     }
 

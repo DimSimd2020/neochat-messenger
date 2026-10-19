@@ -9,7 +9,7 @@ use crate::keys;
 use crate::outbox::FileMeta;
 
 const COLUMNS: &str = "m.local_id, m.id, m.conversation_id, m.sender_user_id, m.outgoing, m.kind, m.body, m.reply_to, m.file, m.status, m.error, m.sent_at,
-    COALESCE(c.first_name, ''), COALESCE(c.last_name, ''), COALESCE(c.username, '')";
+    COALESCE(c.first_name, CASE WHEN m.sender_user_id='system' THEN 'NeoChat' ELSE '' END), COALESCE(c.last_name, ''), COALESCE(c.username, '')";
 
 impl Inner {
     /// Runs a message query; `me` is appended as the last positional parameter.

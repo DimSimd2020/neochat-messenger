@@ -172,6 +172,8 @@ void UiTest::registerAccount()
     QTRY_VERIFY(field("Имя пользователя")->edit()->hasFocus());
     QTest::mouseClick(field("Пароль")->edit(), Qt::LeftButton);
     QTRY_VERIFY(field("Пароль")->edit()->hasFocus());
+    // The QR code for sign-in from a phone appears once the server answers.
+    QTest::qWait(3000);
     shot("01-onboarding");
     button("Создать аккаунт")->click();
     QTRY_VERIFY(button("Уже есть аккаунт? Войти"));

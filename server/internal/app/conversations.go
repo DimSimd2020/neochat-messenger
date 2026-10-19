@@ -274,10 +274,6 @@ func validState(st *signedState) (int64, error) {
 }
 
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, a *authCtx) {
-	if !a.Primary {
-		s.fail(w, r, errf(403, "primary_required", "Группу создаёт основное устройство"))
-		return
-	}
 	var req struct {
 		GroupID string      `json:"group_id"`
 		Members []string    `json:"members"`
@@ -370,10 +366,6 @@ func (s *Server) handleMembership(w http.ResponseWriter, r *http.Request, a *aut
 	prev, err := strconv.ParseInt(req.PrevRevision, 10, 64)
 	if err != nil || rev != prev+1 {
 		s.fail(w, r, errBadRequest)
-		return
-	}
-	if !a.Primary {
-		s.fail(w, r, errf(403, "primary_required", "Состав группы меняет основное устройство владельца"))
 		return
 	}
 	members, err := s.checkMembers(r, a.UserID, req.Members)

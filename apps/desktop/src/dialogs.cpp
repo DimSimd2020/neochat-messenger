@@ -388,19 +388,11 @@ void devices(const DialogHost &h)
     sheet->body()->addWidget(list);
     sheet->body()->addWidget(mutedText(QStringLiteral("Отзыв устройства прекращает доставку новых сообщений на него. "
                                                       "Уже скачанные на нём копии удалённо не стираются.")));
-    auto *linkTitle = new ui::Label(QStringLiteral("Привязать новое устройство"), 15, QFont::DemiBold);
-    auto *linkHint = mutedText(QStringLiteral("Войдите в аккаунт на новом устройстве, скопируйте там код привязки и вставьте его сюда."));
-    auto *code = new ui::TextField(QStringLiteral("Код привязки"));
-    auto *approve = new ui::Button(QStringLiteral("Подтвердить привязку"));
-    for (QWidget *w : {static_cast<QWidget *>(linkTitle), static_cast<QWidget *>(linkHint), static_cast<QWidget *>(code), static_cast<QWidget *>(approve)})
-        sheet->body()->addWidget(w);
+    sheet->body()->addWidget(mutedText(QStringLiteral("Новое устройство входит по паролю или по QR-коду, который телефон сканирует с экрана входа.")));
 
     auto reload = std::make_shared<std::function<void()>>();
     *reload = [=] {
-        Core::instance()->call("status", {}, sheet, [=](const QJsonValue &sv, const CoreError &) {
-            const bool primary = sv.toObject().value("primary").toBool();
-            for (QWidget *w : {static_cast<QWidget *>(linkTitle), static_cast<QWidget *>(linkHint), static_cast<QWidget *>(code), static_cast<QWidget *>(approve)})
-                w->setVisible(primary);
+        {
             Core::instance()->call("devices", {}, sheet, [=](const QJsonValue &v, const CoreError &e) {
                 if (!e.ok())
                     return fail(h, e);
@@ -408,15 +400,13 @@ void devices(const DialogHost &h)
                 for (const auto &x : v.toObject().value("devices").toArray()) {
                     const QJsonObject d = x.toObject();
                     QString sub = platformName(d.value("platform").toString());
-                    if (d.value("primary").toBool())
-                        sub += QStringLiteral(" · основное");
                     if (d.value("current").toBool())
                         sub += QStringLiteral(" · это устройство");
                     const QDateTime seen = QDateTime::fromString(d.value("last_seen_at").toString(), Qt::ISODate).toLocalTime();
                     if (seen.isValid() && !d.value("current").toBool())
                         sub += QStringLiteral(" · активность ") + seen.toString("dd.MM HH:mm");
                     auto *row = new PersonRow(d.value("name").toString(), sub, d.value("id").toString());
-                    const bool canRevoke = primary && !d.value("current").toBool();
+                    const bool canRevoke = !d.value("current").toBool();
                     if (!canRevoke)
                         row->setCursor(Qt::ArrowCursor);
                     const QString id = d.value("id").toString();
@@ -441,24 +431,8 @@ void devices(const DialogHost &h)
                 }
                 list->fit();
             });
-        });
+        }
     };
-    QObject::connect(approve, &QAbstractButton::clicked, sheet, [=] {
-        const QString qr = code->text().trimmed();
-        if (!qr.startsWith("neochat-link:"))
-            return h.toast(QStringLiteral("Это не код привязки NeoChat"));
-        approve->setEnabled(false);
-        sheet->setBusy(true);
-        Core::instance()->call("link_approve", {{"qr", qr}}, sheet, [=](const QJsonValue &, const CoreError &e) {
-            approve->setEnabled(true);
-            sheet->setBusy(false);
-            if (!e.ok())
-                return fail(h, e);
-            code->setText({});
-            h.toast(QStringLiteral("Устройство привязано"));
-            (*reload)();
-        });
-    });
     (*reload)();
     sheet->open();
 }
@@ -528,6 +502,21 @@ void settings(const DialogHost &h)
     });
     sheet->body()->addWidget(receipts);
     sheet->body()->addWidget(mutedText(QStringLiteral("Если выключить, собеседники не увидят, что вы прочитали сообщение.")));
+    auto *twoFactor = new ui::Toggle(QStringLiteral("Подтверждение входа"));
+    twoFactor->setEnabled(false);
+    Core::instance()->call("account_settings", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
+        QSignalBlocker b(twoFactor);
+        twoFactor->setChecked(v.toObject().value("two_factor").toBool());
+        twoFactor->setEnabled(true);
+    });
+    QObject::connect(twoFactor, &QAbstractButton::toggled, sheet, [=](bool on) {
+        Core::instance()->call("set_two_factor", {{"enabled", on}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+            if (!e.ok())
+                fail(h, e);
+        });
+    });
+    sheet->body()->addWidget(twoFactor);
+    sheet->body()->addWidget(mutedText(QStringLiteral("При входе на новом устройстве понадобится код. Он придёт в чат «NeoChat уведомления» на ваших устройствах.")));
     sheet->body()->addSpacing(6);
     auto *logout = new ui::Button(QStringLiteral("Выйти из аккаунта"), ui::Button::Danger);
     QObject::connect(logout, &QAbstractButton::clicked, sheet, [=] {
@@ -555,7 +544,7 @@ void profile(const DialogHost &h)
     Core::instance()->call("status", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
         const QJsonObject s = v.toObject();
         name->setText("@" + s.value("username").toString());
-        sub->setText((s.value("primary").toBool() ? QStringLiteral("Основное устройство") : QStringLiteral("Дополнительное устройство")));
+        sub->setVisible(false);
     });
     auto *dev = new ui::Button(QStringLiteral("Устройства"), ui::Button::Secondary);
     auto *set = new ui::Button(QStringLiteral("Настройки"), ui::Button::Secondary);

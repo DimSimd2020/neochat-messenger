@@ -15,6 +15,7 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::api::Api;
+use crate::backup;
 use crate::error::{Error, Result};
 use crate::keys::{self, Roster, b64, unb64};
 use crate::store::{Db, kv_del, kv_get, kv_get_str, kv_set, now_ms};
@@ -238,9 +239,13 @@ impl Inner {
             "login" => self.login(p),
             "recover" => self.recover(p),
             "logout" => self.logout(),
-            "link_start" => self.link_start(p),
-            "link_poll" => self.link_poll(),
-            "link_approve" => self.link_approve(p),
+            "qr_login_start" => self.qr_login_start(p),
+            "qr_login_poll" => self.qr_login_poll(),
+            "qr_login_approve" => self.qr_login_approve(p),
+            "account_settings" => self.authed("GET", "/v1/accounts/current/settings", None),
+            "set_two_factor" => self
+                .authed("PUT", "/v1/accounts/current/settings", Some(&json!({"two_factor": p["enabled"].as_bool().unwrap_or(false)})))
+                .map(|_| Value::Null),
             "devices" => self.authed("GET", "/v1/devices", None),
             "revoke_device" => self.revoke_device(p),
             "set_foreground" => {
@@ -293,7 +298,6 @@ impl Inner {
         Ok(json!({
             "logged_in": kv_get(c, "refresh_token")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "has_device_keys": kv_get(c, "device_identity")?.is_some() && kv_get(c, "user_id")?.is_some(),
-            "pending_link": kv_get(c, "link_id")?.is_some(),
             "user_id": kv_get_str(c, "user_id")?,
             "username": kv_get_str(c, "username")?,
             "device_id": kv_get_str(c, "device_id")?,
@@ -314,7 +318,7 @@ impl Inner {
     fn register(&self, p: &Value) -> Result<Value> {
         let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
-        let password = s(p, "password")?;
+        let pw = backup::derive(&username, s(p, "password")?)?;
         let device = keys::new_device()?;
         let account = IdentityKeyPair::generate(&mut rand::rng());
         let secret = keys::random_bytes::<32>();
@@ -329,7 +333,8 @@ impl Inner {
         let (blob, sig) = roster.sign(&account)?;
         let body = json!({
             "username": username,
-            "password": password,
+            "password": pw.auth,
+            "key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?),
             "account_identity_key": b64(&account.identity_key().serialize()),
             "recovery_hash": b64(&keys::sha256(&secret)),
             "device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?,
@@ -342,6 +347,7 @@ impl Inner {
         device.persist(&tx)?;
         self.store_account(&tx, &server, &out, &username, true)?;
         kv_set(&tx, "account_identity", &account.serialize())?;
+        kv_set(&tx, "backup_key", &pw.backup[..])?;
         self.store_own_roster(&tx, "1", &blob, &sig, &account.identity_key().serialize())?;
         tx.commit()?;
         drop(db);
@@ -380,20 +386,22 @@ impl Inner {
         self.wake();
     }
 
+    /// Signs in with the password. A device that already has keys for this account
+    /// proves itself with its auth key; a new device restores the account identity
+    /// from the password-protected backup, adds itself to the roster and imports the
+    /// history. With two-factor sign-in the server first asks for a code that it sends
+    /// to the account's other devices ("code_required").
     fn login(&self, p: &Value) -> Result<Value> {
         let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
-        let (device_id, stored_user) = {
+        let pw = backup::derive(&username, s(p, "password")?)?;
+        let (device_id, stored_user, has_identity) = {
             let db = self.db();
-            (kv_get_str(&db.conn, "device_id")?, kv_get_str(&db.conn, "username")?)
+            (kv_get_str(&db.conn, "device_id")?, kv_get_str(&db.conn, "username")?, kv_get(&db.conn, "user_id")?.is_some())
         };
-        let device_id = match (device_id, stored_user) {
-            (Some(d), Some(u)) if u == username => d,
-            _ => {
-                return Err(Error::Invalid(
-                    "Это устройство ещё не привязано к аккаунту. Привяжите его с основного устройства или восстановите аккаунт".into(),
-                ));
-            }
+        let device_id = match (device_id, stored_user, has_identity) {
+            (Some(d), Some(u), true) if u == username => d,
+            _ => return self.login_new_device(&server, &username, &pw, p),
         };
         let ts = (now_ms() / 1000).to_string();
         let sig = keys::login_signature(&self.db().conn, &username, &device_id, &ts)?;
@@ -401,12 +409,64 @@ impl Inner {
             "POST",
             "/v1/sessions",
             None,
-            Some(&json!({"username": username, "password": s(p, "password")?, "device_id": device_id, "timestamp": ts, "signature": b64(&sig)})),
+            Some(&json!({"username": username, "password": pw.auth, "device_id": device_id, "timestamp": ts, "signature": b64(&sig)})),
         )?;
         {
             let db = self.db();
             kv_set(&db.conn, "server", server.trim_end_matches('/').as_bytes())?;
+            kv_set(&db.conn, "backup_key", &pw.backup[..])?;
             self.store_tokens(&db.conn, &out)?;
+        }
+        self.after_login();
+        Ok(Value::Null)
+    }
+
+    fn login_new_device(&self, server: &str, username: &str, pw: &backup::PasswordKeys, p: &Value) -> Result<Value> {
+        let api = Api::new(server);
+        let mut start = json!({"username": username, "password": pw.auth});
+        if let Some(code) = p["code"].as_str().map(str::trim).filter(|c| !c.is_empty()) {
+            start["code"] = code.into();
+        }
+        let st = api.call("POST", "/v1/devices/new/start", None, Some(&start))?;
+        let account_key = unb64(s(&st, "account_identity_key")?)?;
+        let account = IdentityKeyPair::try_from(backup::open_keys(&pw.backup, &unb64(s(&st, "key_backup")?)?)?.as_slice())?;
+        if account.identity_key().serialize()[..] != account_key[..] {
+            return Err(Error::Crypto("Копия ключей не подходит к аккаунту".into()));
+        }
+        let blob = unb64(st["roster"]["blob"].as_str().unwrap_or_default())?;
+        let sig = unb64(st["roster"]["signature"].as_str().unwrap_or_default())?;
+        let mut r = keys::verify_roster(&account_key, &blob, &sig)?;
+        if r.devices.len() >= 3 {
+            return Err(Error::Invalid("У аккаунта уже 3 устройства. Отзовите одно из них".into()));
+        }
+        let device = keys::new_device()?;
+        r.devices.push(device.roster_entry());
+        r.prev_hash = keys::sha256(&blob);
+        r.revision += 1;
+        let (nb, ns) = r.sign(&account)?;
+        let out = api.call(
+            "POST",
+            "/v1/devices/new/finish",
+            None,
+            Some(&json!({
+                "start_token": s(&st, "start_token")?,
+                "device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?,
+                "roster": {"revision": r.revision.to_string(), "blob": b64(&nb), "signature": b64(&ns)},
+            })),
+        )?;
+        {
+            let mut db = self.db();
+            let tx = db.conn.transaction()?;
+            self.wipe_account(&tx)?;
+            device.persist(&tx)?;
+            self.store_account(&tx, server, &out, username, true)?;
+            kv_set(&tx, "account_identity", &account.serialize())?;
+            kv_set(&tx, "backup_key", &pw.backup[..])?;
+            self.store_own_roster(&tx, &r.revision.to_string(), &nb, &ns, &account_key)?;
+            tx.commit()?;
+        }
+        if let Err(e) = self.restore_history(&pw.backup) {
+            self.emit(json!({"type": "warning", "message": format!("Переписку не удалось перенести: {}", e.message())}));
         }
         self.after_login();
         Ok(Value::Null)
@@ -429,6 +489,7 @@ impl Inner {
         let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
         let old_secret = keys::recovery_decode(s(p, "recovery_code")?)?;
+        let pw = backup::derive(&username, s(p, "new_password")?)?;
         let device = keys::new_device()?;
         let account = IdentityKeyPair::generate(&mut rand::rng());
         let secret = keys::random_bytes::<32>();
@@ -447,7 +508,8 @@ impl Inner {
         let body = json!({
             "username": username,
             "recovery_secret": b64(&old_secret),
-            "new_password": s(p, "new_password")?,
+            "new_password": pw.auth,
+            "key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?),
             "recovery_hash": b64(&keys::sha256(&secret)),
             "account_identity_key": b64(&account.identity_key().serialize()),
             "device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?,
@@ -460,6 +522,7 @@ impl Inner {
         device.persist(&tx)?;
         self.store_account(&tx, &server, &out, &username, true)?;
         kv_set(&tx, "account_identity", &account.serialize())?;
+        kv_set(&tx, "backup_key", &pw.backup[..])?;
         self.store_own_roster(&tx, &rev.to_string(), &blob, &sig, &account.identity_key().serialize())?;
         tx.commit()?;
         drop(db);
@@ -467,110 +530,132 @@ impl Inner {
         Ok(json!({"recovery_code": keys::recovery_encode(&secret)}))
     }
 
-    // ---- device linking ----
+    // ---- QR sign-in on a computer ----
 
-    /// Starts linking this installation as a secondary device. Returns QR text that
-    /// the primary device scans; it carries the new device's public keys.
-    fn link_start(&self, p: &Value) -> Result<Value> {
+    /// Prepares this installation as a new device and returns the QR code to show.
+    /// The QR carries the device keys and a one-time transfer secret that the server
+    /// never sees: the phone seals the account keys with it.
+    fn qr_login_start(&self, p: &Value) -> Result<Value> {
         let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
-        let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
         let device = keys::new_device()?;
-        let body = json!({
-            "username": username,
-            "password": s(p, "password")?,
-            "device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?,
-        });
-        let out = Api::new(&server).call("POST", "/v1/devices/link", None, Some(&body))?;
-        let link_id = out["link_id"].as_str().unwrap_or_default().to_string();
+        let transfer = keys::random_bytes::<32>();
+        let out = Api::new(&server).call(
+            "POST",
+            "/v1/devices/qr",
+            None,
+            Some(&json!({"device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?})),
+        )?;
+        let link_id = s(&out, "link_id")?.to_string();
         let mut db = self.db();
         let tx = db.conn.transaction()?;
         self.wipe_account(&tx)?;
         device.persist(&tx)?;
         kv_set(&tx, "server", server.trim_end_matches('/').as_bytes())?;
-        kv_set(&tx, "username", username.as_bytes())?;
-        kv_set(&tx, "pending_user_id", out["user_id"].as_str().unwrap_or_default().as_bytes())?;
         kv_set(&tx, "link_id", link_id.as_bytes())?;
-        kv_set(&tx, "link_secret", out["link_secret"].as_str().unwrap_or_default().as_bytes())?;
+        kv_set(&tx, "link_secret", s(&out, "link_secret")?.as_bytes())?;
+        kv_set(&tx, "link_transfer", &transfer)?;
         tx.commit()?;
         let e = device.roster_entry();
-        let qr = format!("neochat-link:1:{}:{}:{}", link_id, b64(&e.identity_key), b64(&e.auth_key));
-        Ok(json!({"qr_rows": qr_rows(&qr)?, "qr": qr, "expires_in": out["expires_in"]}))
+        let qr = format!("neochat-login:1:{}:{}:{}:{}", link_id, b64(&e.identity_key), b64(&e.auth_key), b64(&transfer));
+        Ok(json!({"qr": qr, "qr_rows": qr_rows(&qr)?, "expires_in": out["expires_in"]}))
     }
 
-    fn link_poll(&self) -> Result<Value> {
-        let (server, link_id, secret, user_id) = {
+    fn qr_login_poll(&self) -> Result<Value> {
+        let (server, link_id, secret, transfer) = {
             let db = self.db();
             (
                 kv_get_str(&db.conn, "server")?.ok_or(Error::NotLoggedIn)?,
-                kv_get_str(&db.conn, "link_id")?.ok_or_else(|| Error::Invalid("Привязка не начата".into()))?,
+                kv_get_str(&db.conn, "link_id")?.ok_or_else(|| Error::Invalid("Вход по QR-коду не начат".into()))?,
                 kv_get_str(&db.conn, "link_secret")?.unwrap_or_default(),
-                kv_get_str(&db.conn, "pending_user_id")?.unwrap_or_default(),
+                kv_get(&db.conn, "link_transfer")?.unwrap_or_default(),
             )
         };
-        let api = Api::new(&server);
-        let out = api.get_with_header(&format!("/v1/devices/link/{link_id}"), ("X-Link-Secret", &secret))?;
+        let out = Api::new(&server).get_with_header(&format!("/v1/devices/qr/{link_id}"), ("X-Link-Secret", &secret))?;
         let status = out["status"].as_str().unwrap_or("pending").to_string();
         if status != "approved" {
             return Ok(json!({"status": status}));
         }
-        let session = &out["session"];
+        let transfer: [u8; 32] = transfer.try_into().map_err(|_| Error::Crypto("Повреждён секрет входа".into()))?;
+        let sealed: Value = serde_json::from_slice(&backup::open(&transfer, &unb64(s(&out, "sealed")?)?)?)?;
+        let account = IdentityKeyPair::try_from(unb64(s(&sealed, "account_identity")?)?.as_slice())?;
+        let backup_key: [u8; 32] = unb64(s(&sealed, "backup_key")?)?.try_into().map_err(|_| Error::Crypto("Повреждён ключ копии".into()))?;
+        let user_id = s(&out, "user_id")?.to_string();
         {
             let mut db = self.db();
             let tx = db.conn.transaction()?;
             kv_set(&tx, "user_id", user_id.as_bytes())?;
-            kv_set(&tx, "primary", b"0")?;
-            self.store_tokens(&tx, session)?;
-            kv_del(&tx, "link_id")?;
-            kv_del(&tx, "link_secret")?;
-            kv_del(&tx, "pending_user_id")?;
+            kv_set(&tx, "username", s(&out, "username")?.as_bytes())?;
+            kv_set(&tx, "primary", b"1")?;
+            kv_set(&tx, "account_identity", &account.serialize())?;
+            kv_set(&tx, "backup_key", &backup_key)?;
+            self.store_tokens(&tx, &out["session"])?;
+            for k in ["link_id", "link_secret", "link_transfer"] {
+                kv_del(&tx, k)?;
+            }
             tx.commit()?;
         }
-        // Pin the account identity from the roster that lists this device's keys.
+        // The roster on the server must be signed by the account we just received and list this device.
         let me = self.authed("GET", &format!("/v1/users/{user_id}"), None)?;
-        let account_key = unb64(me["account_identity_key"].as_str().unwrap_or_default())?;
+        let account_key = account.identity_key().serialize().to_vec();
+        if unb64(s(&me, "account_identity_key")?)? != account_key {
+            return Err(Error::Crypto("Ключ аккаунта не совпадает. Вход отменён".into()));
+        }
         let blob = unb64(me["roster"]["blob"].as_str().unwrap_or_default())?;
         let sig = unb64(me["roster"]["signature"].as_str().unwrap_or_default())?;
         let roster = keys::verify_roster(&account_key, &blob, &sig)?;
-        let db = self.db();
-        let my_device = kv_get_str(&db.conn, "device_id")?.unwrap_or_default();
-        let my_identity = keys::local_identity(&db.conn)?;
-        if !roster.devices.iter().any(|d| d.device_id == my_device && d.identity_key[..] == my_identity.identity_key().serialize()[..]) {
-            return Err(Error::Crypto("Список устройств не содержит это устройство".into()));
+        {
+            let db = self.db();
+            let my_device = kv_get_str(&db.conn, "device_id")?.unwrap_or_default();
+            if !roster.devices.iter().any(|d| d.device_id == my_device) {
+                return Err(Error::Crypto("Список устройств не содержит это устройство".into()));
+            }
+            self.store_own_roster(&db.conn, me["roster"]["revision"].as_str().unwrap_or("1"), &blob, &sig, &account_key)?;
         }
-        self.store_own_roster(&db.conn, me["roster"]["revision"].as_str().unwrap_or("1"), &blob, &sig, &account_key)?;
-        drop(db);
+        if let Err(e) = self.restore_history(&backup_key) {
+            self.emit(json!({"type": "warning", "message": format!("Переписку не удалось перенести: {}", e.message())}));
+        }
         self.after_login();
         Ok(json!({"status": "approved"}))
     }
 
-    /// Primary device: approve the device shown in the scanned QR code. The keys
-    /// from the QR must match what the server holds for the pending link.
-    fn link_approve(&self, p: &Value) -> Result<Value> {
+    /// Phone side: lets the computer from the scanned QR code into this account.
+    fn qr_login_approve(&self, p: &Value) -> Result<Value> {
         let qr = s(p, "qr")?.trim();
         let parts: Vec<&str> = qr.split(':').collect();
-        if parts.len() != 5 || parts[0] != "neochat-link" || parts[1] != "1" {
-            return Err(Error::Invalid("Это не QR-код привязки NeoChat".into()));
+        if parts.len() != 6 || parts[0] != "neochat-login" || parts[1] != "1" {
+            return Err(Error::Invalid("Это не QR-код входа NeoChat".into()));
         }
         let (link_id, qr_identity, qr_auth) = (parts[2], unb64(parts[3])?, unb64(parts[4])?);
-        let account = keys::account_keypair(&self.db().conn)?.ok_or_else(|| Error::Invalid("Подтверждает только основное устройство".into()))?;
-        let pending = self.authed("GET", &format!("/v1/devices/links/{link_id}"), None)?;
+        let transfer: [u8; 32] = unb64(parts[5])?.try_into().map_err(|_| Error::Invalid("Это не QR-код входа NeoChat".into()))?;
+        let (account, backup_key) = {
+            let db = self.db();
+            (keys::account_keypair(&db.conn)?, kv_get(&db.conn, "backup_key")?)
+        };
+        let account = account.ok_or_else(|| Error::Invalid("На этом устройстве нет ключей аккаунта".into()))?;
+        let backup_key: [u8; 32] = backup_key
+            .and_then(|k| k.try_into().ok())
+            .ok_or_else(|| Error::Invalid("Выйдите и войдите заново по паролю, затем повторите".into()))?;
+        let pending = self.authed("GET", &format!("/v1/devices/qr/{link_id}/device"), None)?;
         let identity = unb64(pending["identity_key"].as_str().unwrap_or_default())?;
         let auth = unb64(pending["auth_key"].as_str().unwrap_or_default())?;
         if identity != qr_identity || auth != qr_auth {
-            return Err(Error::Crypto("Ключи устройства не совпадают с QR-кодом. Привязка отменена".into()));
+            return Err(Error::Crypto("Ключи устройства не совпадают с QR-кодом. Вход отменён".into()));
         }
         let new_dev = keys::RosterDevice { device_id: pending["device_id"].as_str().unwrap_or_default().to_string(), identity_key: identity, auth_key: auth };
         let (blob, sig, rev) = self.next_own_roster(&account, |devs| {
             if devs.len() >= 3 {
-                return Err(Error::Invalid("У аккаунта уже 3 устройства".into()));
+                return Err(Error::Invalid("У аккаунта уже 3 устройства. Отзовите одно из них".into()));
             }
             devs.push(new_dev.clone());
             Ok(())
         })?;
+        let sealed = backup::seal(&transfer, json!({"account_identity": b64(&account.serialize()), "backup_key": b64(&backup_key)}).to_string().as_bytes())?;
+        // The new device should find the latest history right away.
+        let _ = self.upload_history(&backup_key);
         self.authed(
             "POST",
-            &format!("/v1/devices/links/{link_id}/approve"),
-            Some(&json!({"roster": {"revision": rev.to_string(), "blob": b64(&blob), "signature": b64(&sig)}})),
+            &format!("/v1/devices/qr/{link_id}/approve"),
+            Some(&json!({"roster": {"revision": rev.to_string(), "blob": b64(&blob), "signature": b64(&sig)}, "sealed": b64(&sealed)})),
         )?;
         let db = self.db();
         self.store_own_roster(&db.conn, &rev.to_string(), &blob, &sig, &account.identity_key().serialize())?;

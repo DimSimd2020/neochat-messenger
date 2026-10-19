@@ -678,7 +678,7 @@ class QrView(ctx: Context) : View(ctx) {
 
     init {
         layoutParams = ViewGroup.LayoutParams(dp(240), dp(240))
-        contentDescription = "QR-код привязки"
+        contentDescription = "QR-код"
     }
 
     fun setRows(r: List<String>) {

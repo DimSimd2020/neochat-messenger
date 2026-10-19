@@ -208,25 +208,14 @@ object Dialogs {
         val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         s.add(rows, 0)
         s.muted("Отзыв устройства прекращает доставку новых сообщений на него. Уже скачанные на нём копии удалённо не стираются.", 8)
-        val linkBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-        linkBox.addView(ctx.label("Привязать новое устройство", 15.5f, 600), lp())
-        linkBox.addView(
-            ctx.label("Войдите в аккаунт на новом устройстве и отсканируйте QR-код с его экрана. Если камеры нет, вставьте скопированный код привязки.", 13.5f, 400, Theme.Role.MUTED),
-            lp().apply { topMargin = ctx.dp(6) }
-        )
+        s.heading("Вход на компьютере", 18)
+        s.muted("Откройте NeoChat на компьютере и отсканируйте QR-код с экрана входа.", 4)
         val scan = PillButton(ctx, "Сканировать QR-код")
-        linkBox.addView(scan, lp().apply { topMargin = ctx.dp(12) })
-        val code = FloatingField(ctx, "Код привязки")
-        linkBox.addView(code, lp().apply { topMargin = ctx.dp(10) })
-        val approve = PillButton(ctx, "Подтвердить привязку", primary = false)
-        linkBox.addView(approve, lp().apply { topMargin = ctx.dp(12) })
-        s.add(linkBox, 18)
+        s.add(scan, 12)
 
         lateinit var reload: () -> Unit
         reload = {
-            CoreClient.call("status") { sv, _ ->
-                val primary = (sv as? JSONObject)?.optBoolean("primary") == true
-                linkBox.visibility = if (primary) View.VISIBLE else View.GONE
+            run {
                 CoreClient.call("devices") { v, e ->
                     if (e != null) return@call act.toast(e.message)
                     rows.removeAllViews()
@@ -236,13 +225,12 @@ object Dialogs {
                         row.avatar.set(platformName(d.str("platform")), d.str("id"))
                         row.title.text = name
                         var sub = platformName(d.str("platform"))
-                        if (d.optBoolean("primary")) sub += " · основное"
                         if (d.optBoolean("current")) sub += " · это устройство"
                         else seenText(d.str("last_seen_at")).takeIf { it.isNotEmpty() }?.let { sub += " · активность $it" }
                         row.subtitle.text = sub
                         row.subtitle.maxLines = 2
                         row.contentDescription = "$name, $sub"
-                        val canRevoke = primary && !d.optBoolean("current")
+                        val canRevoke = !d.optBoolean("current")
                         if (canRevoke) row.setOnClickListener {
                             PopupMenu(act, row).add("Отозвать «$name»", danger = true) {
                                 CoreClient.call("revoke_device", JSONObject().put("device_id", d.str("id"))) { _, re ->
@@ -257,24 +245,19 @@ object Dialogs {
                 }
             }
         }
-        fun link(qr: String) {
-            if (!qr.startsWith("neochat-link:")) return act.toast("Это не код привязки NeoChat")
-            approve.isEnabled = false
+        fun approve(qr: String) {
             scan.isEnabled = false
-            CoreClient.call("link_approve", JSONObject().put("qr", qr)) { _, e ->
-                approve.isEnabled = true
+            CoreClient.call("qr_login_approve", JSONObject().put("qr", qr)) { _, e ->
                 scan.isEnabled = true
                 if (e != null) return@call act.toast(e.message)
-                code.setText("")
-                act.toast("Устройство привязано")
+                act.toast("Вход на компьютере выполнен")
                 reload()
             }
         }
-        approve.setOnClickListener { link(code.text.trim()) }
         scan.setOnClickListener {
             act.withPermission(android.Manifest.permission.CAMERA) { granted ->
-                if (!granted) return@withPermission act.toast("Нет доступа к камере. Разрешите его в настройках или вставьте код вручную")
-                QrScanner(act, "neochat-link:") { link(it) }.show()
+                if (!granted) return@withPermission act.toast("Нет доступа к камере. Разрешите его в настройках")
+                QrScanner(act, "neochat-login:") { approve(it) }.show()
             }
         }
         reload()
@@ -302,6 +285,18 @@ object Dialogs {
         s.add(receipts, 10)
         s.muted("Если выключить, собеседники не увидят, что вы прочитали сообщение.", 2)
         CoreClient.call("get_settings") { v, _ -> receipts.setChecked((v as? JSONObject)?.optBoolean("read_receipts", true) != false, false) }
+        val twoFactor = ToggleRow(ctx, "Подтверждение входа")
+        s.add(twoFactor, 10)
+        s.muted("При входе на новом устройстве понадобится код. Он придёт в чат «NeoChat уведомления» на ваших устройствах.", 2)
+        CoreClient.call("account_settings") { v, _ -> twoFactor.setChecked((v as? JSONObject)?.optBoolean("two_factor") == true, false) }
+        twoFactor.onToggle = { on ->
+            CoreClient.call("set_two_factor", JSONObject().put("enabled", on)) { _, e ->
+                if (e != null) {
+                    act.toast(e.message)
+                    twoFactor.setChecked(!on, true)
+                }
+            }
+        }
         receipts.onToggle = { on ->
             CoreClient.call("set_settings", JSONObject().put("read_receipts", on)) { _, e ->
                 if (e != null) {

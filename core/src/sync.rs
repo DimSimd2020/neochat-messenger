@@ -19,6 +19,7 @@ use crate::keys::{self, PREKEY_BATCH, unb64};
 use crate::outbox::{FileMeta, Payload, address, preview};
 use crate::store::{SignalStore, kv_get_str, kv_set, now_ms};
 
+pub const SYSTEM_CHAT: &str = "neochat-system";
 const SIGNED_PREKEY_ROTATE_MS: i64 = 7 * 24 * 3600 * 1000;
 const SIGNED_PREKEY_KEEP_MS: i64 = 30 * 24 * 3600 * 1000;
 
@@ -43,6 +44,7 @@ impl Inner {
                     ws = std::thread::Builder::new().name("neocore-ws".into()).spawn(move || me.ws_loop()).ok();
                 }
                 let _ = self.run_cycle();
+                let _ = self.maybe_upload_history();
             }
             let fg = self.foreground.load(Ordering::SeqCst);
             self.wait(if fg { Duration::from_secs(30) } else { Duration::from_secs(300) });
@@ -150,8 +152,42 @@ impl Inner {
                 self.emit(json!({"type": "conversations_changed"}));
                 Ok(())
             }
+            "notice" => {
+                self.add_notice(event_id, ev["payload"]["text"].as_str().unwrap_or_default())?;
+                self.mark_processed(event_id)?;
+                Ok(())
+            }
             _ => self.mark_processed(event_id),
         }
+    }
+
+    /// Server notices (sign-in codes, new devices) land in the read-only system chat.
+    fn add_notice(&self, id: &str, text: &str) -> Result<()> {
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        let now = now_ms();
+        let mut db = self.db();
+        let tx = db.conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO conversations(id, kind, title, members) VALUES (?1, 'system', 'NeoChat уведомления', '[]')",
+            [SYSTEM_CHAT],
+        )?;
+        let n = tx.execute(
+            "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, outgoing, kind, body, status, sent_at) VALUES (?1, ?2, 'system', 0, 'text', ?3, 'received', ?4)",
+            params![id, SYSTEM_CHAT, text.chars().take(4096).collect::<String>(), now],
+        )?;
+        if n > 0 {
+            tx.execute(
+                "UPDATE conversations SET last_activity=?2, last_preview=?3, unread=unread+1 WHERE id=?1",
+                params![SYSTEM_CHAT, now, preview(text)],
+            )?;
+        }
+        tx.commit()?;
+        drop(db);
+        self.emit(json!({"type": "messages_changed", "conversation_id": SYSTEM_CHAT}));
+        self.emit(json!({"type": "conversations_changed"}));
+        Ok(())
     }
 
     fn refresh_own_roster(&self) -> Result<()> {

@@ -302,10 +302,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.conv = c
             let members = c.arr("members")
             self.navigationItem.titleView = self.titleView(c.str("title"), self.group ? "\(c.int("member_count")) участн." : members.first { !$0.bool("me") }.map { "@" + $0.str("username") } ?? "")
-            let gone = c.bool("left") || c.bool("archived")
+            let system = c.str("kind") == "system"
+            if system { self.navigationItem.titleView = self.titleView(c.str("title"), "Системные сообщения") }
+            let gone = c.bool("left") || c.bool("archived") || system
             self.composer.isHidden = gone
             self.goneLabel.isHidden = !gone
-            self.goneLabel.text = c.bool("archived") ? "Группа в архиве. Новые сообщения недоступны" : "Вы вышли из этой группы"
+            self.goneLabel.text = system ? "Сюда приходят коды входа и сообщения о новых устройствах"
+                : c.bool("archived") ? "Группа в архиве. Новые сообщения недоступны" : "Вы вышли из этой группы"
             let keyChanged = !(c["key_changed_users"] as? [Any] ?? []).isEmpty
             self.blocked = keyChanged || !(c["can_send"] as? Bool ?? true)
             self.updateSend(animated: false)

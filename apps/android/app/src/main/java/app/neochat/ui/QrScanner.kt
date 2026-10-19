@@ -44,7 +44,7 @@ class QrScanner(private val act: MainActivity, private val prefix: String, priva
     private val ctx: Context = act
     private val root = FrameLayout(ctx)
     private val preview = TextureView(ctx)
-    private val hint = ctx.label("Наведите камеру на QR-код на экране нового устройства", 15f, 500)
+    private val hint = ctx.label("Наведите камеру на QR-код на экране входа компьютера", 15f, 500)
     private val worker = HandlerThread("qr").apply { start() }
     private val bg = Handler(worker.looper)
     private val main = Handler(Looper.getMainLooper())
@@ -187,7 +187,7 @@ class QrScanner(private val act: MainActivity, private val prefix: String, priva
                     onResult(text)
                 }
             } else if (text != null) {
-                main.post { hint.text = "Это не QR-код привязки NeoChat" }
+                main.post { hint.text = "Это не QR-код входа NeoChat" }
             }
         } catch (_: Exception) {
         } finally {

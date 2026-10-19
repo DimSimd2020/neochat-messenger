@@ -222,51 +222,37 @@ final class DevicesViewController: SheetViewController {
     private func platform(_ p: String) -> String { ["windows": "Windows", "android": "Android", "ios": "iOS"][p] ?? "Устройство" }
 
     private func reload() {
-        Core.shared.call("status") { [weak self] sr in
-            let primary = ((try? sr.get()) as? JSON)?.bool("primary") ?? false
-            Core.shared.call("devices") { r in
+        do {
+            Core.shared.call("devices") { [weak self] r in
                 guard let self else { return }
                 guard case .success(let v) = r else { if case .failure(let e) = r { self.toast(e.message) }; return }
                 self.clear()
                 for d in (v as? JSON)?.arr("devices") ?? [] {
                     var sub = self.platform(d.str("platform"))
-                    if d.bool("primary") { sub += " · основное" }
                     if d.bool("current") { sub += " · это устройство" }
-                    let canRevoke = primary && !d.bool("current")
+                    let canRevoke = !d.bool("current")
                     let row = self.personRow(d.str("name"), sub, seed: d.str("id"), action: canRevoke ? { [weak self] in self?.confirmRevoke(d) } : nil)
                     self.stack.addArrangedSubview(row)
                 }
                 self.muted("Отзыв устройства прекращает доставку новых сообщений на него. Уже скачанные на нём копии удалённо не стираются.")
-                if primary {
-                    self.heading("Привязать новое устройство")
-                    self.muted("Войдите в аккаунт на новом устройстве и отсканируйте QR-код с его экрана. Если камеры нет, вставьте скопированный код привязки.")
-                    let scan = PillButton("Сканировать QR-код")
-                    let code = Field("Код привязки")
-                    let approve = PillButton("Подтвердить привязку", primary: false)
-                    self.stack.addArrangedSubview(scan)
-                    self.stack.addArrangedSubview(code)
-                    self.stack.addArrangedSubview(approve)
-                    let link: (String) -> Void = { [weak self] qr in
-                        guard qr.hasPrefix("neochat-link:") else { self?.toast("Это не код привязки NeoChat"); return }
-                        approve.isEnabled = false
-                        scan.isEnabled = false
-                        Core.shared.call("link_approve", ["qr": qr]) { r in
-                            approve.isEnabled = true
-                            scan.isEnabled = true
-                            switch r {
-                            case .failure(let e): self?.toast(e.message)
-                            case .success: self?.toast("Устройство привязано"); self?.reload()
-                            }
+                self.heading("Вход на компьютере")
+                self.muted("Откройте NeoChat на компьютере и отсканируйте QR-код с экрана входа.")
+                let scan = PillButton("Сканировать QR-код")
+                self.stack.addArrangedSubview(scan)
+                let approve: (String) -> Void = { [weak self] qr in
+                    scan.isEnabled = false
+                    Core.shared.call("qr_login_approve", ["qr": qr]) { r in
+                        scan.isEnabled = true
+                        switch r {
+                        case .failure(let e): self?.toast(e.message)
+                        case .success: self?.toast("Вход на компьютере выполнен"); self?.reload()
                         }
                     }
-                    scan.addAction(UIAction { [weak self] _ in
-                        guard let self else { return }
-                        QrScannerViewController.present(from: self, prefix: "neochat-link:", onResult: link)
-                    }, for: .touchUpInside)
-                    approve.addAction(UIAction { _ in
-                        link((code.text ?? "").trimmingCharacters(in: .whitespaces))
-                    }, for: .touchUpInside)
                 }
+                scan.addAction(UIAction { [weak self] _ in
+                    guard let self else { return }
+                    QrScannerViewController.present(from: self, prefix: "neochat-login:", onResult: approve)
+                }, for: .touchUpInside)
             }
         }
     }
@@ -312,6 +298,18 @@ final class SettingsViewController: SheetViewController {
         muted("Если выключить, собеседники не увидят, что вы прочитали сообщение.")
         Core.shared.call("get_settings") { r in
             if case .success(let v) = r { receiptsSwitch?.isOn = (v as? JSON)?["read_receipts"] as? Bool ?? true }
+        }
+        var twoFactorSwitch: UISwitch?
+        let twoFactor = toggleRow("Подтверждение входа", on: false) { on in
+            Core.shared.call("set_two_factor", ["enabled": on]) { [weak self] r in
+                if case .failure(let e) = r { self?.toast(e.message); twoFactorSwitch?.setOn(!on, animated: true) }
+            }
+        }
+        twoFactorSwitch = twoFactor.arrangedSubviews.last as? UISwitch
+        stack.addArrangedSubview(twoFactor)
+        muted("При входе на новом устройстве понадобится код. Он придёт в чат «NeoChat уведомления» на ваших устройствах.")
+        Core.shared.call("account_settings") { r in
+            if case .success(let v) = r { twoFactorSwitch?.isOn = (v as? JSON)?["two_factor"] as? Bool ?? false }
         }
         let logout = PillButton("Выйти из аккаунта", primary: false)
         logout.setTitleColor(Theme.warning, for: .normal)

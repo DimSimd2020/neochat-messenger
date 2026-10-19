@@ -50,9 +50,33 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     auto *card = new CardFrame;
     card->setMaximumWidth(460);
     card->setMinimumWidth(320);
+    // Sign-in by QR: a signed-in phone scans it and lets this computer in.
+    m_qrCard = new CardFrame;
+    m_qrCard->setFixedWidth(300);
+    auto *row = new QHBoxLayout;
+    row->setSpacing(16);
+    row->addStretch();
+    row->addWidget(card, 0, Qt::AlignVCenter);
+    row->addWidget(m_qrCard, 0, Qt::AlignVCenter);
+    row->addStretch();
     outer->addStretch();
-    outer->addWidget(card, 0, Qt::AlignHCenter);
+    outer->addLayout(row);
     outer->addStretch();
+
+    auto *ql = new QVBoxLayout(m_qrCard);
+    ql->setContentsMargins(24, 26, 24, 26);
+    ql->setSpacing(12);
+    auto *qrTitle = new ui::Label(QStringLiteral("Вход по QR-коду"), 17, QFont::DemiBold);
+    qrTitle->setAlignment(Qt::AlignHCenter);
+    ql->addWidget(qrTitle);
+    m_qr = new ui::QrView;
+    m_qr->setAccessibleName(QStringLiteral("QR-код для входа"));
+    ql->addWidget(m_qr, 0, Qt::AlignHCenter);
+    m_qrState = new ui::Label(QStringLiteral("Откройте NeoChat на телефоне: Устройства → «Сканировать QR-код»."), 13.5, 400, ui::Label::Muted);
+    m_qrState->setWordWrap(true);
+    m_qrState->setAlignment(Qt::AlignHCenter);
+    ql->addWidget(m_qrState);
+    m_qrCard->hide();
 
     auto *lay = new QVBoxLayout(card);
     lay->setContentsMargins(28, 26, 28, 26);
@@ -97,7 +121,9 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_password = new ui::TextField(QStringLiteral("Пароль"));
     m_password->setPassword(true);
     m_code = new ui::TextField(QStringLiteral("Код восстановления"));
-    for (auto *f : {m_username, m_password, m_code}) {
+    m_loginCode = new ui::TextField(QStringLiteral("Код из чата «NeoChat уведомления»"));
+    m_loginCode->hide();
+    for (auto *f : {m_username, m_password, m_code, m_loginCode}) {
         fl->addWidget(f);
         connect(f->edit(), &QLineEdit::returnPressed, this, &Onboarding::submit);
     }
@@ -124,7 +150,7 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     rl->setSpacing(12);
     rl->addWidget(new ui::Label(QStringLiteral("Сохраните код восстановления"), 17, QFont::DemiBold));
     auto *recHint = new ui::Label(QStringLiteral("Код вернёт доступ к аккаунту, если все устройства потеряны. "
-                                                 "История сообщений этим кодом не восстанавливается: она хранится только на ваших устройствах. "
+                                                 "Переписка этим кодом не восстанавливается: её копия зашифрована паролем, а пароль меняется. "
                                                  "Запишите код и храните отдельно от компьютера."),
                                   13.5, 400, ui::Label::Muted);
     recHint->setWordWrap(true);
@@ -155,36 +181,9 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     rl->addWidget(m_continue);
     m_pages->addWidget(rec);
 
-    // ---- link page ----
-    auto *link = new QWidget;
-    auto *ll = new QVBoxLayout(link);
-    ll->setContentsMargins(0, 4, 0, 0);
-    ll->setSpacing(12);
-    ll->addWidget(new ui::Label(QStringLiteral("Подтвердите на основном устройстве"), 17, QFont::DemiBold));
-    auto *linkHint = new ui::Label(QStringLiteral("Это новый компьютер для вашего аккаунта. Откройте NeoChat на основном устройстве: Устройства → Привязать новое. "
-                                                  "Отсканируйте QR-код или вставьте скопированный текст кода."),
-                                   13.5, 400, ui::Label::Muted);
-    linkHint->setWordWrap(true);
-    ll->addWidget(linkHint);
-    m_qr = new ui::QrView;
-    ll->addWidget(m_qr, 0, Qt::AlignHCenter);
-    auto *copyLink = new ui::Button(QStringLiteral("Скопировать код привязки"), ui::Button::Secondary);
-    connect(copyLink, &QAbstractButton::clicked, this, [this] { QApplication::clipboard()->setText(m_linkText); });
-    ll->addWidget(copyLink);
-    m_linkState = new ui::Label(QStringLiteral("Ожидаем подтверждения…"), 13.5, 400, ui::Label::Muted);
-    m_linkState->setWordWrap(true);
-    ll->addWidget(m_linkState);
-    auto *cancel = new ui::Button(QStringLiteral("Отменить"), ui::Button::Flat);
-    connect(cancel, &QAbstractButton::clicked, this, [this] {
-        m_poll->stop();
-        m_pages->setCurrentIndex(0);
-    });
-    ll->addWidget(cancel);
-    m_pages->addWidget(link);
-
     m_poll = new QTimer(this);
     m_poll->setInterval(2000);
-    connect(m_poll, &QTimer::timeout, this, &Onboarding::pollLink);
+    connect(m_poll, &QTimer::timeout, this, &Onboarding::pollQr);
     for (int i = 1; i < m_pages->count(); ++i)
         m_pages->widget(i)->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Ignored);
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
@@ -202,7 +201,46 @@ void Onboarding::start(const QJsonObject &status)
     m_hasKeys = status.value("has_device_keys").toBool();
     if (!status.value("username").toString().isEmpty())
         m_username->setText(status.value("username").toString());
+    m_loginCode->hide();
+    m_loginCode->edit()->clear();
     setMode(Login);
+}
+
+// A computer with its own keys signs in by password; only a new one offers the QR code.
+void Onboarding::updateQr()
+{
+    const bool want = m_mode == Login && !m_hasKeys && !m_busy && m_pages->currentIndex() == 0;
+    m_qrCard->setVisible(want);
+    if (!want) {
+        m_poll->stop();
+        m_qrActive = false;
+        return;
+    }
+    if (m_qrActive)
+        return;
+    m_qrActive = true;
+    QJsonObject p{{"device_name", deviceName()}, {"platform", "windows"}};
+    if (!m_serverUrl.isEmpty())
+        p["server"] = m_serverUrl;
+    Core::instance()->call("qr_login_start", p, this, [this](const QJsonValue &v, const CoreError &e) {
+        if (!m_qrActive)
+            return;
+        if (!e.ok()) {
+            m_qrActive = false;
+            m_qr->setRows({});
+            m_qrState->setText(e.message);
+            m_qrState->setRole(ui::Label::Warning);
+            QTimer::singleShot(10000, this, &Onboarding::updateQr);
+            return;
+        }
+        QStringList rows;
+        for (const auto &r : v.toObject().value("qr_rows").toArray())
+            rows << r.toString();
+        m_qr->setRows(rows);
+        m_qrState->setText(QStringLiteral("Откройте NeoChat на телефоне: Устройства → «Сканировать QR-код»."));
+        m_qrState->setRole(ui::Label::Muted);
+        m_poll->start();
+    });
 }
 
 void Onboarding::setMode(int mode)
@@ -224,7 +262,7 @@ void Onboarding::setMode(int mode)
         break;
     case Recover:
         m_heading->setText(QStringLiteral("Восстановление доступа"));
-        m_hint->setText(QStringLiteral("Остальные устройства будут отключены. Переписка с них не переносится."));
+        m_hint->setText(QStringLiteral("Остальные устройства будут отключены, переписка не перенесётся."));
         m_submit->setText(QStringLiteral("Восстановить"));
         break;
     }
@@ -233,6 +271,9 @@ void Onboarding::setMode(int mode)
     m_switch->setAccessibleName(m_switch->text());
     m_recover->setVisible(mode == Login);
     m_password->setLabel(mode == Recover ? QStringLiteral("Новый пароль") : QStringLiteral("Пароль"));
+    if (mode != Login)
+        m_loginCode->hide();
+    updateQr();
 }
 
 void Onboarding::showError(const QString &text)
@@ -268,13 +309,13 @@ void Onboarding::submit()
     QJsonObject p{{"username", username}, {"device_name", deviceName()}, {"platform", "windows"}};
     if (!m_serverUrl.isEmpty())
         p["server"] = m_serverUrl;
-    // Without keys on this computer signing in means linking it to the account.
-    const bool linking = m_mode == Login && !m_hasKeys;
     QString method;
     switch (m_mode) {
     case Login:
-        method = linking ? "link_start" : "login";
+        method = "login";
         p["password"] = password;
+        if (m_loginCode->isVisible())
+            p["code"] = m_loginCode->text().trimmed();
         break;
     case Register:
         method = "register";
@@ -291,16 +332,26 @@ void Onboarding::submit()
     showError({});
     setBusy(true);
     const int mode = m_mode;
-    Core::instance()->call(method, p, this, [this, mode, linking](const QJsonValue &v, const CoreError &e) {
+    Core::instance()->call(method, p, this, [this, mode, password](const QJsonValue &v, const CoreError &e) {
+        // After success this computer has keys: no new QR code may replace them.
+        if (e.ok())
+            m_hasKeys = true;
+        if (e.code == "code_required") {
+            setBusy(false);
+            m_password->setText(password);
+            m_loginCode->show();
+            m_loginCode->edit()->setFocus();
+            return showError(e.message);
+        }
         setBusy(false);
         if (!e.ok())
             return showError(e.message);
         m_password->edit()->clear();
         m_code->edit()->clear();
+        m_loginCode->edit()->clear();
+        m_loginCode->hide();
         if (mode == Register || mode == Recover)
             showRecoveryCode(v.toObject().value("recovery_code").toString());
-        else if (linking)
-            showLinkCode(v.toObject());
         else
             emit finished();
     });
@@ -311,46 +362,37 @@ void Onboarding::showRecoveryCode(const QString &code)
     m_recoveryCode->setText(code);
     m_saved->setChecked(false);
     m_pages->setCurrentIndex(1);
+    updateQr();
     m_saved->setFocus();
 }
 
-void Onboarding::showLinkCode(const QJsonObject &res)
-{
-    m_linkText = res.value("qr").toString();
-    QStringList rows;
-    for (const auto &r : res.value("qr_rows").toArray())
-        rows << r.toString();
-    m_qr->setRows(rows);
-    const int minutes = qMax(1, res.value("expires_in").toInt() / 60);
-    m_linkState->setText(QStringLiteral("Ожидаем подтверждения… Код действует %1 мин.").arg(minutes));
-    m_linkState->setRole(ui::Label::Muted);
-    m_pages->setCurrentIndex(2);
-    m_poll->start();
-}
 
-void Onboarding::pollLink()
+void Onboarding::pollQr()
 {
-    if (m_busy)
+    if (m_busy || !m_qrActive)
         return;
-    m_busy = true;
-    Core::instance()->call("link_poll", {}, this, [this](const QJsonValue &v, const CoreError &e) {
-        m_busy = false;
+    Core::instance()->call("qr_login_poll", {}, this, [this](const QJsonValue &v, const CoreError &e) {
+        if (!m_qrActive || m_busy)
+            return;
         if (!e.ok()) {
             if (e.code == "network")
                 return;
             m_poll->stop();
-            m_linkState->setText(e.message);
-            m_linkState->setRole(ui::Label::Warning);
+            m_qrActive = false;
+            m_qrState->setText(e.message);
+            m_qrState->setRole(ui::Label::Warning);
             return;
         }
-        const QString status = v.isObject() ? v.toObject().value("status").toString() : QStringLiteral("approved");
+        const QString status = v.toObject().value("status").toString();
         if (status == "approved") {
             m_poll->stop();
+            m_qrActive = false;
             emit finished();
         } else if (status != "pending") {
+            // Expired: show a fresh code.
             m_poll->stop();
-            m_linkState->setText(QStringLiteral("Привязка отклонена или истекла. Начните заново."));
-            m_linkState->setRole(ui::Label::Warning);
+            m_qrActive = false;
+            updateQr();
         }
     });
 }

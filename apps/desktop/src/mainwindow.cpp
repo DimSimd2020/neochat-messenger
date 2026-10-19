@@ -573,8 +573,11 @@ void MainWindow::applyConversation(const QJsonObject &c)
             if (!x.toObject().value("me").toBool())
                 count = "@" + x.toObject().value("username").toString();
     }
+    const bool system = c.value("kind").toString() == "system";
+    if (system)
+        count = QStringLiteral("Коды входа и новые устройства");
     m_header->title->set(c.value("title").toString(), count, names, c.value("id").toString());
-    const bool gone = c.value("left").toBool() || c.value("archived").toBool();
+    const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
     m_composer->setVisible(!gone);
     m_composer->setBlocked(!c.value("key_changed_users").toArray().isEmpty());
     updateNotice();

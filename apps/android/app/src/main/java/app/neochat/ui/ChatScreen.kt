@@ -282,10 +282,16 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val members = conv.optJSONArray("members") ?: JSONArray()
             subtitle.text = if (conv.str("kind") == "group") memberCount(conv.optInt("member_count"))
             else members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
-            val left = conv.optBoolean("left") || conv.optBoolean("archived")
+            val system = conv.str("kind") == "system"
+            if (system) subtitle.text = "Системные сообщения"
+            val left = conv.optBoolean("left") || conv.optBoolean("archived") || system
             composer.visibility = if (left) View.GONE else View.VISIBLE
             gone.visibility = if (left) View.VISIBLE else View.GONE
-            gone.text = if (conv.optBoolean("archived")) "Группа в архиве. Новые сообщения недоступны" else "Вы вышли из этой группы"
+            gone.text = when {
+                system -> "Сюда приходят коды входа и сообщения о новых устройствах"
+                conv.optBoolean("archived") -> "Группа в архиве. Новые сообщения недоступны"
+                else -> "Вы вышли из этой группы"
+            }
             blocked = (conv.optJSONArray("key_changed_users")?.length() ?: 0) > 0 || !conv.optBoolean("can_send", true)
             updateSend(false)
             val n = conv.str("notice").takeIf { conv.opt("notice") is String }

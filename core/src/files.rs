@@ -43,6 +43,12 @@ pub fn encrypt_file(src: &Path, dst: &Path) -> Result<Encrypted> {
     }
     let key = random_bytes::<32>();
     let nonce = random_bytes::<19>();
+    encrypt_with(src, dst, key, nonce)
+}
+
+/// Same STREAM encryption with a caller-supplied key and no size limit (history backups).
+pub fn encrypt_with(src: &Path, dst: &Path, key: [u8; 32], nonce: [u8; 19]) -> Result<Encrypted> {
+    let plaintext_size = std::fs::metadata(src)?.len();
     let aead = XChaCha20Poly1305::new((&key).into());
     let mut enc = Some(EncryptorBE32::from_aead(aead, (&nonce).into()));
     let mut input = BufReader::new(File::open(src)?);

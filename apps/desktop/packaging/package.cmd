@@ -2,7 +2,7 @@
 rem Builds build\NeoChat-<version>-x64.msi from a release build (run build.cmd first).
 setlocal
 if "%QT_DIR%"=="" set QT_DIR=E:\dev\Qt\6.8.3
-set VERSION=0.1.0
+set VERSION=0.2.0
 set VS=C:\Program Files\Microsoft Visual Studio\2022\Community
 cd /d "%~dp0\.."
 set STAGE=build\stage

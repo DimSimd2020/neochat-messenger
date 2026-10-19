@@ -7,7 +7,7 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     private let onResult: (String) -> Void
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "app.neochat.qr")
-    private let hint = label("Наведите камеру на QR-код на экране нового устройства", 16, .medium, color: .white)
+    private let hint = label("Наведите камеру на QR-код на экране входа компьютера", 16, .medium, color: .white)
     private var preview: AVCaptureVideoPreviewLayer?
     private let frame = CAShapeLayer()
     private let dim = CAShapeLayer()
@@ -30,9 +30,9 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         case .authorized: show()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { ok in
-                DispatchQueue.main.async { ok ? show() : host.toast("Нет доступа к камере. Разрешите его в настройках или вставьте код вручную") }
+                DispatchQueue.main.async { ok ? show() : host.toast("Нет доступа к камере. Разрешите его в настройках") }
             }
-        default: host.toast("Нет доступа к камере. Разрешите его в настройках или вставьте код вручную")
+        default: host.toast("Нет доступа к камере. Разрешите его в настройках")
         }
     }
 
@@ -115,7 +115,7 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !done, let text = (objects.first as? AVMetadataMachineReadableCodeObject)?.stringValue else { return }
         guard text.hasPrefix(prefix) else {
-            hint.text = "Это не QR-код привязки NeoChat"
+            hint.text = "Это не QR-код входа NeoChat"
             return
         }
         done = true

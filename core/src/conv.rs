@@ -322,6 +322,8 @@ impl Inner {
             members_out.iter().find(|m| m["me"] == false).and_then(|m| m["display_name"].as_str()).unwrap_or("Диалог").to_string()
         } else if title.is_empty() {
             "Группа".to_string()
+        } else if kind == "system" {
+            "NeoChat уведомления".to_string()
         } else {
             title.clone()
         };
@@ -351,7 +353,7 @@ impl Inner {
             "last_activity": activity,
             "key_changed_users": changed,
             "peer_verified": peer_verified,
-            "can_send": changed.is_empty() && left == 0 && archived == 0,
+            "can_send": kind != "system" && changed.is_empty() && left == 0 && archived == 0,
             "notice": notice,
         }))
     }

@@ -197,18 +197,13 @@ fn linked_device_and_recovery() {
     let bname = uname("bob");
     let (bob, bob_code) = register(&e, &bname);
 
-    // Second device for Alice, approved by the primary through the QR text.
+    // Second device for Alice: the password alone restores the account keys from the server copy.
     let alice2 = Client::new();
-    let qr = alice2.call(
-        "link_start",
+    alice2.call(
+        "login",
         json!({"server": e.server, "username": aname, "password": "correct horse battery", "device_name": "phone", "platform": "android"}),
-    )["qr"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(alice2.call("link_poll", json!({}))["status"], "pending");
-    alice.call("link_approve", json!({"qr": qr}));
-    assert_eq!(alice2.call("link_poll", json!({}))["status"], "approved");
+    );
+    alice.sync();
     assert_eq!(alice.call("devices", json!({}))["devices"].as_array().unwrap().len(), 2);
 
     let b = alice.call("resolve_contact", json!({"username": bname}));
@@ -247,4 +242,37 @@ fn linked_device_and_recovery() {
     assert_eq!(bob2.texts(&cid), vec!["снова привет"]);
     // The old device is revoked.
     assert!(bob.try_call("sync_now", json!({})).is_err() || !bob.call("status", json!({}))["logged_in"].as_bool().unwrap());
+}
+
+#[test]
+fn qr_login_history_and_two_factor() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let (alice, _) = register(&e, &aname);
+    let (bob, _) = register(&e, &uname("bob"));
+    let b = alice.call("resolve_contact", json!({"username": bob.call("status", json!({}))["username"]}));
+    let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
+    alice.call("send_text", json!({"conversation_id": cid, "text": "старая переписка"}));
+    alice.sync();
+
+    // The computer shows a QR code, the phone approves it: keys and history move over.
+    let pc = Client::new();
+    let qr = pc.call("qr_login_start", json!({"server": e.server, "device_name": "pc", "platform": "windows"}))["qr"].as_str().unwrap().to_string();
+    assert_eq!(pc.call("qr_login_poll", json!({}))["status"], "pending");
+    alice.call("qr_login_approve", json!({"qr": qr}));
+    assert_eq!(pc.call("qr_login_poll", json!({}))["status"], "approved");
+    assert_eq!(pc.texts(&cid), vec!["старая переписка"]);
+
+    // Two-factor sign-in: the code arrives in the system chat of the signed-in devices.
+    alice.call("set_two_factor", json!({"enabled": true}));
+    let third = Client::new();
+    let login = json!({"server": e.server, "username": aname, "password": "correct horse battery", "device_name": "tablet", "platform": "android"});
+    assert!(third.try_call("login", login.clone()).unwrap_err().is_api("code_required"));
+    alice.sync();
+    let notice = alice.texts("neochat-system").last().unwrap().clone();
+    let code: String = notice.chars().filter(char::is_ascii_digit).take(6).collect();
+    let mut with_code = login.clone();
+    with_code["code"] = code.into();
+    third.call("login", with_code);
+    assert_eq!(third.texts(&cid), vec!["старая переписка"]);
 }

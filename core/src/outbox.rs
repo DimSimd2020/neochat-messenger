@@ -98,6 +98,9 @@ impl Inner {
         if c["archived"] == true {
             return Err(Error::Invalid("Группа архивирована".into()));
         }
+        if c["kind"] == "system" {
+            return Err(Error::Invalid("В этот чат нельзя писать".into()));
+        }
         Ok(())
     }
 
@@ -483,7 +486,7 @@ impl Inner {
             }
             (ids, kv_get_str(&db.conn, "read_receipts")?.as_deref() != Some("0"))
         };
-        if receipts_on && !ids.is_empty() {
+        if receipts_on && !ids.is_empty() && conv != crate::sync::SYSTEM_CHAT {
             self.enqueue_receipt(conv, "read", ids)?;
             self.wake();
         }

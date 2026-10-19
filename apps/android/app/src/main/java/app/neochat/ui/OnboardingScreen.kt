@@ -4,8 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -20,8 +18,8 @@ import app.neochat.core.CoreClient
 import org.json.JSONObject
 
 /**
- * Sign in, registration and recovery. On a phone without keys "Войти" links it
- * to the account and waits for approval on the primary device.
+ * Sign in, registration and recovery. On a new phone the password restores the account
+ * keys and the history from the password-protected copy on the server.
  */
 class OnboardingScreen(private val act: MainActivity, status: JSONObject, private val done: () -> Unit) : Screen {
     private enum class Mode { LOGIN, REGISTER, RECOVER }
@@ -32,14 +30,13 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private val col = LinearLayout(ctx)
     private val form = LinearLayout(ctx)
     private val recovery = LinearLayout(ctx)
-    private val link = LinearLayout(ctx)
 
     private val heading = ctx.label("", 24f, 700)
     private val hint = ctx.label("", 14.5f, 400, Theme.Role.MUTED)
-    private val hasKeys = status.optBoolean("has_device_keys")
     private val username = FloatingField(ctx, "Имя пользователя")
     private val password = FloatingField(ctx, "Пароль", password = true)
     private val code = FloatingField(ctx, "Код восстановления")
+    private val loginCode = FloatingField(ctx, "Код из чата «NeoChat уведомления»")
     private val error = ctx.label("", 14f, 400, Theme.Role.WARNING)
     private val submit = PillButton(ctx, "Войти")
     private val switchMode = textLink("")
@@ -48,12 +45,6 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private val recoveryCode = ctx.label("", 19f, 600, Theme.Role.ACCENT)
     private val saved = CheckBox(ctx)
     private val proceed = PillButton(ctx, "Продолжить")
-
-    private val qr = QrView(ctx)
-    private val linkState = ctx.label("Ожидаем подтверждения…", 14f, 400, Theme.Role.MUTED)
-    private var linkText = ""
-    private val poller = Handler(Looper.getMainLooper())
-    private var polling = false
 
     private var mode = Mode.REGISTER
     private var busy = false
@@ -73,10 +64,8 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
 
         buildForm()
         buildRecovery()
-        buildLink()
         col.addView(form, lp())
         col.addView(recovery, lp())
-        col.addView(link, lp())
 
         status.str("username").takeIf { it.isNotEmpty() }?.let { username.setText(it) }
         setMode(Mode.LOGIN)
@@ -89,7 +78,9 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         form.orientation = LinearLayout.VERTICAL
         form.addView(heading, lp().apply { topMargin = dp(22) })
         form.addView(hint, lp().apply { topMargin = dp(8) })
-        for (f in listOf(username, password, code)) form.addView(f, lp().apply { topMargin = dp(12) })
+        for (f in listOf(username, password, code, loginCode)) form.addView(f, lp().apply { topMargin = dp(12) })
+        loginCode.visibility = View.GONE
+        loginCode.edit.inputType = InputType.TYPE_CLASS_NUMBER
         username.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         code.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
         error.visibility = View.GONE
@@ -109,8 +100,8 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         recovery.addView(ctx.label("Сохраните код восстановления", 22f, 700), lp().apply { topMargin = dp(22) })
         recovery.addView(
             ctx.label(
-                "Код вернёт доступ к аккаунту, если все устройства потеряны. История сообщений этим кодом не восстанавливается: " +
-                    "она хранится только на ваших устройствах. Запишите код и храните отдельно от телефона.", 14.5f, 400, Theme.Role.MUTED
+                "Код вернёт доступ к аккаунту, если все устройства потеряны и пароль забыт. Переписка этим кодом не восстанавливается: " +
+                    "её копия зашифрована паролем. Запишите код и храните отдельно от телефона.", 14.5f, 400, Theme.Role.MUTED
             ), lp().apply { topMargin = dp(8) }
         )
         recoveryCode.typeface = android.graphics.Typeface.MONOSPACE
@@ -145,34 +136,8 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         recovery.addView(proceed, lp().apply { topMargin = dp(12) })
     }
 
-    private fun buildLink() {
-        link.orientation = LinearLayout.VERTICAL
-        link.addView(ctx.label("Подтвердите на основном устройстве", 22f, 700), lp().apply { topMargin = dp(22) })
-        link.addView(
-            ctx.label(
-                "Это новый телефон для вашего аккаунта. Откройте NeoChat на основном устройстве: Устройства → Сканировать QR-код, и наведите камеру на этот код. " +
-                    "Прошлая переписка на этот телефон не переносится.", 14.5f, 400, Theme.Role.MUTED
-            ), lp().apply { topMargin = dp(8) }
-        )
-        link.addView(qr, lp(dp(240), dp(240)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(18) })
-        val copy = PillButton(ctx, "Скопировать код привязки", primary = false)
-        copy.setOnClickListener {
-            ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("NeoChat", linkText))
-            if (Build.VERSION.SDK_INT < 33) act.toast("Код скопирован")
-        }
-        link.addView(copy, lp().apply { topMargin = dp(16) })
-        linkState.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        link.addView(linkState, lp().apply { topMargin = dp(12) })
-        val cancel = PillButton(ctx, "Отменить", primary = false)
-        cancel.setOnClickListener {
-            stopPoll()
-            page(form)
-        }
-        link.addView(cancel, lp().apply { topMargin = dp(12) })
-    }
-
     private fun page(p: View) {
-        for (v in listOf(form, recovery, link)) v.visibility = if (v === p) View.VISIBLE else View.GONE
+        for (v in listOf(form, recovery)) v.visibility = if (v === p) View.VISIBLE else View.GONE
         // The recovery code must not end up in screenshots or the recents preview.
         if (p === recovery) act.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         else act.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -188,11 +153,12 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private fun setMode(m: Mode) {
         mode = m
         code.visibility = if (m == Mode.RECOVER) View.VISIBLE else View.GONE
+        if (m != Mode.LOGIN) loginCode.visibility = View.GONE
         password.setLabel(if (m == Mode.RECOVER) "Новый пароль" else "Пароль")
         when (m) {
             Mode.LOGIN -> set("Вход", "", "Войти")
             Mode.REGISTER -> set("Регистрация", "Пароль — не меньше 8 символов.", "Создать аккаунт")
-            Mode.RECOVER -> set("Восстановление доступа", "Остальные устройства будут отключены. Переписка с них не переносится.", "Восстановить")
+            Mode.RECOVER -> set("Восстановление доступа", "Остальные устройства будут отключены, переписка не перенесётся.", "Восстановить")
         }
         switchMode.text = if (m == Mode.LOGIN) "Создать аккаунт" else "Уже есть аккаунт? Войти"
         recoverLink.visibility = if (m == Mode.LOGIN) View.VISIBLE else View.GONE
@@ -227,10 +193,11 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         if (pass.isEmpty()) return showError("Введите пароль")
         if (mode != Mode.LOGIN && pass.length < 8) return showError("Пароль — не меньше 8 символов")
         val p = JSONObject().put("username", user).put("device_name", deviceName()).put("platform", "android")
-        // Without keys on this phone signing in means linking it to the account.
-        val linking = mode == Mode.LOGIN && !hasKeys
         val method = when (mode) {
-            Mode.LOGIN -> (if (linking) "link_start" else "login").also { p.put("password", pass) }
+            Mode.LOGIN -> "login".also {
+                p.put("password", pass)
+                if (loginCode.visibility == View.VISIBLE) p.put("code", loginCode.text.trim())
+            }
             Mode.REGISTER -> "register".also { p.put("password", pass) }
             Mode.RECOVER -> {
                 if (code.text.isBlank()) return showError("Введите код восстановления")
@@ -243,9 +210,18 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         val m = mode
         CoreClient.call(method, p) { v, e ->
             setBusy(false)
-            if (e != null) return@call showError(e.message)
+            if (e != null) {
+                // Two-factor sign-in: the code arrives in the system chat on the other devices.
+                if (e.code == "code_required") {
+                    loginCode.visibility = View.VISIBLE
+                    loginCode.edit.requestFocus()
+                }
+                return@call showError(e.message)
+            }
             password.setText("")
             code.setText("")
+            loginCode.setText("")
+            loginCode.visibility = View.GONE
             val res = v as? JSONObject ?: JSONObject()
             when {
                 m == Mode.REGISTER || m == Mode.RECOVER -> {
@@ -253,54 +229,9 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
                     saved.isChecked = false
                     page(recovery)
                 }
-                linking -> showLink(res)
                 else -> done()
             }
         }
-    }
-
-    private fun showLink(res: JSONObject) {
-        linkText = res.str("qr")
-        val arr = res.optJSONArray("qr_rows")
-        qr.setRows(List(arr?.length() ?: 0) { arr!!.getString(it) })
-        val minutes = maxOf(1, res.optInt("expires_in") / 60)
-        linkState.text = "Ожидаем подтверждения… Код действует $minutes мин."
-        linkState.role(Theme.Role.MUTED)
-        page(link)
-        polling = true
-        poll()
-    }
-
-    private fun poll() {
-        if (!polling) return
-        poller.postDelayed({
-            if (!polling) return@postDelayed
-            CoreClient.call("link_poll") { v, e ->
-                if (!polling) return@call
-                if (e != null) {
-                    if (e.code == "network") return@call poll()
-                    stopPoll()
-                    linkState.text = e.message
-                    linkState.role(Theme.Role.WARNING)
-                    return@call
-                }
-                val st = (v as? JSONObject)?.str("status") ?: "approved"
-                when (st) {
-                    "approved" -> { stopPoll(); done() }
-                    "pending" -> poll()
-                    else -> {
-                        stopPoll()
-                        linkState.text = "Привязка отклонена или истекла. Начните заново."
-                        linkState.role(Theme.Role.WARNING)
-                    }
-                }
-            }
-        }, 2000)
-    }
-
-    private fun stopPoll() {
-        polling = false
-        poller.removeCallbacksAndMessages(null)
     }
 
     override fun applyInsets(top: Int, bottom: Int, ime: Int) {
@@ -308,7 +239,6 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     }
 
     override fun onHidden() {
-        stopPoll()
         act.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 

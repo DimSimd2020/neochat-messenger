@@ -1,12 +1,11 @@
 import UIKit
 
-/// Sign in, registration and recovery. On a phone without keys "Войти" links it
-/// to the account and waits for approval on the primary device.
+/// Sign in, registration and recovery. On a new phone the password restores the account
+/// keys and the history from the password-protected copy on the server.
 final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private enum Mode { case login, register, recover }
 
     private let done: () -> Void
-    private let hasKeys: Bool
     private var mode = Mode.login
     private var busy = false
 
@@ -17,16 +16,15 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private let username = Field("Имя пользователя")
     private let password = Field("Пароль", secure: true)
     private let code = Field("Код восстановления")
+    private let loginCode = Field("Код из чата «NeoChat уведомления»")
     private let error = label("", 14, color: Theme.warning)
     private let submit = PillButton("Войти")
     private let switchMode = LinkButton("Создать аккаунт")
     private let recoverLink = LinkButton("Восстановить доступ", color: Theme.muted)
-    private var pollTimer: Timer?
     private var secureCover: UIView?
 
     init(status: JSON, done: @escaping () -> Void) {
         self.done = done
-        hasKeys = status.bool("has_device_keys")
         super.init(nibName: nil, bundle: nil)
         username.text = status.str("username")
     }
@@ -74,9 +72,12 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func showForm() {
         reset()
         setSecure(false)
-        for v in [heading, hint, username, password, code, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
+        for v in [heading, hint, username, password, code, loginCode, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
         stack.setCustomSpacing(18, after: error)
-        for f in [username, password, code] { f.delegate = self }
+        for f in [username, password, code, loginCode] { f.delegate = self }
+        loginCode.keyboardType = .numberPad
+        loginCode.textContentType = .oneTimeCode
+        loginCode.isHidden = true
         username.textContentType = .username
         submit.addTarget(self, action: #selector(onSubmit), for: .touchUpInside)
         switchMode.addTarget(self, action: #selector(onSwitch), for: .touchUpInside)
@@ -87,13 +88,14 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func setMode(_ m: Mode) {
         mode = m
         code.isHidden = m != .recover
+        if m != .login { loginCode.isHidden = true }
         password.placeholder = m == .recover ? "Новый пароль" : "Пароль"
         password.accessibilityLabel = password.placeholder
         password.textContentType = m == .login ? .password : .newPassword
         switch m {
         case .login: set("Вход", "", "Войти")
         case .register: set("Регистрация", "Пароль — не меньше 8 символов.", "Создать аккаунт")
-        case .recover: set("Восстановление доступа", "Остальные устройства будут отключены. Переписка с них не переносится.", "Восстановить")
+        case .recover: set("Восстановление доступа", "Остальные устройства будут отключены, переписка не перенесётся.", "Восстановить")
         }
         switchMode.setTitle(m == .login ? "Создать аккаунт" : "Уже есть аккаунт? Войти", for: .normal)
         recoverLink.isHidden = m != .login
@@ -117,7 +119,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     @objc private func onRecover() { if !busy { setMode(.recover) } }
 
     func textFieldShouldReturn(_ f: UITextField) -> Bool {
-        let order = [username, password, code].filter { !$0.isHidden }
+        let order = [username, password, code, loginCode].filter { !$0.isHidden }
         if let i = order.firstIndex(where: { $0 === f }), i + 1 < order.count { order[i + 1].becomeFirstResponder() } else { onSubmit() }
         return true
     }
@@ -137,12 +139,12 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         if pass.isEmpty { return showError("Введите пароль") }
         if mode != .login && pass.count < 8 { return showError("Пароль — не меньше 8 символов") }
         var p: JSON = ["username": user, "device_name": UIDevice.current.name, "platform": "ios"]
-        let linking = mode == .login && !hasKeys
         let method: String
         switch mode {
         case .login:
-            method = linking ? "link_start" : "login"
+            method = "login"
             p["password"] = pass
+            if !loginCode.isHidden { p["code"] = (loginCode.text ?? "").trimmingCharacters(in: .whitespaces) }
         case .register:
             method = "register"
             p["password"] = pass
@@ -161,12 +163,20 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
             guard let self else { return }
             self.setBusy(false)
             switch r {
-            case .failure(let e): self.showError(e.message)
+            case .failure(let e):
+                // Two-factor sign-in: the code arrives in the system chat on the other devices.
+                if e.code == "code_required" {
+                    self.loginCode.isHidden = false
+                    self.loginCode.becomeFirstResponder()
+                }
+                self.showError(e.message)
             case .success(let v):
                 self.password.text = ""
                 self.code.text = ""
+                self.loginCode.text = ""
+                self.loginCode.isHidden = true
                 let res = v as? JSON ?? [:]
-                if m == .register || m == .recover { self.showRecovery(res.str("recovery_code")) } else if linking { self.showLink(res) } else { self.done() }
+                if m == .register || m == .recover { self.showRecovery(res.str("recovery_code")) } else { self.done() }
             }
         }
     }
@@ -177,7 +187,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         reset()
         setSecure(true)
         stack.addArrangedSubview(label("Сохраните код восстановления", 24, .bold))
-        stack.addArrangedSubview(label("Код вернёт доступ к аккаунту, если все устройства потеряны. Переписка этим кодом не восстанавливается: она хранится только на ваших устройствах. Запишите код и храните отдельно от телефона.", 15, color: Theme.muted))
+        stack.addArrangedSubview(label("Код вернёт доступ к аккаунту, если все устройства потеряны. Переписка этим кодом не восстанавливается: её копия зашифрована паролем. Запишите код и храните отдельно от телефона.", 15, color: Theme.muted))
         let c = label(codeText, 20, .semibold, color: Theme.accent)
         c.font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .monospacedSystemFont(ofSize: 20, weight: .semibold))
         c.accessibilityLabel = "Код восстановления: " + codeText
@@ -233,81 +243,4 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         secureCover = nil
     }
 
-    // MARK: linking
-
-    private func showLink(_ res: JSON) {
-        reset()
-        stack.addArrangedSubview(label("Подтвердите на основном устройстве", 24, .bold))
-        stack.addArrangedSubview(label("Это новый телефон для вашего аккаунта. Откройте NeoChat на основном устройстве: Устройства → Сканировать QR-код, и наведите камеру на этот код. Прошлая переписка на этот телефон не переносится.", 15, color: Theme.muted))
-        let qr = QrView(rows: res["qr_rows"] as? [String] ?? [])
-        let holder = UIView()
-        qr.translatesAutoresizingMaskIntoConstraints = false
-        holder.addSubview(qr)
-        NSLayoutConstraint.activate([
-            qr.widthAnchor.constraint(equalToConstant: 240), qr.heightAnchor.constraint(equalToConstant: 240),
-            qr.centerXAnchor.constraint(equalTo: holder.centerXAnchor), qr.topAnchor.constraint(equalTo: holder.topAnchor), qr.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
-        ])
-        stack.addArrangedSubview(holder)
-        let text = res.str("qr")
-        let copy = PillButton("Скопировать код привязки", primary: false)
-        copy.addAction(UIAction { [weak self] _ in UIPasteboard.general.string = text; self?.toast("Код скопирован") }, for: .touchUpInside)
-        stack.addArrangedSubview(copy)
-        let state = label("Ожидаем подтверждения… Код действует \(max(1, res.int("expires_in") / 60)) мин.", 14, color: Theme.muted)
-        stack.addArrangedSubview(state)
-        let cancel = PillButton("Отменить", primary: false)
-        cancel.addAction(UIAction { [weak self] _ in self?.pollTimer?.invalidate(); self?.showForm() }, for: .touchUpInside)
-        stack.addArrangedSubview(cancel)
-        pollTimer?.invalidate()
-        var inFlight = false
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
-            if inFlight { return }
-            inFlight = true
-            Core.shared.call("link_poll") { r in
-                inFlight = false
-                switch r {
-                case .failure(let e):
-                    if e.code == "network" { return }
-                    t.invalidate()
-                    state.text = e.message
-                    state.textColor = Theme.warning
-                case .success(let v):
-                    let st = (v as? JSON)?.str("status") ?? "approved"
-                    if st == "approved" { t.invalidate(); self?.done() } else if st != "pending" {
-                        t.invalidate()
-                        state.text = "Привязка отклонена или истекла. Начните заново."
-                        state.textColor = Theme.warning
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// QR code from the core's module rows ('1' = dark).
-final class QrView: UIView {
-    private let rows: [String]
-
-    init(rows: [String]) {
-        self.rows = rows
-        super.init(frame: .zero)
-        backgroundColor = .white
-        layer.cornerRadius = 18
-        isAccessibilityElement = true
-        accessibilityLabel = "QR-код привязки"
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func draw(_ rect: CGRect) {
-        guard !rows.isEmpty, let ctx = UIGraphicsGetCurrentContext() else { return }
-        let n = CGFloat(rows.count)
-        let cell = (bounds.width - 16) / (n + 8)
-        let off = 8 + 4 * cell
-        ctx.setFillColor(UIColor.black.cgColor)
-        for (y, row) in rows.enumerated() {
-            for (x, ch) in row.enumerated() where ch == "1" {
-                ctx.fill(CGRect(x: off + CGFloat(x) * cell, y: off + CGFloat(y) * cell, width: cell + 0.5, height: cell + 0.5))
-            }
-        }
-    }
 }

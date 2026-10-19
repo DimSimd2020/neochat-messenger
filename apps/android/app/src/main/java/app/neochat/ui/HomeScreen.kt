@@ -430,7 +430,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
             val user = s.str("username")
             profileAvatar.set(user, s.str("user_id"))
             profileName.text = user
-            profileSub.text = "@$user · " + if (s.optBoolean("primary")) "основное устройство" else "дополнительное устройство"
+            profileSub.text = "@$user"
         }
     }
 

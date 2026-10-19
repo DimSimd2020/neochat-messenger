@@ -4,7 +4,7 @@
 //!   cargo run --release --example peer -- <dir> send <username> <text>
 //!   cargo run --release --example peer -- <dir> expect <username> <text>
 //!   cargo run --release --example peer -- <dir> file <username> <path>
-//!   cargo run --release --example peer -- <dir> link <server> <username> <password>
+//!   cargo run --release --example peer -- <dir> login <server> <username> <password>
 //!
 //! The state directory keeps a random test database key; use it only with test accounts.
 
@@ -51,22 +51,9 @@ fn main() {
             call(&c, "register", json!({"server": a[3], "username": a[4], "password": "peer-test-passphrase", "device_name": "peer", "platform": "windows"}));
             println!("registered");
         }
-        "link" => {
-            // Starts linking as a new device, leaves the QR text in <dir>/link-qr.txt
-            // and waits up to three minutes for the primary device to approve it.
-            let res = call(&c, "link_start", json!({"server": a[3], "username": a[4], "password": a[5], "device_name": "peer", "platform": "windows"}));
-            std::fs::write(dir.join("link-qr.txt"), res["qr"].as_str().unwrap()).unwrap();
-            println!("waiting");
-            let t = Instant::now();
-            while t.elapsed() < Duration::from_secs(180) {
-                if call(&c, "link_poll", json!({}))["status"] == "approved" {
-                    println!("linked");
-                    return;
-                }
-                std::thread::sleep(Duration::from_secs(2));
-            }
-            println!("not approved");
-            std::process::exit(1);
+        "login" => {
+            call(&c, "login", json!({"server": a[3], "username": a[4], "password": a[5], "device_name": "peer", "platform": "windows"}));
+            println!("logged in");
         }
         "send" => {
             let conv = direct(&c, &a[3]);
