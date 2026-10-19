@@ -21,7 +21,10 @@ final class OnboardingUITests: XCTestCase {
         pass.typeText("correct horse battery")
         shot("02-register")
         app.buttons["Создать аккаунт"].tap()
-        XCTAssertTrue(app.staticTexts["Сохраните код восстановления"].waitForExistence(timeout: 60))
+        if !app.staticTexts["Сохраните код восстановления"].waitForExistence(timeout: 60) {
+            shot("03-submit-failed")
+            XCTFail("recovery page did not appear")
+        }
         shot("03-recovery")
         app.switches.firstMatch.tap()
         app.buttons["Продолжить"].tap()
