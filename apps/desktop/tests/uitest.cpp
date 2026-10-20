@@ -518,7 +518,14 @@ void UiTest::socialFeatures()
     // window caches it; a double click replaces our 👍 with it.
     Core::instance()->call("set_settings", {{"quick_reaction", QStringLiteral("🔥")}});
     QTRY_COMPARE_WITH_TIMEOUT(quickReaction(), QStringLiteral("🔥"), 5000);
-    QTest::mouseDClick(view->viewport(), Qt::LeftButton, {}, at);
+    {
+        // The second chip made the row taller: find the text again.
+        const QModelIndex row = view->model()->index(view->model()->rowCount() - 1, 0);
+        view->scrollTo(row);
+        const QRect r = view->visualRect(row);
+        const auto *it = static_cast<const MessageItem *>(row.data(MessageModel::ItemRole).value<const void *>());
+        QTest::mouseDClick(view->viewport(), Qt::LeftButton, {}, r.topLeft() + MessageDelegate::layout(*it, r.width(), false).text.center().toPoint());
+    }
     auto mine = [&] {
         for (const auto &r : lastMessage(view).value("reactions").toArray())
             if (r.toObject().value("mine").toBool())

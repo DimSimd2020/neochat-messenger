@@ -93,6 +93,13 @@ fn main() {
             println!("not received");
             std::process::exit(1);
         }
+        "call" => {
+            // Any core method with JSON params, after a sync, e.g. `call set_settings '{"quick_reaction":"🔥"}'`.
+            call(&c, "sync_now", json!({}));
+            let r = call(&c, &a[3], serde_json::from_str(a.get(4).map(String::as_str).unwrap_or("{}")).expect("params"));
+            call(&c, "sync_now", json!({}));
+            println!("{r}");
+        }
         other => {
             eprintln!("unknown command {other}");
             std::process::exit(2);
