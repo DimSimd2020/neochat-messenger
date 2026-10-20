@@ -24,12 +24,18 @@ android {
     }
 
     signingConfigs {
-        if (signingProps != null) {
-            create("release") {
+        create("release") {
+            if (signingProps != null) {
                 storeFile = file(signingProps.getProperty("storeFile"))
                 storePassword = signingProps.getProperty("storePassword")
                 keyAlias = signingProps.getProperty("keyAlias")
                 keyPassword = signingProps.getProperty("keyPassword")
+            } else {
+                // Sideload keystore so CI/local release APKs install when NEOCHAT_SIGNING is unset.
+                storeFile = file("${rootDir}/keystore/sideload.keystore")
+                storePassword = "android"
+                keyAlias = "sideload"
+                keyPassword = "android"
             }
         }
     }
@@ -39,7 +45,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.findByName("release")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

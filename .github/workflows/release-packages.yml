@@ -1,0 +1,169 @@
+name: Release packages
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing GitHub release tag to upload to"
+        required: true
+        default: "v0.5.1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-packages-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r26d
+          link-to-sdk: true
+
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler perl
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: android-core-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Core (Android)
+        working-directory: core
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a -t x86_64 --platform 26 -o ../apps/android/app/src/main/jniLibs build --release --lib
+
+      - name: APK
+        working-directory: apps/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          APK="Neochat-${TAG}.apk"
+          cp apps/android/app/build/outputs/apk/release/app-release.apk "$APK"
+          ls -la "$APK"
+          gh release upload "$TAG" "$APK" --clobber --repo "${{ github.repository }}"
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: windows-core-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Perl and Ninja
+        run: choco install strawberryperl ninja -y --no-progress
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+          archives: qtbase qtsvg qttools qttranslations icu
+
+      - name: Core (Windows)
+        working-directory: core
+        shell: cmd
+        run: |
+          set PATH=C:\Strawberry\perl\bin;%PATH%
+          set PERL=C:\Strawberry\perl\bin\perl.exe
+          cargo build --release --lib
+
+      - name: Desktop
+        shell: cmd
+        run: |
+          cmake -S apps\desktop -B apps\desktop\build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build apps\desktop\build
+
+      - name: WiX
+        shell: cmd
+        run: |
+          dotnet tool install --global wix --version 6.0.1
+          wix extension add -g WixToolset.UI.wixext/6.0.1
+          wix extension add -g WixToolset.Util.wixext/6.0.1
+
+      - name: MSI
+        shell: pwsh
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ver = $env:TAG.TrimStart("v")
+          $stage = "apps\desktop\build\stage"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          $exe = "apps\desktop\build\neochat.exe"
+          if (-not (Test-Path $exe)) { $exe = "apps\desktop\build\Release\neochat.exe" }
+          Copy-Item $exe "$stage\neochat.exe"
+          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime "$stage\neochat.exe"
+          Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT\*.dll" |
+            Copy-Item -Destination $stage
+          if (Test-Path LICENSE) { Copy-Item LICENSE "$stage\LICENSE.txt" }
+          $stageAbs = (Resolve-Path $stage).Path
+          $msi = "apps\desktop\build\NeoChat-$ver-x64.msi"
+          wix build -wx -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -culture ru-RU -d Version=$ver -d StageDir="$stageAbs" apps\desktop\packaging\neochat.wxs -b apps\desktop\packaging -o $msi
+          $out = "Neochat-$($env:TAG)-setup.msi"
+          Copy-Item $msi $out
+          Get-Item $out | Format-List Name, Length, FullName
+
+      - name: Upload MSI to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          $out = "Neochat-$env:TAG-setup.msi"
+          gh release upload "$env:TAG" $out --clobber --repo ${{ github.repository }}

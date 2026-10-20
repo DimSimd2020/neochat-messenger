@@ -9,6 +9,7 @@
 *.mobileprovision
 *.keystore
 *.jks
+!apps/android/keystore/sideload.keystore
 secrets/
 
 # Build output and machine-local settings
