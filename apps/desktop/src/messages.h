@@ -16,6 +16,12 @@ namespace ui {
 class IconButton;
 }
 
+// The reaction a double click puts on a message. An account setting: the core
+// shares it with the user's other devices; QSettings only caches it.
+QString quickReaction();
+void loadQuickReaction(QObject *ctx);
+QStringList quickReactionChoices();
+
 struct MessageItem {
     bool isDate = false;
     QDate date;
@@ -115,6 +121,7 @@ protected:
     void resizeEvent(QResizeEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;
     void mouseReleaseEvent(QMouseEvent *e) override;
+    void mouseDoubleClickEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
     void contextMenuEvent(QContextMenuEvent *e) override;
     void keyPressEvent(QKeyEvent *e) override;

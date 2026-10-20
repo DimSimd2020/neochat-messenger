@@ -46,6 +46,7 @@ impl Inner {
                 }
                 let _ = self.run_cycle();
                 self.spawn_history_upload();
+                self.retry_missing_avatars();
                 // Installations from before profiles learn the display name and numeric ID once.
                 if kv_get_str(&self.db().conn, "number").ok().flatten().unwrap_or_default().is_empty() {
                     let _ = self.refresh_profile();
@@ -76,6 +77,10 @@ impl Inner {
             self.flush_outbox()?;
             let n = self.sync_events()?;
             self.flush_outbox()?;
+            // Contacts, pins and preferences from the other own devices.
+            if let Err(e @ Error::Network(_)) = self.sync_account_state() {
+                return Err(e);
+            }
             self.maintain_prekeys()?;
             Ok(n)
         })();
@@ -188,6 +193,11 @@ impl Inner {
                         }
                     }
                 }
+                self.mark_processed(event_id)
+            }
+            "state" => {
+                // Another own device changed the shared account state.
+                kv_set(&self.db().conn, "state_pull", b"1")?;
                 self.mark_processed(event_id)
             }
             "notice" => {

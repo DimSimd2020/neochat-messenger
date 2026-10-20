@@ -122,6 +122,7 @@ impl Db {
         // FULL sync: a lost ratchet step after power loss could repeat a message key.
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;")?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(crate::state::SCHEMA)?;
         // Columns added after the first release; the error for an existing column is expected.
         for sql in [
             "ALTER TABLE contacts ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''",
@@ -134,7 +135,7 @@ impl Db {
             "ALTER TABLE conversations ADD COLUMN state_rev INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN state_blob BLOB",
             "ALTER TABLE messages ADD COLUMN poll TEXT",
-            // Archive and pins are per device; pinned holds the pin time (0 = not pinned).
+            // Archive and pins; pinned holds the pin time (0 = not pinned).
             "ALTER TABLE conversations ADD COLUMN in_archive INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE contacts ADD COLUMN bio TEXT NOT NULL DEFAULT ''",

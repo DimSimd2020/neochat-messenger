@@ -95,6 +95,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/accounts/current/history", s.authed(s.handleGetHistory))
 	m.HandleFunc("PUT /v1/accounts/current/history", s.authed(s.handlePutHistory))
 	m.HandleFunc("PUT /v1/accounts/current/roster", s.authed(s.handleUpdateRoster))
+	m.HandleFunc("GET /v1/accounts/current/state", s.authed(s.handleGetState))
+	m.HandleFunc("PUT /v1/accounts/current/state", s.authed(s.handlePutState))
 
 	m.HandleFunc("POST /v1/contacts/resolve", s.authed(s.handleResolve))
 	m.HandleFunc("GET /v1/users/{id}", s.authed(s.handleGetUser))

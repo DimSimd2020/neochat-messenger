@@ -23,6 +23,7 @@ void newChat(const DialogHost &h);
 void devices(const DialogHost &h);
 void recentCalls(const DialogHost &h);
 void settings(const DialogHost &h);
+void whatsNew(const DialogHost &h);
 void profile(const DialogHost &h);
 void myQr(const DialogHost &h);
 void conversationInfo(const DialogHost &h, const QString &conversationId);

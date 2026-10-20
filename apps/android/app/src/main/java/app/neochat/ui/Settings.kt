@@ -28,6 +28,7 @@ class SettingsPage(private val act: MainActivity) {
     private val cacheValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val lastSeenValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val batteryValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
+    private val quickValue = ctx.label(QuickReaction.current(ctx), 14f, 400, Theme.Role.MUTED)
 
     init {
         scroll.isVerticalScrollBarEnabled = false
@@ -134,7 +135,12 @@ class SettingsPage(private val act: MainActivity) {
             addView(nav(R.drawable.ic_download, "Автозагрузка фото", loadValue) {
                 choose(loadValue, loads, prefs.getString("autoload", "always")!!) { prefs.edit().putString("autoload", it).apply() }
             })
-            addView(note("Свайп по чату влево убирает его в архив, вправо — закрепляет (до 3 чатов)."))
+            addView(nav(R.drawable.ic_chat, "Быстрая реакция", quickValue) {
+                choose(quickValue, QuickReaction.CHOICES.map { it to it }, QuickReaction.current(ctx)) { e ->
+                    QuickReaction.set(ctx, e) { err -> if (err != null) act.toast(err) else quickValue.text = e }
+                }
+            })
+            addView(note("Свайп по чату влево убирает его в архив, вправо — закрепляет (до 3 чатов). Двойное касание сообщения ставит быструю реакцию. Контакты, закреплённые чаты, архив и быстрая реакция общие для всех ваших устройств."))
         }
 
         section("Данные").apply {
@@ -209,6 +215,7 @@ class SettingsPage(private val act: MainActivity) {
 
     fun load() {
         batteryValue.text = if (unrestricted()) "Без ограничений" else "Ограничена"
+        QuickReaction.load(ctx) { quickValue.text = QuickReaction.current(ctx) }
         CoreClient.call("status") { v, _ ->
             val s = v as? JSONObject ?: return@call
             status = s

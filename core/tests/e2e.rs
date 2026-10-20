@@ -794,3 +794,93 @@ fn call_answered_on_one_device_stops_the_other() {
     assert!(call_event(&alice, a1, &|v| v["state"] == "ended")["reason"] == "hangup");
     assert_eq!(call_logs(&bob2, &cid), vec!["Входящий звонок"]);
 }
+
+#[test]
+fn own_devices_share_contacts_pins_settings_and_avatar() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let (alice, _) = register(&e, &aname);
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let (carol, _) = register(&e, &uname("carol"));
+    let alice2 = Client::new();
+    alice2.call(
+        "login",
+        json!({"server": e.server, "username": aname, "password": "correct horse battery", "device_name": "phone", "platform": "android"}),
+    );
+    alice.sync();
+    alice2.sync();
+    let contact = |c: &Client, id: &str| c.call("list_contacts", json!({})).as_array().unwrap().iter().find(|x| x["user_id"] == id).cloned();
+
+    // A contact added and named on one device appears with that name on the other.
+    let b = alice.call("resolve_contact", json!({"username": bname, "first_name": "Борис", "last_name": "Тестов"}));
+    let bid = b["user_id"].as_str().unwrap().to_string();
+    let cid = alice.call("open_direct", json!({"user_id": bid}))["id"].as_str().unwrap().to_string();
+    alice.call("verify_contact", json!({"user_id": bid}));
+    alice.call("set_pinned", json!({"conversation_id": cid, "pinned": true}));
+    alice.call("set_settings", json!({"quick_reaction": "🔥", "read_receipts": false}));
+    alice.sync();
+    alice2.sync();
+    let on2 = contact(&alice2, &bid).expect("contact synced");
+    assert_eq!(on2["display_name"], "Борис Тестов");
+    assert_eq!(on2["verified"], true);
+    let settings = alice2.call("get_settings", json!({}));
+    assert_eq!(settings["quick_reaction"], "🔥");
+    assert_eq!(settings["read_receipts"], false);
+
+    // The chat reaches the second device later; the pin made earlier applies to it.
+    bob.call("resolve_contact", json!({"username": aname}));
+    bob.call("open_direct", json!({"user_id": uid(&alice)}));
+    bob.call("send_text", json!({"conversation_id": cid, "text": "привет"}));
+    bob.sync();
+    alice2.sync();
+    alice2.sync();
+    assert_eq!(alice2.call("get_conversation", json!({"conversation_id": cid}))["pinned"], true);
+
+    // The contact's own key reached the second device: messages still flow.
+    alice2.call("send_text", json!({"conversation_id": cid, "text": "со второго"}));
+    alice2.sync();
+    bob.sync();
+    assert!(bob.texts(&cid).contains(&"со второго".to_string()));
+
+    // Renames, unpinning, archiving and removal travel back.
+    alice2.call("update_contact", json!({"user_id": bid, "first_name": "Боб", "last_name": ""}));
+    alice2.call("set_pinned", json!({"conversation_id": cid, "pinned": false}));
+    alice2.call("set_archived", json!({"conversation_id": cid, "archived": true}));
+    alice2.sync();
+    alice.sync();
+    assert_eq!(contact(&alice, &bid).unwrap()["display_name"], "Боб");
+    let conv = alice.call("get_conversation", json!({"conversation_id": cid}));
+    assert_eq!(conv["pinned"], false);
+    assert_eq!(conv["in_archive"], true);
+
+    // Changes made on both devices before either syncs are merged, not lost.
+    let c = carol.call("status", json!({}))["username"].as_str().unwrap().to_string();
+    alice.call("resolve_contact", json!({"username": c}));
+    alice2.call("delete_contact", json!({"user_id": bid}));
+    alice.sync();
+    alice2.sync();
+    alice.sync();
+    let cid_carol = uid(&carol);
+    assert!(contact(&alice2, &cid_carol).is_some());
+    assert!(contact(&alice, &bid).is_none());
+
+    // A new profile photo on one device is cached on the other.
+    let avatar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/avatar.jpg");
+    alice.call("set_avatar", json!({"path": avatar}));
+    alice2.sync();
+    let photo = alice2.call("status", json!({}))["avatar_path"].as_str().unwrap().to_string();
+    assert_eq!(std::fs::read(photo).unwrap(), include_bytes!("fixtures/avatar.jpg"));
+
+    // Release notes: skipped on a fresh sign-in, shown once after an update.
+    let notes = |c: &Client| c.call("whats_new", json!({"version": "0.6.3", "platform": "ios"}));
+    assert_eq!(notes(&alice)["show"], false);
+    alice.call("whats_new_seen", json!({"version": "0.6.2"}));
+    let w = notes(&alice);
+    assert_eq!(w["show"], true);
+    let items: Vec<&str> = w["items"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(items.iter().any(|t| t.contains("Смахните сообщение влево")));
+    assert!(!items.iter().any(|t| t.contains("NeoChat на связи")));
+    alice.call("whats_new_seen", json!({"version": "0.6.3"}));
+    assert_eq!(notes(&alice)["show"], false);
+}

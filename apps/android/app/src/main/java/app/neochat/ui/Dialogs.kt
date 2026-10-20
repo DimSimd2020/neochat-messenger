@@ -37,6 +37,25 @@ object Dialogs {
         override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
     })
 
+    // ---- release notes ----
+
+    /** "Что нового": shown once after an update; the core keeps the notes and what was seen. */
+    fun whatsNewIfNeeded(act: MainActivity) {
+        val version = runCatching { act.packageManager.getPackageInfo(act.packageName, 0).versionName }.getOrNull() ?: return
+        CoreClient.call("whats_new", JSONObject().put("version", version).put("platform", "android")) { v, _ ->
+            val o = v as? JSONObject ?: return@call
+            if (!o.optBoolean("show")) return@call
+            CoreClient.call("whats_new_seen", JSONObject().put("version", version))
+            val s = Sheet(act, o.optString("title"))
+            val items = o.optJSONArray("items")
+            for (i in 0 until (items?.length() ?: 0)) s.add(s.ctx.label("•  " + items!!.optString(i), 15f, 400), if (i == 0) 4 else 10)
+            val ok = PillButton(s.ctx, "Понятно")
+            ok.setOnClickListener { s.dismiss() }
+            s.add(ok, 18)
+            s.show()
+        }
+    }
+
     // ---- contacts ----
 
     fun newContact(act: MainActivity, done: ((JSONObject) -> Unit)? = null) {

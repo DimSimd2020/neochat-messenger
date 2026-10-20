@@ -476,10 +476,20 @@ final class SettingsViewController: SheetViewController {
                 sort.value.text = name
             }
         }, for: .touchUpInside)
+        let quick = NavRow("hand.tap", "Быстрая реакция", value: QuickReaction.current) {}
+        quick.addAction(UIAction { [weak self, weak quick] _ in
+            guard let self, let quick else { return }
+            self.choose("Быстрая реакция", QuickReaction.choices.map { ($0, $0) }, current: QuickReaction.current, from: quick) { v, _ in
+                QuickReaction.set(v) { err in
+                    if let err { self.toast(err) } else { quick.value.text = v }
+                }
+            }
+        }, for: .touchUpInside)
         section("Чаты", [
             sort,
+            quick,
             SwitchRow("photo", "Автозагрузка фото", on: Prefs.autoload) { Prefs.set("autoload", $0) },
-        ], footer: "Смахните чат влево, чтобы убрать его в архив, и вправо, чтобы закрепить. Закрепить можно до 3 чатов.")
+        ], footer: "Смахните чат влево, чтобы убрать его в архив, и вправо, чтобы закрепить. Закрепить можно до 3 чатов. Двойное касание сообщения ставит быструю реакцию, смахивание сообщения влево — отвечает на него. Контакты, закреплённые чаты, архив и быстрая реакция общие для всех ваших устройств.")
 
         let cache = NavRow("trash", "Очистить кэш", value: sizeOf(cacheDirs())) {}
         cache.addAction(UIAction { [weak self, weak cache] _ in
@@ -786,6 +796,49 @@ final class NewPollViewController: SheetViewController {
             case .failure(let e): self?.toast(e.message)
             case .success: self?.dismiss(animated: !Theme.reducedMotion)
             }
+        }
+    }
+}
+
+/// "Что нового": shown once after an update; the notes come from the core.
+final class WhatsNewViewController: SheetViewController {
+    private let notes: JSON
+
+    init(_ notes: JSON) {
+        self.notes = notes
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = notes.str("title")
+        for item in notes["items"] as? [String] ?? [] {
+            let dot = label("•", 17, .semibold, color: Theme.accent)
+            dot.setContentHuggingPriority(.required, for: .horizontal)
+            let row = UIStackView(arrangedSubviews: [dot, label(item, 16)])
+            row.spacing = 10
+            row.alignment = .firstBaseline
+            row.isAccessibilityElement = true
+            row.accessibilityLabel = item
+            stack.addArrangedSubview(row)
+        }
+        let ok = PillButton("Понятно")
+        ok.addAction(UIAction { [weak self] _ in self?.dismiss(animated: !Theme.reducedMotion) }, for: .touchUpInside)
+        stack.setCustomSpacing(24, after: stack.arrangedSubviews.last ?? stack)
+        stack.addArrangedSubview(ok)
+    }
+
+    /// Asks the core whether this version's notes were already seen and marks them.
+    static func showIfNeeded(from host: UIViewController) {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return }
+        Core.shared.call("whats_new", ["version": version, "platform": "ios"]) { [weak host] r in
+            guard let host, case .success(let v) = r, let o = v as? JSON, o.bool("show") else { return }
+            Core.shared.call("whats_new_seen", ["version": version])
+            var top: UIViewController = host
+            while let p = top.presentedViewController { top = p }
+            top.presentSheet(WhatsNewViewController(o))
         }
     }
 }

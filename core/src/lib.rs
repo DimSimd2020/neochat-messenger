@@ -17,10 +17,12 @@ mod markdown;
 mod keys;
 mod outbox;
 mod social;
+mod state;
 mod store;
 mod sync;
 mod update;
 mod views;
+mod whatsnew;
 
 pub mod ffi;
 #[cfg(target_os = "android")]

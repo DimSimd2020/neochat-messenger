@@ -1,0 +1,52 @@
+//! "Что нового": release notes shown once after an update. The text lives in the
+//! core so every client shows the same list; a fresh sign-in skips it.
+
+use serde_json::{Value, json};
+
+use crate::engine::{Inner, s};
+use crate::error::Result;
+use crate::store::{kv_del, kv_get_str, kv_set};
+
+/// Notes per version; a platform tag limits an item to one client ("" = all).
+const NOTES: &[(&str, &[(&str, &str)])] = &[(
+    "0.6.3",
+    &[
+        ("", "Звонки один на один: голосовые и видео, с шифрованием между устройствами собеседников."),
+        ("windows", "Микрофон, динамики и камера для звонков выбираются в «Настройки → Звонки»."),
+        ("android", "Сообщения и звонки приходят сразу, без задержки до 10 минут. Это делает служба «NeoChat на связи»."),
+        ("", "Двойное касание сообщения ставит быструю реакцию. Её можно выбрать в настройках."),
+        ("ios", "Смахните сообщение влево, чтобы ответить. Можно начинать и с пустого места рядом с ним."),
+        ("", "Контакты, их имена, закреплённые чаты, архив и быструю реакцию теперь видно одинаково на всех ваших устройствах."),
+        ("", "Фото профиля, которое не загрузилось сразу, загружается повторно."),
+    ],
+)];
+
+impl Inner {
+    /// `{"version", "platform"}` → whether to show the notes for this version.
+    pub fn whats_new(&self, p: &Value) -> Result<Value> {
+        let version = s(p, "version")?.trim().to_string();
+        let platform = p["platform"].as_str().unwrap_or("");
+        let items: Vec<&str> = NOTES
+            .iter()
+            .find(|(v, _)| *v == version)
+            .map(|(_, list)| list.iter().filter(|(tag, _)| tag.is_empty() || *tag == platform).map(|(_, t)| *t).collect())
+            .unwrap_or_default();
+        let mut show = false;
+        if self.logged_in() {
+            let db = self.db();
+            if kv_get_str(&db.conn, "fresh_install")?.is_some() {
+                // Signed in on this version: nothing new to tell.
+                kv_set(&db.conn, "seen_version", version.as_bytes())?;
+                kv_del(&db.conn, "fresh_install")?;
+            } else {
+                show = !items.is_empty() && kv_get_str(&db.conn, "seen_version")?.as_deref() != Some(version.as_str());
+            }
+        }
+        Ok(json!({"show": show, "version": version, "title": format!("Что нового в NeoChat {version}"), "items": items}))
+    }
+
+    pub fn whats_new_seen(&self, p: &Value) -> Result<Value> {
+        kv_set(&self.db().conn, "seen_version", s(p, "version")?.trim().as_bytes())?;
+        Ok(Value::Null)
+    }
+}

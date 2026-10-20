@@ -164,6 +164,8 @@ class MainActivity : Activity(), Sheet.Host {
         show(h, 0f)
         RealtimeService.sync(this)
         AppLock.maybeLock(this)
+        QuickReaction.load(this)
+        Dialogs.whatsNewIfNeeded(this)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         pendingConversation?.let {

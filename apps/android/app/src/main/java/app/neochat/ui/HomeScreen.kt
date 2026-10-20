@@ -556,7 +556,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
                 root.removeCallbacks(refresh)
                 root.postDelayed(refresh, 120)
             }
-            "account_changed" -> settingsPage.load()
+            "account_changed", "settings_changed" -> settingsPage.load()
             "presence" -> {
                 root.removeCallbacks(refresh)
                 root.postDelayed(refresh, 120)

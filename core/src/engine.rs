@@ -313,6 +313,8 @@ impl Inner {
             "set_draft" => self.set_draft(p),
             "mark_read" => self.mark_read(p),
             "get_settings" => self.get_settings(),
+            "whats_new" => self.whats_new(p),
+            "whats_new_seen" => self.whats_new_seen(p),
             "set_settings" => self.set_settings(p),
             "safety_number" => self.contact_info(p),
             "react" => self.react(p),
@@ -448,6 +450,8 @@ impl Inner {
     fn after_login(&self) {
         // For a while after sign-in, fresher history copies from other devices are merged in.
         let _ = kv_set(&self.db().conn, "history_fresh_until", (now_ms() + 15 * 60 * 1000).to_string().as_bytes());
+        // A fresh sign-in does not show the notes of the version it started on.
+        let _ = kv_set(&self.db().conn, "fresh_install", b"1");
         let _ = self.refresh_profile();
         self.set_conn(STATE_ONLINE);
         self.emit(json!({"type": "account_changed"}));
@@ -781,14 +785,33 @@ impl Inner {
         let db = self.db();
         Ok(json!({
             "read_receipts": kv_get_str(&db.conn, "read_receipts")?.as_deref() != Some("0"),
+            "quick_reaction": kv_get_str(&db.conn, "quick_reaction")?.unwrap_or_else(|| crate::state::DEFAULT_QUICK_REACTION.into()),
         }))
     }
 
+    /// Account preferences; they follow the user to every own device.
     fn set_settings(&self, p: &Value) -> Result<Value> {
-        let db = self.db();
-        if let Some(v) = p["read_receipts"].as_bool() {
-            kv_set(&db.conn, "read_receipts", if v { b"1" } else { b"0" })?;
+        if let Some(r) = p["quick_reaction"].as_str() {
+            if !crate::social::valid_reaction(r.trim()) {
+                return Err(Error::Invalid("Быстрая реакция должна быть эмодзи".into()));
+            }
         }
+        let mut touched = Vec::new();
+        {
+            let db = self.db();
+            if let Some(v) = p["read_receipts"].as_bool() {
+                kv_set(&db.conn, "read_receipts", if v { b"1" } else { b"0" })?;
+                touched.push("pref:read_receipts");
+            }
+            if let Some(r) = p["quick_reaction"].as_str() {
+                kv_set(&db.conn, "quick_reaction", r.trim().as_bytes())?;
+                touched.push("pref:quick_reaction");
+            }
+        }
+        for k in touched {
+            self.touch(k);
+        }
+        self.emit(json!({"type": "settings_changed"}));
         Ok(Value::Null)
     }
 
@@ -922,6 +945,7 @@ impl Inner {
             return Err(Error::Invalid("Это ваше собственное имя пользователя".into()));
         }
         let c = self.apply_user(&u, Some((&first, p["last_name"].as_str().unwrap_or(""))))?;
+        self.contact_touch(s(&c, "user_id")?);
         self.emit(json!({"type": "contacts_changed"}));
         Ok(c)
     }
@@ -987,6 +1011,7 @@ impl Inner {
             "UPDATE contacts SET first_name=?2, last_name=?3, is_contact=1 WHERE user_id=?1",
             params![id, first, p["last_name"].as_str().unwrap_or("").trim()],
         )?;
+        self.contact_touch(id);
         self.emit(json!({"type": "contacts_changed"}));
         self.emit(json!({"type": "conversations_changed"}));
         self.contact_json(id)
@@ -994,6 +1019,7 @@ impl Inner {
 
     fn delete_contact(&self, p: &Value) -> Result<Value> {
         self.db().conn.execute("UPDATE contacts SET is_contact=0 WHERE user_id=?1", [s(p, "user_id")?])?;
+        self.contact_touch(s(p, "user_id")?);
         self.emit(json!({"type": "contacts_changed"}));
         Ok(Value::Null)
     }
@@ -1011,6 +1037,7 @@ impl Inner {
 
     fn verify_contact(&self, p: &Value) -> Result<Value> {
         self.db().conn.execute("UPDATE contacts SET verified=1 WHERE user_id=?1 AND key_changed=0", [s(p, "user_id")?])?;
+        self.contact_touch(s(p, "user_id")?);
         self.emit(json!({"type": "contacts_changed"}));
         self.contact_json(s(p, "user_id")?)
     }
@@ -1018,6 +1045,13 @@ impl Inner {
     /// The user accepted a changed identity: pin the new key, drop old sessions.
     fn accept_key_change(&self, p: &Value) -> Result<Value> {
         let id = s(p, "user_id")?;
+        let c = self.accept_key_change_synced(id)?;
+        self.contact_touch(id);
+        Ok(c)
+    }
+
+    /// Accepting without publishing it: also used when another own device accepted.
+    pub fn accept_key_change_synced(&self, id: &str) -> Result<Value> {
         {
             let mut db = self.db();
             let tx = db.conn.transaction()?;

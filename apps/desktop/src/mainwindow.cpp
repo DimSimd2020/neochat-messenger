@@ -666,6 +666,8 @@ void MainWindow::showMain()
         m_panel->setConnection(m_connection);
         m_rail->profile->setLabel(QStringLiteral("Профиль @") + v.toObject().value("username").toString());
     });
+    loadQuickReaction(this);
+    dialogs::whatsNew(host());
     const QString last = QSettings().value("window/lastConversation").toString();
     if (!last.isEmpty() && m_current.isEmpty()) {
         Core::instance()->call("get_conversation", {{"conversation_id", last}}, this, [this, last](const QJsonValue &, const CoreError &e) {
@@ -686,6 +688,11 @@ void MainWindow::onEvent(const QJsonObject &ev)
         updateNotice();
     } else if (type == "conversations_changed" || type == "contacts_changed" || type == "identity_changed") {
         m_listTimer->start();
+        // Names and photos of senders in the open chat follow contact changes.
+        if (type == "contacts_changed" && !m_current.isEmpty())
+            m_messagesTimer->start();
+    } else if (type == "settings_changed") {
+        loadQuickReaction(this);
     } else if (type == "history_cleared") {
         if (ev.value("conversation_id") == m_current.value("id")) {
             m_messagesTimer->stop();

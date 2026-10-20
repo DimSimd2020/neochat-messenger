@@ -98,9 +98,17 @@ final class OnboardingUITests: XCTestCase {
 
         // Touch a populated cell: the old swipe-back check only covered an empty chat.
         // Repeat after the reply composer changes the layout and opens the keyboard.
-        for _ in 0..<2 {
-            message.swipeLeft()
+        for i in 0..<2 {
+            // A swipe to the left replies: on the bubble, then on the empty part of the row.
+            if i == 0 {
+                message.swipeLeft()
+            } else {
+                let empty = message.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5))
+                empty.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
+            }
             XCTAssertEqual(app.state, .runningForeground)
+            XCTAssertTrue(app.buttons["Отменить ответ"].waitForExistence(timeout: 5))
+            app.buttons["Отменить ответ"].tap()
             XCTAssertTrue(input.exists)
             message.tap()
             XCTAssertTrue(app.buttons["Ответить"].waitForExistence(timeout: 5))
@@ -112,6 +120,12 @@ final class OnboardingUITests: XCTestCase {
             XCTAssertEqual(app.state, .runningForeground)
         }
         shot("08-message-interactions")
+
+        // A double tap puts the quick reaction (❤️ by default).
+        message.doubleTap()
+        let reacted = app.tables["Сообщения"].cells.matching(NSPredicate(format: "label CONTAINS %@", "❤️")).firstMatch
+        XCTAssertTrue(reacted.waitForExistence(timeout: 10))
+        shot("08-quick-reaction")
 
         // Cancellation keeps history, confirmation clears it while the chat stays open.
         app.buttons["Действия чата"].tap()

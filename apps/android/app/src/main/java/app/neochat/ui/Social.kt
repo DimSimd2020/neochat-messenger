@@ -30,6 +30,31 @@ import app.neochat.core.CoreClient
 import org.json.JSONObject
 
 /** Local preferences of this device (the core keeps account data). */
+/**
+ * The reaction a double tap puts on a message. It is an account setting: the core
+ * shares it with the user's other devices and reports changes as "settings_changed".
+ */
+object QuickReaction {
+    val CHOICES = listOf("❤️", "👍", "🔥", "😂", "😮", "😢", "🙏", "👏", "🎉", "😍", "🤝", "👀")
+
+    fun current(ctx: Context): String = Prefs.of(ctx).getString("quick_reaction", null) ?: "❤️"
+
+    fun load(ctx: Context, done: (() -> Unit)? = null) {
+        CoreClient.call("get_settings") { v, _ ->
+            val e = (v as? JSONObject)?.optString("quick_reaction").orEmpty()
+            if (e.isNotEmpty()) Prefs.of(ctx).edit().putString("quick_reaction", e).apply()
+            done?.invoke()
+        }
+    }
+
+    fun set(ctx: Context, e: String, done: (String?) -> Unit) {
+        CoreClient.call("set_settings", JSONObject().put("quick_reaction", e)) { _, err ->
+            if (err == null) Prefs.of(ctx).edit().putString("quick_reaction", e).apply()
+            done(err?.message)
+        }
+    }
+}
+
 object Prefs {
     fun of(ctx: Context): SharedPreferences = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
 

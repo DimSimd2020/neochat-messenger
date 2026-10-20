@@ -806,6 +806,29 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private var m = JSONObject()
         private var reactsId = ""
         private var reactsSig = ""
+        private var pendingTap: Runnable? = null
+
+        /**
+         * A tap opens the menu; a second tap within the double-tap time puts the quick
+         * reaction instead. Where reactions are not allowed the menu opens at once.
+         */
+        private fun tap(single: () -> Unit) {
+            val p = pendingTap
+            if (!canReact(m)) {
+                single()
+                return
+            }
+            if (p != null) {
+                removeCallbacks(p)
+                pendingTap = null
+                performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                react(m, QuickReaction.current(ctx))
+                return
+            }
+            val r = Runnable { pendingTap = null; single() }
+            pendingTap = r
+            postDelayed(r, android.view.ViewConfiguration.getDoubleTapTimeout().toLong())
+        }
 
         init {
             orientation = HORIZONTAL
@@ -873,7 +896,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             text.setTextIsSelectable(false)
             text.setLineSpacing(0f, 1.2f)
             text.setOnLongClickListener { menu(m, bubble); true }
-            text.setOnClickListener { menu(m, bubble) }
+            text.setOnClickListener { tap { menu(m, bubble) } }
             text.setOnTouchListener { v, e -> openLinkAt(v as TextView, e) }
             pollQuestion.maxWidth = maxText
             bubble.addView(text, LayoutParams(WRAP, WRAP))
@@ -893,12 +916,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             bubble.isLongClickable = true
             bubble.setOnLongClickListener { menu(m, bubble); true }
             // A tap opens reactions and actions, like a long press; photos open the viewer.
-            bubble.setOnClickListener { if (isImage(m)) openPhoto(m) else menu(m, bubble) }
-            setOnClickListener { menu(m, bubble) }
+            bubble.setOnClickListener { tap { if (isImage(m)) openPhoto(m) else menu(m, bubble) } }
+            setOnClickListener { tap { menu(m, bubble) } }
             setOnLongClickListener { menu(m, bubble); true }
         }
 
         fun bind(item: Item) {
+            if (item.m.str("id") != m.str("id")) pendingTap?.let { removeCallbacks(it); pendingTap = null }
             m = item.m
             val out = m.optBoolean("outgoing")
             val group = conv.str("kind") == "group"

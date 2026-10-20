@@ -23,6 +23,45 @@ enum Prefs {
 
 let chatSorts = [("activity", "По активности"), ("unread", "Сначала непрочитанные"), ("name", "По названию")]
 
+/// The reaction a double tap puts on a message. It is an account setting: the core
+/// shares it with the user's other devices and reports changes as "settings_changed".
+enum QuickReaction {
+    static let choices = ["❤️", "👍", "🔥", "😂", "😮", "😢", "🙏", "👏", "🎉", "😍", "🤝", "👀"]
+    private(set) static var current = UserDefaults.standard.string(forKey: "quick_reaction") ?? "❤️"
+    private static var observer: NSObjectProtocol?
+
+    static func start() {
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { n in
+            if n.userInfo?["type"] as? String == "settings_changed" { load() }
+        }
+        load()
+    }
+
+    static func load() {
+        Core.shared.call("get_settings") { r in
+            guard case .success(let v) = r, let e = (v as? JSON)?.str("quick_reaction"), !e.isEmpty else { return }
+            remember(e)
+        }
+    }
+
+    static func set(_ e: String, _ done: @escaping (String?) -> Void) {
+        Core.shared.call("set_settings", ["quick_reaction": e]) { r in
+            switch r {
+            case .failure(let err): done(err.message)
+            case .success: remember(e); done(nil)
+            }
+        }
+    }
+
+    private static func remember(_ e: String) {
+        guard e != current else { return }
+        current = e
+        UserDefaults.standard.set(e, forKey: "quick_reaction")
+        NotificationCenter.default.post(name: .prefsChanged, object: nil)
+    }
+}
+
 func memberCount(_ n: Int, channel: Bool = false) -> String {
     let m10 = n % 10, m100 = n % 100
     let w: String

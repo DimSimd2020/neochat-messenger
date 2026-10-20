@@ -10,6 +10,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         try? Core.shared.open()
         UNUserNotificationCenter.current().delegate = self
         _ = CallManager.shared
+        QuickReaction.start()
         NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { n in
             guard let ev = n.userInfo as? JSON else { return }
             switch ev.str("type") {
@@ -220,6 +221,8 @@ final class RootViewController: UIViewController {
     func showMain() {
         show(MainTabController())
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        QuickReaction.load()
+        WhatsNewViewController.showIfNeeded(from: self)
     }
 
     private func show(_ vc: UIViewController) {

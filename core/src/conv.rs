@@ -144,7 +144,15 @@ impl Inner {
     /// Refreshes one conversation; a 404 means we are no longer a member.
     pub fn fetch_conversation(&self, id: &str) -> Result<()> {
         match self.authed("GET", &format!("/v1/conversations/{id}"), None) {
-            Ok(c) => self.apply_conversation(&c),
+            Ok(c) => {
+                let new = !self.conversation_known(id)?;
+                self.apply_conversation(&c)?;
+                if new {
+                    // Another own device may have pinned or archived it already.
+                    crate::store::kv_set(&self.db().conn, "state_pull", b"1")?;
+                }
+                Ok(())
+            }
             Err(Error::Api { status: 404, .. }) => {
                 self.db().conn.execute("UPDATE conversations SET left_group=1, recipients='[]' WHERE id=?1", [id])?;
                 Ok(())

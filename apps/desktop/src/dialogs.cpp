@@ -2,6 +2,7 @@
 
 #include "calls.h"
 #include "core.h"
+#include "messages.h"
 #include "sheet.h"
 #include "theme.h"
 #include "widgets.h"
@@ -823,6 +824,27 @@ void settings(const DialogHost &h)
     notify->setChecked(QSettings().value("notifications/enabled", true).toBool());
     QObject::connect(notify, &QAbstractButton::toggled, sheet, [](bool on) { QSettings().setValue("notifications/enabled", on); });
     sheet->body()->addWidget(notify);
+    // Shared by the user's devices through the core; a double click puts it on a message.
+    auto *quick = new ui::Button(QStringLiteral("Быстрая реакция · ") + quickReaction(), ui::Button::Secondary);
+    quick->setToolTip(QStringLiteral("Двойной щелчок по сообщению ставит эту реакцию. Настройка общая для всех ваших устройств"));
+    QObject::connect(quick, &QAbstractButton::clicked, sheet, [=] {
+        QMenu menu(quick);
+        for (const QString &e : quickReactionChoices()) {
+            QAction *a = menu.addAction(e);
+            a->setCheckable(true);
+            a->setChecked(e == quickReaction());
+            QObject::connect(a, &QAction::triggered, sheet, [=] {
+                Core::instance()->call("set_settings", {{"quick_reaction", e}}, sheet, [=](const QJsonValue &, const CoreError &err) {
+                    if (!err.ok())
+                        return h.toast(err.message);
+                    QSettings().setValue("chat/quickReaction", e);
+                    quick->setText(QStringLiteral("Быстрая реакция · ") + e);
+                });
+            });
+        }
+        menu.exec(quick->mapToGlobal(QPoint(0, quick->height())));
+    });
+    sheet->body()->addWidget(quick);
     auto *update = new ui::Button(QStringLiteral("Проверить обновления · версия ") + QStringLiteral(NEOCHAT_VERSION), ui::Button::Secondary);
     QObject::connect(update, &QAbstractButton::clicked, sheet, [=] {
         if (h.checkUpdate)
@@ -841,6 +863,30 @@ void settings(const DialogHost &h)
     });
     sheet->body()->addWidget(logout);
     sheet->open();
+}
+
+// ---- release notes ----
+
+void whatsNew(const DialogHost &h)
+{
+    const QString version = QStringLiteral(NEOCHAT_VERSION);
+    Core::instance()->call("whats_new", {{"version", version}, {"platform", "windows"}}, h.host, [h, version](const QJsonValue &v, const CoreError &e) {
+        const QJsonObject o = v.toObject();
+        if (!e.ok() || !o.value("show").toBool())
+            return;
+        Core::instance()->call("whats_new_seen", {{"version", version}});
+        auto *sheet = new Sheet(h.host, o.value("title").toString(), 460);
+        for (const auto &item : o.value("items").toArray()) {
+            auto *l = new ui::Label(QStringLiteral("•  ") + item.toString(), 14);
+            l->setWordWrap(true);
+            sheet->body()->addWidget(l);
+        }
+        sheet->body()->addSpacing(8);
+        auto *ok = new ui::Button(QStringLiteral("Понятно"));
+        QObject::connect(ok, &QAbstractButton::clicked, sheet, [sheet] { sheet->close(); });
+        sheet->body()->addWidget(ok);
+        sheet->open();
+    });
 }
 
 // ---- profile ----

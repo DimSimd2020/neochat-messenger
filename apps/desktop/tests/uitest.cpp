@@ -514,6 +514,19 @@ void UiTest::socialFeatures()
     m_alice->call("sync_now");
     QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("reactions").toArray().size() == 2, 20000);
     shot("11e-reactions-big-emoji");
+    // The quick reaction is an account setting: the core reports the change and the
+    // window caches it; a double click replaces our 👍 with it.
+    Core::instance()->call("set_settings", {{"quick_reaction", QStringLiteral("🔥")}});
+    QTRY_COMPARE_WITH_TIMEOUT(quickReaction(), QStringLiteral("🔥"), 5000);
+    QTest::mouseDClick(view->viewport(), Qt::LeftButton, {}, at);
+    auto mine = [&] {
+        for (const auto &r : lastMessage(view).value("reactions").toArray())
+            if (r.toObject().value("mine").toBool())
+                return r.toObject().value("emoji").toString();
+        return QString();
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(mine(), QStringLiteral("🔥"), 10000);
+    shot("11e1-quick-reaction");
     // Enough history for more than two screens, then scroll to the top.
     for (int i = 0; i < 30; ++i)
         m_alice->call("send_text", {{"conversation_id", m_conv}, {"text", QStringLiteral("строка %1").arg(i)}});

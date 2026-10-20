@@ -109,7 +109,7 @@ impl Inner {
         Ok(Value::Array(rows.collect::<std::result::Result<_, _>>()?))
     }
 
-    // ---- archive and pins (this device only) ----
+    // ---- archive and pins (shared by own devices, see state.rs) ----
 
     /// Clear local history without losing sessions or an already encrypted retry.
     /// `hide` also removes the conversation from the list until the next message.
@@ -131,6 +131,9 @@ impl Inner {
         tx.execute("DELETE FROM messages WHERE conversation_id=?1", [id])?;
         tx.commit()?;
         drop(db);
+        if p["hide"] == true {
+            self.touch(&format!("chat:{id}"));
+        }
         self.emit(json!({"type": "history_cleared", "conversation_id": id, "hidden": p["hide"] == true}));
         self.emit(json!({"type": "conversations_changed"}));
         Ok(Value::Null)
@@ -141,6 +144,7 @@ impl Inner {
         let on = p["archived"].as_bool().unwrap_or(true);
         // Archiving unpins: pins live only in the main list.
         self.db().conn.execute("UPDATE conversations SET in_archive=?2, pinned=CASE WHEN ?2=1 THEN 0 ELSE pinned END WHERE id=?1", params![id, on as i64])?;
+        self.touch(&format!("chat:{id}"));
         self.emit(json!({"type": "conversations_changed"}));
         Ok(Value::Null)
     }
@@ -157,6 +161,7 @@ impl Inner {
         }
         db.conn.execute("UPDATE conversations SET pinned=?2, in_archive=CASE WHEN ?2>0 THEN 0 ELSE in_archive END WHERE id=?1", params![id, if on { now_ms() } else { 0 }])?;
         drop(db);
+        self.touch(&format!("chat:{id}"));
         self.emit(json!({"type": "conversations_changed"}));
         Ok(Value::Null)
     }
@@ -334,6 +339,7 @@ impl Inner {
         let id = s(&c, "user_id")?.to_string();
         // The scanned code matched the key: the same as comparing the safety number.
         self.db().conn.execute("UPDATE contacts SET verified=1 WHERE user_id=?1 AND key_changed=0", [&id])?;
+        self.contact_touch(&id);
         self.emit(json!({"type": "contacts_changed"}));
         self.contact_json(&id)
     }
@@ -374,7 +380,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn valid_reaction(e: &str) -> bool {
+pub(crate) fn valid_reaction(e: &str) -> bool {
     !e.is_empty() && e.len() <= 32 && emoji_count(e).is_some_and(|n| n == 1)
 }
 

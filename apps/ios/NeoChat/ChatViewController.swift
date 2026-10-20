@@ -907,6 +907,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 self.showMenu(m, from: c.bubbleView)
             }
             c.onReact = { [weak self] e in self?.react(m, e) }
+            c.onSwipeReply = m.str("kind") != "undecryptable" && !composer.isHidden ? { [weak self] in self?.setReply(m) } : nil
+            c.onDoubleTap = canReact(m) ? { [weak self] in self?.react(m, QuickReaction.current) } : nil
             if animateIds.remove(m.str("id")) != nil, !Theme.reducedMotion {
                 c.contentView.alpha = 0
                 c.contentView.transform = CGAffineTransform(translationX: 0, y: 12)
@@ -1134,8 +1136,17 @@ final class BubbleCell: UITableViewCell {
     var onRetry: (() -> Void)?
     var onPhoto: (() -> Void)?
     var onVote: ((Int) -> Void)?
+    private let doubleTap = UITapGestureRecognizer()
+    private let replyPan = UIPanGestureRecognizer()
+    private let replyPanDelegate = ReplySwipeDelegate()
+    private let replyIcon = UIImageView(image: UIImage(systemName: "arrowshape.turn.up.left.fill"))
+    private var replyArmed = false
     var onTap: (() -> Void)?
     var onReact: ((String) -> Void)?
+    /// Swipe left anywhere on the row, the empty part included.
+    var onSwipeReply: (() -> Void)?
+    /// Double tap anywhere on the row: the quick reaction.
+    var onDoubleTap: (() -> Void)? { didSet { doubleTap.isEnabled = onDoubleTap != nil } }
     var bubbleView: UIView { bubble }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -1197,6 +1208,28 @@ final class BubbleCell: UITableViewCell {
         bubbleTapDelegate.photo = photo
         bubbleTap.delegate = bubbleTapDelegate
         contentView.addGestureRecognizer(bubbleTap)
+        // A single tap waits for a possible second one only where a quick reaction is allowed.
+        doubleTap.numberOfTapsRequired = 2
+        doubleTap.addTarget(self, action: #selector(doubleTapped))
+        doubleTap.delegate = bubbleTapDelegate
+        doubleTap.isEnabled = false
+        contentView.addGestureRecognizer(doubleTap)
+        bubbleTap.require(toFail: doubleTap)
+        replyPan.addTarget(self, action: #selector(panned(_:)))
+        replyPanDelegate.cell = self
+        replyPan.delegate = replyPanDelegate
+        contentView.addGestureRecognizer(replyPan)
+        replyIcon.tintColor = Theme.accent
+        replyIcon.contentMode = .scaleAspectFit
+        replyIcon.alpha = 0
+        replyIcon.isAccessibilityElement = false
+        replyIcon.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(replyIcon)
+        NSLayoutConstraint.activate([
+            replyIcon.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            replyIcon.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            replyIcon.widthAnchor.constraint(equalToConstant: 24), replyIcon.heightAnchor.constraint(equalToConstant: 24),
+        ])
         bubble.isUserInteractionEnabled = true
         inner.isLayoutMarginsRelativeArrangement = true
         content.axis = .vertical
@@ -1233,6 +1266,63 @@ final class BubbleCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError() }
 
     @objc private func tapped() { onTap?() }
+
+    @objc private func doubleTapped() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        onDoubleTap?()
+    }
+
+    /// The row follows the finger to the left; past the threshold a release replies.
+    @objc private func panned(_ g: UIPanGestureRecognizer) {
+        let threshold: CGFloat = 56
+        switch g.state {
+        case .changed:
+            let raw = min(0, g.translation(in: contentView).x)
+            let dx = raw > -threshold ? raw : -threshold + (raw + threshold) * 0.3
+            contentView.transform = CGAffineTransform(translationX: max(dx, -88), y: 0)
+            let p = min(1, -raw / threshold)
+            replyIcon.alpha = p
+            replyIcon.transform = CGAffineTransform(scaleX: 0.5 + 0.5 * p, y: 0.5 + 0.5 * p)
+            let armed = raw <= -threshold
+            if armed != replyArmed {
+                replyArmed = armed
+                if armed { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+            }
+        case .ended, .cancelled, .failed:
+            let fire = g.state == .ended && replyArmed
+            replyArmed = false
+            let reset = { [self] in
+                contentView.transform = .identity
+                replyIcon.alpha = 0
+                replyIcon.transform = .identity
+            }
+            if Theme.reducedMotion {
+                reset()
+            } else {
+                UIView.animate(withDuration: 0.24, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0,
+                               options: [.allowUserInteraction, .beginFromCurrentState], animations: reset)
+            }
+            if fire { onSwipeReply?() }
+        default: break
+        }
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        replyArmed = false
+        replyIcon.alpha = 0
+        replyIcon.transform = .identity
+    }
+
+    override var accessibilityCustomActions: [UIAccessibilityCustomAction]? {
+        get {
+            var acts: [UIAccessibilityCustomAction] = []
+            if let r = onSwipeReply { acts.append(UIAccessibilityCustomAction(name: "Ответить") { _ in r(); return true }) }
+            if let q = onDoubleTap { acts.append(UIAccessibilityCustomAction(name: "Быстрая реакция " + QuickReaction.current) { _ in q(); return true }) }
+            return acts
+        }
+        set {}
+    }
 
     func bind(_ m: JSON, group: Bool, first: Bool, last: Bool) {
         boundId = m.str("id")
@@ -1414,6 +1504,18 @@ final class BubbleCell: UITableViewCell {
             if closed { row.isEnabled = false } else { row.onTap = { [weak self] in self?.onVote?(i) } }
             pollOptions.addArrangedSubview(row)
         }
+    }
+}
+
+/// Starts only on a mostly horizontal drag to the left, so scrolling and the
+/// edge swipe back (to the right) keep working.
+private final class ReplySwipeDelegate: NSObject, UIGestureRecognizerDelegate {
+    weak var cell: BubbleCell?
+
+    func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        guard let p = g as? UIPanGestureRecognizer, cell?.onSwipeReply != nil else { return false }
+        let v = p.velocity(in: p.view)
+        return v.x < 0 && abs(v.x) > abs(v.y) * 1.5
     }
 }
 

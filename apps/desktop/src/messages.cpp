@@ -1432,6 +1432,27 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
     QListView::mouseReleaseEvent(e);
 }
 
+void MessageView::mouseDoubleClickEvent(QMouseEvent *e)
+{
+    if (m_checkMode || e->button() != Qt::LeftButton)
+        return;
+    MessageLayout L;
+    const QJsonObject m = messageAt(e->pos(), &L);
+    if (m.isEmpty())
+        return;
+    // Buttons, links, photos and poll answers keep their own clicks.
+    bool control = L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty();
+    for (const QRectF &r : L.options)
+        control = control || r.contains(e->pos());
+    for (const QRectF &r : L.reacts)
+        control = control || r.contains(e->pos());
+    const QString kind = m.value("kind").toString();
+    if (control || !m_canReact || m_searching || !(kind == "text" || kind == "file" || kind == "poll") || m.value("status").toString() == "failed")
+        return;
+    clearSelection();
+    react(m, quickReaction());
+}
+
 QString MessageView::linkAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const
 {
     if (L.text.isNull() || !L.options.isEmpty() || !L.text.contains(pos))
@@ -1682,5 +1703,26 @@ void MessageView::retry(const QJsonObject &m)
     Core::instance()->call("retry_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
         if (!e.ok())
             emit toast(e.message);
+    });
+}
+
+// ---- quick reaction ----
+
+QString quickReaction()
+{
+    return QSettings().value("chat/quickReaction", QString::fromUtf8("❤️")).toString();
+}
+
+QStringList quickReactionChoices()
+{
+    return QString::fromUtf8("❤️ 👍 🔥 😂 😮 😢 🙏 👏 🎉 😍 🤝 👀").split(' ', Qt::SkipEmptyParts);
+}
+
+void loadQuickReaction(QObject *ctx)
+{
+    Core::instance()->call("get_settings", {}, ctx, [](const QJsonValue &v, const CoreError &e) {
+        const QString r = v.toObject().value("quick_reaction").toString();
+        if (e.ok() && !r.isEmpty())
+            QSettings().setValue("chat/quickReaction", r);
     });
 }
