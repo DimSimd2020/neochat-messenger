@@ -77,13 +77,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             core/target
-          key: android-core-${{ hashFiles('core/Cargo.lock') }}
+          key: android-core-noasm-${{ hashFiles('core/Cargo.lock') }}
 
       - name: Core (Android)
         working-directory: core
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          OPENSSL_NO_ASM: "1"
         run: cargo ndk -t arm64-v8a -t x86_64 --platform 26 -o ../apps/android/app/src/main/jniLibs build --release --lib
 
       - name: APK
@@ -187,8 +188,15 @@ jobs:
           if (-not (Test-Path $exe)) { $exe = "apps\desktop\build\Release\neochat.exe" }
           Copy-Item $exe "$stage\neochat.exe"
           windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime "$stage\neochat.exe"
-          Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT\*.dll" |
-            Copy-Item -Destination $stage
+          $crt = $null
+          if ($env:VCToolsRedistDir) {
+            $crt = Get-ChildItem "$env:VCToolsRedistDir\x64\Microsoft.VC*.CRT\*.dll" -ErrorAction SilentlyContinue
+          }
+          if (-not $crt) {
+            $crt = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\*.dll"
+          }
+          if (-not $crt) { throw "VC CRT DLLs not found" }
+          $crt | Copy-Item -Destination $stage
           if (Test-Path LICENSE) { Copy-Item LICENSE "$stage\LICENSE.txt" }
           $stageAbs = (Resolve-Path $stage).Path
           $msi = "apps\desktop\build\NeoChat-$ver-x64.msi"
