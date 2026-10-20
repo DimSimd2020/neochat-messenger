@@ -85,7 +85,8 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           OPENSSL_NO_ASM: "1"
-        run: cargo ndk -t arm64-v8a -t x86_64 --platform 26 -o ../apps/android/app/src/main/jniLibs build --release --lib
+        # x86_64 NDK r26 cannot assemble OpenSSL SM3; phones need arm64.
+        run: cargo ndk -t arm64-v8a --platform 26 -o ../apps/android/app/src/main/jniLibs build --release --lib
 
       - name: APK
         working-directory: apps/android
