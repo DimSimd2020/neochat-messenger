@@ -56,6 +56,8 @@ public:
     void setLabel(const QString &label);
     // Rail style: a filled tile marks the checked section.
     void setRail(bool rail) { m_rail = rail; }
+    // Floating style: raised circle with a border and an accent icon.
+    void setFloating(bool floating) { m_floating = floating; }
     QSize sizeHint() const override { return {m_size, m_size}; }
 
 protected:
@@ -69,6 +71,7 @@ private:
     QString m_icon;
     int m_size;
     bool m_rail = false;
+    bool m_floating = false;
     bool m_keyboardFocus = false;
     QVariantAnimation m_hover;
 };

@@ -848,7 +848,8 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
         if (!running)
             m_anim.stop();
     });
-    m_jump = new ui::IconButton("down", QStringLiteral("К новым сообщениям"), this, 44);
+    m_jump = new ui::IconButton("down", QStringLiteral("В самый низ"), this, 44);
+    m_jump->setFloating(true);
     m_jump->hide();
     connect(m_jump, &QAbstractButton::clicked, this, &MessageView::scrollToNewest);
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int v) {
@@ -858,6 +859,10 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
             m_newBelow = 0;
             m_jump->hide();
             emit readable();
+        } else if (!m_searching && verticalScrollBar()->maximum() - v > viewport()->height() && !m_jump->isVisible()) {
+            // More than a screen of history below: offer the way back down.
+            placeJump();
+            m_jump->show();
         }
     });
     connect(Theme::instance(), &Theme::changed, viewport(), qOverload<>(&QWidget::update));

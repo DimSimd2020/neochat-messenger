@@ -268,13 +268,20 @@ void IconButton::paintEvent(QPaintEvent *)
         bg = c.raised;
         bg.setAlphaF(hover * 0.85);
     }
-    if (bg.alpha() > 0) {
+    if (m_floating) {
+        QColor fill = c.surface;
+        if (isDown() || hover > 0)
+            fill = c.raised;
+        p.setPen(QPen(c.border, 1));
+        p.setBrush(fill);
+        p.drawEllipse(r.adjusted(0.5, 0.5, -0.5, -0.5));
+    } else if (bg.alpha() > 0) {
         p.setPen(Qt::NoPen);
         p.setBrush(bg);
         p.drawRoundedRect(r, radius, radius);
     }
     const qreal s = m_size >= 44 ? 24 : 22;
-    const QColor ic = (m_rail && isChecked()) ? c.accent : (isEnabled() ? c.text : c.muted);
+    const QColor ic = (m_rail && isChecked()) || m_floating ? c.accent : (isEnabled() ? c.text : c.muted);
     paintIcon(&p, QRectF((r.width() - s) / 2, (r.height() - s) / 2, s, s), m_icon, ic);
     if (hasFocus() && m_keyboardFocus)
         paintFocusRing(&p, r, radius);

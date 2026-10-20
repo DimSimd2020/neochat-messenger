@@ -21,6 +21,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMenu>
+#include <QScrollBar>
 #include <QTimer>
 #include <QToolButton>
 #include <QSettings>
@@ -399,6 +400,17 @@ void UiTest::socialFeatures()
     m_alice->call("sync_now");
     QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("reactions").toArray().size() == 2, 20000);
     shot("11e-reactions-big-emoji");
+    // Enough history for more than two screens, then scroll to the top.
+    for (int i = 0; i < 30; ++i)
+        m_alice->call("send_text", {{"conversation_id", m_conv}, {"text", QStringLiteral("строка %1").arg(i)}});
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("text").toString() == QStringLiteral("строка 29"), 30000);
+    QTRY_VERIFY(view->atBottom());
+    view->verticalScrollBar()->setValue(0);
+    QTRY_VERIFY(find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName() == QStringLiteral("В самый низ") && b->isVisible(); }));
+    shot("11e2-jump-down");
+    find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName() == QStringLiteral("В самый низ"); })->click();
+    QTRY_VERIFY(view->atBottom());
     auto *composer = find<Composer>([](Composer *) { return true; });
     composer->setReply(lastMessage(view));
     shot("11e2-inline-reply");
