@@ -49,7 +49,7 @@ final class OnboardingUITests: XCTestCase {
         let channel = app.textFields["Название канала"]
         XCTAssertTrue(channel.waitForExistence(timeout: 5))
         channel.tap()
-        channel.typeText("Проверка свайпа 061")
+        channel.typeText("Проверка чатов 062")
         app.buttons["Создать канал"].tap()
         let input = app.textViews["Текст сообщения"]
         XCTAssertTrue(input.waitForExistence(timeout: 20))
@@ -69,6 +69,59 @@ final class OnboardingUITests: XCTestCase {
             }
         }
         shot("06-swipe-back")
+
+        // Pin and archive through the same selection toolbar available for a batch.
+        selectChat()
+        app.buttons["Закрепить"].tap()
+        XCTAssertTrue(app.buttons["Новый чат"].waitForExistence(timeout: 5))
+        selectChat()
+        app.buttons["Архивировать"].tap()
+        XCTAssertTrue(app.buttons["Новый чат"].waitForExistence(timeout: 5))
+        let archive = app.buttons["Архив"]
+        XCTAssertFalse(archive.isHittable)
+        revealArchive()
+        XCTAssertTrue(archive.isHittable)
+        shot("07-archive-revealed")
+        app.buttons["Скрыть архив"].tap()
+        XCTAssertFalse(archive.isHittable)
+        revealArchive()
+        archive.tap()
+        XCTAssertTrue(app.buttons["Сортировка архива"].waitForExistence(timeout: 5))
+        app.tables.cells.firstMatch.tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        XCTAssertEqual(input.value as? String, "черновик")
+        app.buttons["Отправить"].tap()
+        let message = app.tables["Сообщения"].cells.matching(NSPredicate(format: "label CONTAINS %@", "черновик")).firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 10))
+        shot("08-chat-opened")
+
+        // Cancellation keeps history, confirmation clears it while the chat stays open.
+        app.buttons["Действия чата"].tap()
+        app.buttons["Очистить чат…"].tap()
+        XCTAssertTrue(app.alerts["Очистить чат?"].waitForExistence(timeout: 5))
+        app.alerts.buttons["Отмена"].tap()
+        XCTAssertTrue(message.exists)
+        app.buttons["Действия чата"].tap()
+        app.buttons["Очистить чат…"].tap()
+        app.alerts.buttons["Очистить"].tap()
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: message)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed)
+        XCTAssertTrue(input.exists)
+        shot("09-history-cleared")
+    }
+
+    private func selectChat() {
+        app.buttons["Выбрать чаты"].tap()
+        XCTAssertTrue(app.buttons["Готово"].waitForExistence(timeout: 5))
+        app.tables.cells.firstMatch.tap()
+    }
+
+    private func revealArchive() {
+        let table = app.tables.firstMatch
+        let start = table.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let end = table.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(app.buttons["Скрыть архив"].waitForExistence(timeout: 5))
     }
 
     /// Writes a PNG next to the host checkout; the simulator shares the host file system.

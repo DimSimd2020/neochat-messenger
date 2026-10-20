@@ -306,6 +306,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 }
             },
         ]))]
+        navigationItem.rightBarButtonItems?.last?.accessibilityLabel = "Действия чата"
 
         let stack = UIStackView(arrangedSubviews: [notice, table, composer, goneLabel])
         stack.axis = .vertical
