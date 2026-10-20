@@ -862,7 +862,7 @@ func pinSwipe(_ host: UIViewController, _ c: JSON) -> UISwipeActionsConfiguratio
 
 func bindChatCell(_ cell: RowCell, _ c: JSON) {
     let kind = c.str("kind")
-    cell.avatar.set(c.str("title"), seed: c.str("peer_user_id").isEmpty ? c.str("id") : c.str("peer_user_id"), avatar: c.str("avatar"))
+    cell.avatar.set(c.str("title"), seed: c.str("peer_user_id").isEmpty ? c.str("id") : c.str("peer_user_id"), avatar: c.str("avatar_path"))
     cell.avatar.online = kind == "direct" && (c.obj("presence")?.bool("online") ?? false)
     cell.title.text = c.str("title")
     cell.time.text = formatListTime(c.int64("last_activity"))

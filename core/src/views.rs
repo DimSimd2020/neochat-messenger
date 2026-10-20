@@ -110,9 +110,9 @@ impl Inner {
                 "conversation_id": r.conversation_id,
                 "sender_user_id": r.sender,
                 "sender_name": sender_name,
-                "sender_avatar": if r.outgoing { crate::store::kv_get_str(&db.conn, "avatar")?.unwrap_or_default() } else {
+                "sender_avatar_path": self.avatar_path(&if r.outgoing { crate::store::kv_get_str(&db.conn, "avatar")?.unwrap_or_default() } else {
                     db.conn.query_row("SELECT avatar FROM contacts WHERE user_id=?1", [&r.sender], |x| x.get::<_, String>(0)).optional()?.unwrap_or_default()
-                },
+                }),
                 "sender_tag": if channel.is_some() { json!("") } else { tags.get(&r.sender).cloned().unwrap_or(json!("")) },
                 "channel": channel.is_some(),
                 "spans": if r.kind == "text" || r.kind == "file" { json!(crate::markdown::spans(&r.body)) } else { json!([]) },

@@ -1229,7 +1229,7 @@ final class BubbleCell: UITableViewCell {
         trail.isActive = true
         topGap.constant = first ? 8 : 3
         avatar.isHidden = !(group && !out && last)
-        avatar.set(m.str("sender_name"), seed: m.str("sender_user_id"), avatar: m.str("sender_avatar"))
+        avatar.set(m.str("sender_name"), seed: m.str("sender_user_id"), avatar: m.str("sender_avatar_path"))
         sender.isHidden = !(group && !out && first)
         sender.text = m.str("sender_name") + (m.str("sender_tag").isEmpty ? "" : " · " + m.str("sender_tag"))
         // One to three emoji without text are shown large, without a bubble.

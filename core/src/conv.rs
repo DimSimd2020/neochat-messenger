@@ -349,7 +349,7 @@ impl Inner {
         let mut peer_verified = false;
         for m in &member_ids {
             if *m == me {
-                members_out.push(json!({"user_id": m, "display_name": "Вы", "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true, "avatar": kv_get_str(&db.conn, "avatar")?.unwrap_or_default(),
+                members_out.push(json!({"user_id": m, "display_name": "Вы", "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true, "avatar_path": self.avatar_path(&kv_get_str(&db.conn, "avatar")?.unwrap_or_default()),
                     "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
                 continue;
             }
@@ -363,7 +363,7 @@ impl Inner {
                 if Some(m) == peer.as_ref() {
                     peer_verified = v == 1;
                 }
-                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio, "avatar": avatar,
+                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio, "avatar_path": self.avatar_path(&avatar),
                     "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
             }
         }
@@ -393,7 +393,7 @@ impl Inner {
             "kind": kind,
             "title": display,
             "peer_user_id": peer,
-            "avatar": members_out.iter().find(|m| Some(m["user_id"].as_str().unwrap_or("")) == peer.as_deref()).map(|m| m["avatar"].clone()).unwrap_or(json!("")),
+            "avatar_path": members_out.iter().find(|m| Some(m["user_id"].as_str().unwrap_or("")) == peer.as_deref()).map(|m| m["avatar_path"].clone()).unwrap_or(json!("")),
             "owner_id": owner,
             "is_owner": owner.as_deref() == Some(me.as_str()),
             "members": members_out,

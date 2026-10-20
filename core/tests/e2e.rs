@@ -554,9 +554,11 @@ fn reactions_bio_presence_typing_qr_archive_pins_lock() {
     let bad = qr["link"].as_str().unwrap().replace("?k=", "?k=x");
     assert!(alice.try_call("add_contact_qr", json!({"link": bad})).is_err());
 
-    let avatar = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, include_bytes!("fixtures/avatar.jpg"));
-    bob.call("set_profile", json!({"bio": "Люблю чай", "avatar": avatar}));
-    assert_eq!(bob.call("status", json!({}))["avatar"], avatar);
+    let avatar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/avatar.jpg");
+    bob.call("set_profile", json!({"bio": "Люблю чай"}));
+    bob.call("set_avatar", json!({"path": avatar}));
+    let photo = bob.call("status", json!({}))["avatar_path"].as_str().unwrap().to_string();
+    assert_eq!(std::fs::read(photo).unwrap(), include_bytes!("fixtures/avatar.jpg"));
     assert!(bob.try_call("set_profile", json!({"bio": "я".repeat(101)})).is_err());
     let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
     alice.call("send_text", json!({"conversation_id": cid, "text": "👍"}));
@@ -577,11 +579,11 @@ fn reactions_bio_presence_typing_qr_archive_pins_lock() {
     alice.sync();
     let info = alice.call("contact_info", json!({"user_id": b["user_id"]}));
     assert_eq!(info["bio"], "Люблю чай");
-    assert_eq!(info["avatar"], avatar);
-    assert_eq!(alice.call("get_conversation", json!({"conversation_id": cid}))["avatar"], avatar);
-    bob.call("set_profile", json!({"avatar": ""}));
+    assert_eq!(std::fs::read(info["avatar_path"].as_str().unwrap()).unwrap(), include_bytes!("fixtures/avatar.jpg"));
+    assert_eq!(alice.call("get_conversation", json!({"conversation_id": cid}))["avatar_path"], info["avatar_path"]);
+    bob.call("set_avatar", json!({"path": ""}));
     alice.sync();
-    assert_eq!(alice.call("contact_info", json!({"user_id": b["user_id"]}))["avatar"], "");
+    assert_eq!(alice.call("contact_info", json!({"user_id": b["user_id"]}))["avatar_path"], "");
     let p = alice.call("presence", json!({"user_ids": [b["user_id"]], "tz_offset": 180}));
     let st = p[b["user_id"].as_str().unwrap()]["status"].as_str().unwrap().to_string();
     assert!(st == "online" || st == "exact", "{st}");

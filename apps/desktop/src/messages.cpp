@@ -668,7 +668,7 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         }
     }
     if (!L.avatar.isNull())
-        ui::paintAvatar(p, L.avatar, m.value("sender_name").toString(), m.value("sender_user_id").toString(), m.value("sender_avatar").toString());
+        ui::paintAvatar(p, L.avatar, m.value("sender_name").toString(), m.value("sender_user_id").toString(), m.value("sender_avatar_path").toString());
 
     const qreal R = 18, r = 6;
     const QPainterPath bubble = out ? ui::roundedPath(L.bubble, R, it->groupStart ? R : r, r, R)

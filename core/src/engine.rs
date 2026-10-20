@@ -56,7 +56,7 @@ impl Core {
     pub fn open(config: &Value, cb: EventCallback) -> Result<Core> {
         let data_dir = PathBuf::from(config["data_dir"].as_str().ok_or_else(|| Error::Invalid("Не указан каталог данных".into()))?);
         let key = hex::decode(config["db_key"].as_str().unwrap_or("")).map_err(|_| Error::Invalid("Некорректный ключ хранилища".into()))?;
-        for d in ["files", "outgoing", "tmp"] {
+        for d in ["files", "outgoing", "tmp", "avatars"] {
             std::fs::create_dir_all(data_dir.join(d))?;
         }
         let db = Db::open(data_dir.join("neochat.db").to_str().unwrap_or("neochat.db"), &key)?;
@@ -252,6 +252,7 @@ impl Inner {
             "qr_login_approve" => self.qr_login_approve(p),
             "account_settings" => self.authed("GET", "/v1/accounts/current/settings", None),
             "set_profile" => self.set_profile(p),
+            "set_avatar" => self.set_avatar(p),
             "check_update" => self.check_update(p),
             "download_update" => self.download_update(p),
             "set_two_factor" => self
@@ -331,7 +332,7 @@ impl Inner {
             "logged_in": kv_get(c, "refresh_token")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "display_name": kv_get_str(c, "display_name")?,
             "bio": kv_get_str(c, "bio")?.unwrap_or_default(),
-            "avatar": kv_get_str(c, "avatar")?.unwrap_or_default(),
+            "avatar_path": self.avatar_path(&kv_get_str(c, "avatar")?.unwrap_or_default()),
             "number": kv_get_str(c, "number")?,
             "has_device_keys": kv_get(c, "device_identity")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "user_id": kv_get_str(c, "user_id")?,
@@ -811,7 +812,7 @@ impl Inner {
         }
         tx.execute(
             "UPDATE contacts SET username=?2, profile_name=?3, number=?4, bio=?5, avatar=?6 WHERE user_id=?1",
-            params![user_id, s(u, "username")?, u["display_name"].as_str().unwrap_or("").trim(), u["number"].as_str().unwrap_or(""), u["bio"].as_str().unwrap_or("").chars().take(100).collect::<String>(), u["avatar"].as_str().filter(|v| v.len() <= 65536).unwrap_or("")],
+            params![user_id, s(u, "username")?, u["display_name"].as_str().unwrap_or("").trim(), u["number"].as_str().unwrap_or(""), u["bio"].as_str().unwrap_or("").chars().take(100).collect::<String>(), u["avatar_id"].as_str().unwrap_or("")],
         )?;
         if let Some((first, last)) = as_contact {
             tx.execute(
@@ -830,6 +831,7 @@ impl Inner {
         }
         tx.commit()?;
         drop(db);
+        let _ = self.cache_user_avatar(u);
         if key_changed {
             self.emit(json!({"type": "identity_changed", "user_id": user_id}));
         }
@@ -845,8 +847,9 @@ impl Inner {
         kv_set(&db.conn, "display_name", u["display_name"].as_str().unwrap_or("").as_bytes())?;
         kv_set(&db.conn, "number", u["number"].as_str().unwrap_or("").as_bytes())?;
         kv_set(&db.conn, "bio", u["bio"].as_str().unwrap_or("").as_bytes())?;
-        kv_set(&db.conn, "avatar", u["avatar"].as_str().filter(|v| v.len() <= 65536).unwrap_or("").as_bytes())?;
+        kv_set(&db.conn, "avatar", u["avatar_id"].as_str().unwrap_or("").as_bytes())?;
         drop(db);
+        let _ = self.cache_user_avatar(&u);
         self.emit(json!({"type": "account_changed"}));
         Ok(())
     }
@@ -867,12 +870,6 @@ impl Inner {
                 return Err(Error::Invalid("О себе: до 100 символов".into()));
             }
             body["bio"] = json!(bio);
-        }
-        if let Some(avatar) = p["avatar"].as_str() {
-            if avatar.len() > 65536 || (!avatar.is_empty() && (unb64(avatar)?.len() > 49152 || !unb64(avatar)?.starts_with(&[0xff, 0xd8, 0xff]))) {
-                return Err(Error::Invalid("Аватар: JPEG до 48 КБ".into()));
-            }
-            body["avatar"] = json!(avatar);
         }
         self.authed("PUT", "/v1/accounts/current/profile", Some(&body))?;
         self.refresh_profile()?;
@@ -924,7 +921,7 @@ impl Inner {
                         "profile_name": r.get::<_, String>(8)?,
                         "number": r.get::<_, String>(9)?,
                         "bio": r.get::<_, String>(10)?,
-                        "avatar": r.get::<_, String>(11)?,
+                        "avatar_path": self.avatar_path(&r.get::<_, String>(11)?),
                         "verified": r.get::<_, i64>(4)? == 1,
                         "key_changed": r.get::<_, i64>(5)? == 1,
                         "is_contact": r.get::<_, i64>(6)? == 1,

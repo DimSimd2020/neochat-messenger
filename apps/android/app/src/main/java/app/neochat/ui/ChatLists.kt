@@ -70,7 +70,7 @@ object Typing {
 /** Fills a chat list row: title, preview or typing, pin, online dot, unread. */
 fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
     val title = c.str("title")
-    row.avatar.set(title, c.str("peer_user_id").ifEmpty { c.str("id") }, c.str("avatar"))
+    row.avatar.set(title, c.str("peer_user_id").ifEmpty { c.str("id") }, c.str("avatar_path"))
     row.avatar.online = c.optJSONObject("presence")?.optBoolean("online") == true
     row.title.text = title
     row.time.text = formatListTime(c.optLong("last_activity"))

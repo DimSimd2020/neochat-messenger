@@ -203,7 +203,7 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
         ui::paintIcon(p, avatar.adjusted(12, 12, -12, -12), "archive", QColor(Qt::white), 2.0);
     } else {
         const QString kind = o.value("kind").toString();
-        ui::paintAvatar(p, avatar, o.value("title").toString(), kind == "direct" && !o.value("peer_user_id").toString().isEmpty() ? o.value("peer_user_id").toString() : o.value("id").toString(), o.value("avatar").toString());
+        ui::paintAvatar(p, avatar, o.value("title").toString(), kind == "direct" && !o.value("peer_user_id").toString().isEmpty() ? o.value("peer_user_id").toString() : o.value("id").toString(), o.value("avatar_path").toString());
         if (kind == "direct" && o.value("presence").toObject().value("online").toBool()) {
             const QRectF dot(avatar.right() - 12, avatar.bottom() - 12, 14, 14);
             p->setPen(QPen(selected ? c.selected : c.surface, 2.5));

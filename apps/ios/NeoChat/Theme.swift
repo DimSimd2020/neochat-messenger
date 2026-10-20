@@ -274,9 +274,9 @@ final class AvatarView: UIView {
     func set(_ name: String, seed: String, avatar: String = "") {
         icon.isHidden = true
         photo.image = nil
-        if !avatar.isEmpty && avatar.utf8.count <= 65536 {
+        if !avatar.isEmpty {
             if let cached = Self.images.object(forKey: avatar as NSString) { photo.image = cached }
-            else if let data = Data(base64Encoded: avatar), let image = UIImage(data: data), image.size.width <= 512, image.size.height <= 512 {
+            else if let image = UIImage(contentsOfFile: avatar), image.size.width <= 512, image.size.height <= 512 {
                 Self.images.countLimit = 48
                 Self.images.setObject(image, forKey: avatar as NSString)
                 photo.image = image

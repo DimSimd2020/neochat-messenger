@@ -112,11 +112,11 @@ QString initials(const QString &name)
 
 void paintAvatar(QPainter *p, const QRectF &r, const QString &name, const QString &seed, const QString &avatar)
 {
-    if (!avatar.isEmpty() && avatar.size() <= 65536) {
+    if (!avatar.isEmpty()) {
         QPixmap photo;
         const QString key = "avatar:" + avatar;
         if (!QPixmapCache::find(key, &photo)) {
-            photo.loadFromData(QByteArray::fromBase64(avatar.toLatin1()), "JPEG");
+            photo.load(avatar, "JPEG");
             if (!photo.isNull() && photo.width() <= 512 && photo.height() <= 512) QPixmapCache::insert(key, photo);
             else photo = {};
         }

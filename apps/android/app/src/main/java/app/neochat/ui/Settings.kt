@@ -209,7 +209,7 @@ class SettingsPage(private val act: MainActivity) {
             status = s
             val user = s.str("username")
             val display = s.str("display_name").ifEmpty { user }
-            avatar.set(display, s.str("user_id"), s.str("avatar"))
+            avatar.set(display, s.str("user_id"), s.str("avatar_path"))
             name.text = display
             sub.text = "@$user" + s.str("number").takeIf { it.isNotEmpty() }?.let { " · ID $it" }.orEmpty()
             bio.text = s.str("bio")
@@ -262,8 +262,8 @@ class SettingsPage(private val act: MainActivity) {
 
     private fun editAvatar() {
         val menu = PopupMenu(act, avatar).add("Выбрать фото") { pickProfilePhoto(act) { load() } }
-        if (status.str("avatar").isNotEmpty()) menu.add("Удалить фото", danger = true) {
-            CoreClient.call("set_profile", JSONObject().put("avatar", "")) { _, e -> if (e != null) act.toast(e.message) else load() }
+        if (status.str("avatar_path").isNotEmpty()) menu.add("Удалить фото", danger = true) {
+            CoreClient.call("set_avatar", JSONObject().put("path", "")) { _, e -> if (e != null) act.toast(e.message) else load() }
         }
         menu.show()
     }

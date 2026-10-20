@@ -593,7 +593,7 @@ final class ContactsViewController: ListViewController {
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: RowCell.id, for: indexPath) as! RowCell
         let c = rows[indexPath.row]
-        cell.avatar.set(c.str("display_name"), seed: c.str("user_id"), avatar: c.str("avatar"))
+        cell.avatar.set(c.str("display_name"), seed: c.str("user_id"), avatar: c.str("avatar_path"))
         cell.title.text = c.str("display_name")
         cell.time.text = ""
         cell.badge.set(0)
@@ -682,8 +682,8 @@ final class ProfileViewController: UIViewController, PHPickerViewControllerDeleg
         Core.shared.call("status") { [weak self] r in
             guard let self, case .success(let v) = r, let s = v as? JSON else { return }
             let display = s.str("display_name").isEmpty ? s.str("username") : s.str("display_name")
-            self.avatar.set(display, seed: s.str("user_id"), avatar: s.str("avatar"))
-            self.hasAvatar = !s.str("avatar").isEmpty
+            self.avatar.set(display, seed: s.str("user_id"), avatar: s.str("avatar_path"))
+            self.hasAvatar = !s.str("avatar_path").isEmpty
             self.name.text = display
             self.sub.text = "@" + s.str("username") + (s.str("number").isEmpty ? "" : " · ID " + s.str("number"))
             self.bio.text = s.str("bio")
@@ -741,12 +741,19 @@ final class ProfileViewController: UIViewController, PHPickerViewControllerDeleg
                 DispatchQueue.main.async { self?.toast("Не удалось подготовить фото") }
                 return
             }
-            DispatchQueue.main.async { self?.saveAvatar(data.base64EncodedString()) }
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("avatar-\(UUID().uuidString).jpg")
+            do { try data.write(to: file, options: .atomic) }
+            catch { DispatchQueue.main.async { self?.toast("Не удалось подготовить фото") }; return }
+            DispatchQueue.main.async {
+                guard let self else { try? FileManager.default.removeItem(at: file); return }
+                self.saveAvatar(file.path)
+            }
         }
     }
 
-    private func saveAvatar(_ avatar: String) {
-        Core.shared.call("set_profile", ["avatar": avatar]) { [weak self] r in
+    private func saveAvatar(_ path: String) {
+        Core.shared.call("set_avatar", ["path": path]) { [weak self] r in
+            if !path.isEmpty { try? FileManager.default.removeItem(atPath: path) }
             switch r {
             case .failure(let e): self?.toast(e.message)
             case .success: self?.reload()

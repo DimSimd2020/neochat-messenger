@@ -444,7 +444,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     private fun bindContact(row: ListRow, c: JSONObject) {
         val name = c.str("display_name")
-        row.avatar.set(name, c.str("user_id"), c.str("avatar"))
+        row.avatar.set(name, c.str("user_id"), c.str("avatar_path"))
         row.title.text = name
         if (c.optBoolean("key_changed")) {
             row.subtitle.text = "Ключ изменился — сверьте код"

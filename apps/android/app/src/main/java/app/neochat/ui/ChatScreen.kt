@@ -457,7 +457,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (e != null) return@call act.toast(e.message)
             conv = v as JSONObject
             title.text = conv.str("title")
-            avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId }, conv.str("avatar"))
+            avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId }, conv.str("avatar_path"))
             val members = conv.optJSONArray("members") ?: JSONArray()
             val channel = conv.str("kind") == "channel"
             baseSubtitle = when (conv.str("kind")) {
@@ -885,7 +885,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             gravity = (if (out) Gravity.END else Gravity.START) or Gravity.BOTTOM
             setPadding(if (out) dp(48) else dp(4), if (item.firstInRun) dp(8) else dp(3), if (out) dp(4) else dp(32), 0)
             av.visibility = if (group && !out) (if (item.lastInRun) VISIBLE else INVISIBLE) else GONE
-            av.set(m.str("sender_name"), m.str("sender_user_id"), m.str("sender_avatar"))
+            av.set(m.str("sender_name"), m.str("sender_user_id"), m.str("sender_avatar_path"))
             sender.visibility = if (group && !out && item.firstInRun) VISIBLE else GONE
             sender.text = m.str("sender_name") + m.str("sender_tag").let { if (it.isEmpty()) "" else " · $it" }
             (col.layoutParams as LayoutParams).gravity = if (out) Gravity.END else Gravity.START

@@ -421,9 +421,8 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
         this.name = name
         this.seed = seed
         icon = null
-        photo = if (avatar.isEmpty() || avatar.length > 65536) null else images.get(avatar) ?: runCatching {
-            val bytes = android.util.Base64.decode(avatar, android.util.Base64.DEFAULT)
-            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.takeIf { it.width <= 512 && it.height <= 512 }?.also { images.put(avatar, it) }
+        photo = if (avatar.isEmpty()) null else images.get(avatar) ?: runCatching {
+            android.graphics.BitmapFactory.decodeFile(avatar)?.takeIf { it.width <= 512 && it.height <= 512 }?.also { images.put(avatar, it) }
         }.getOrNull()
         invalidate()
     }

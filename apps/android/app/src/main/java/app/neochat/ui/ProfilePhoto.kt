@@ -3,10 +3,8 @@ package app.neochat.ui
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
-import android.util.Base64
 import app.neochat.core.CoreClient
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
 
 fun pickProfilePhoto(act: MainActivity, done: () -> Unit) {
@@ -34,15 +32,14 @@ fun pickProfilePhoto(act: MainActivity, done: () -> Unit) {
                 val side = minOf(source.width, source.height)
                 val crop = Bitmap.createBitmap(source, (source.width - side) / 2, (source.height - side) / 2, side, side)
                 val square = Bitmap.createScaledBitmap(crop, 256, 256, true)
-                val out = ByteArrayOutputStream()
-                square.compress(Bitmap.CompressFormat.JPEG, 75, out)
-                require(out.size() <= 49152)
-                Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+                tmp.outputStream().use { require(square.compress(Bitmap.CompressFormat.JPEG, 75, it)) }
+                require(tmp.length() <= 49152)
+                tmp.absolutePath
             }.getOrNull()
-            tmp.delete()
             act.runOnUiThread {
-                if (avatar == null) { act.toast("Не удалось прочитать фото. Выберите изображение до 25 МБ"); return@runOnUiThread }
-                CoreClient.call("set_profile", JSONObject().put("avatar", avatar)) { _, e ->
+                if (avatar == null) { tmp.delete(); act.toast("Не удалось прочитать фото. Выберите изображение до 25 МБ"); return@runOnUiThread }
+                CoreClient.call("set_avatar", JSONObject().put("path", avatar)) { _, e ->
+                    tmp.delete()
                     if (e != null) act.toast(e.message) else done()
                 }
             }

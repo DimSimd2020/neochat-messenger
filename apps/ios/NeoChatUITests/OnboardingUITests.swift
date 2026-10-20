@@ -119,10 +119,14 @@ final class OnboardingUITests: XCTestCase {
 
     private func revealArchive() {
         let table = app.tables.firstMatch
-        let start = table.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        // The table extends under the navigation/search bars; start in its content.
+        let start = table.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
         let end = table.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
         start.press(forDuration: 0.05, thenDragTo: end)
-        XCTAssertTrue(app.buttons["Скрыть архив"].waitForExistence(timeout: 5))
+        if !app.buttons["Скрыть архив"].waitForExistence(timeout: 5) {
+            shot("07-archive-pull-failed")
+            XCTFail("archive did not reveal after pulling the chat list")
+        }
     }
 
     /// Writes a PNG next to the host checkout; the simulator shares the host file system.

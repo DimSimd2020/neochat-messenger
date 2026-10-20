@@ -810,7 +810,7 @@ void MainWindow::applyConversation(const QJsonObject &c)
         accent = true;
     }
     const QString seed = c.value("kind").toString() == "direct" && !c.value("peer_user_id").toString().isEmpty() ? c.value("peer_user_id").toString() : c.value("id").toString();
-    m_header->title->set(c.value("title").toString(), count, names, seed, accent, c.value("avatar").toString());
+    m_header->title->set(c.value("title").toString(), count, names, seed, accent, c.value("avatar_path").toString());
     const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
     m_composer->setVisible(!gone && c.value("can_post").toBool(true));
     m_composer->setBlocked(!c.value("key_changed_users").toArray().isEmpty());
