@@ -20,13 +20,24 @@ xcodebuild -project NeoChat.xcodeproj -scheme NeoChat -configuration Release -sd
   -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
 ```
 
+Для ветки с изменениями достаточно отправить коммиты и запустить workflow:
+
+```bash
+git push
+gh workflow run ios.yml --ref codex/release-0.6.2
+gh run list --workflow ios.yml --branch codex/release-0.6.2
+gh run download RUN_ID --name NeoChat-unsigned-ipa --dir dist/ios-ci
+```
+
+Ручной запуск также выполняет UI-тест на симуляторе. Артефакт `NeoChat-unsigned-ipa` содержит IPA; `ios-simulator-shots` — снимки теста. Сборка ветки не публикует GitHub Release.
+
 ## Проверка
 
 CI проверяет, что сборка проходит и ядро слинковано статически (`otool -L` не находит `neocore`). На реальном устройстве нужно пройти вход, переписку, вход компьютера по QR и сверку кода безопасности.
 
 ## Ограничения
 
-Изменения Swift для 0.6.2 подготовлены на Windows: Xcode-сборка и проверка артефакта на iPhone здесь не выполнялись. Сценарии перед выпуском IPA перечислены в [заметках 0.6.2](../../docs/12-release-0.6.2.md).
+IPA 0.6.2 (build 12, arm64, iOS 15+) собрана в [GitHub Actions](https://github.com/DimSimd2020/neochat-messenger/actions/runs/39471039994), коммит `9ee512e`, на macOS с Xcode 16.4 / iPhoneOS 18.5. Сборка IPA и UI-тест на симуляторе прошли; архив и версия артефакта проверены после загрузки. Проверка на физическом iPhone остаётся отдельным шагом; сценарии перечислены в [заметках 0.6.2](../../docs/12-release-0.6.2.md).
 
 - Мгновенных push-уведомлений нет: для APNs нужна подпись разработчика. Новые сообщения приходят, пока приложение открыто, или при фоновом обновлении (`BGAppRefreshTask`).
 - Звонков нет.
