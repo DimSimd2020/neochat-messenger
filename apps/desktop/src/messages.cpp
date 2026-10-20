@@ -1,6 +1,7 @@
 #include "messages.h"
 
 #include "core.h"
+#include "emoji.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -14,6 +15,7 @@
 #include <QFontDatabase>
 #include <QGraphicsOpacityEffect>
 #include <QHelpEvent>
+#include <QHBoxLayout>
 #include <QImageReader>
 #include <QJsonArray>
 #include <QKeyEvent>
@@ -22,6 +24,9 @@
 #include <QPainter>
 #include <QPropertyAnimation>
 #include <QScrollBar>
+#include <QSettings>
+#include <QToolButton>
+#include <QWidgetAction>
 #include <QStandardPaths>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -108,6 +113,22 @@ QString messageText(const QJsonObject &m)
 QFont textFont() { return Theme::instance()->font(15.5); }
 QFont metaFont() { return Theme::instance()->font(11.5); }
 QFont pollFont() { return Theme::instance()->font(15.5, QFont::DemiBold); }
+QFont reactFont() { return Theme::instance()->font(13.5, QFont::DemiBold); }
+
+// One to three emoji without text are drawn large, without a bubble.
+QFont bigEmojiFont(int n)
+{
+    QFont f(QStringLiteral("Segoe UI Emoji"));
+    f.setPixelSize(n <= 1 ? 52 : n == 2 ? 42 : 34);
+    return f;
+}
+
+int bigEmojiCount(const QJsonObject &m)
+{
+    if (m.value("kind").toString() != "text" || m.value("reply_to").isObject() || !QSettings().value("chat/bigEmoji", true).toBool())
+        return 0;
+    return m.value("emoji_only").toInt();
+}
 
 bool isImage(const QJsonObject &m)
 {
@@ -466,6 +487,12 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
             h += 42;
         }
         w = qMax(w, pw);
+    } else if (const int n = bigEmojiCount(m); n > 0) {
+        const QFontMetricsF bf(bigEmojiFont(n));
+        L.big = true;
+        L.text = QRectF(0, h, bf.horizontalAdvance(text) + 4, bf.height());
+        w = qMax(w, L.text.width());
+        h += L.text.height() + 2;
     } else if (!text.isEmpty()) {
         QTextDocument *d = textDoc(m);
         if (d->textWidth() != inner)
@@ -473,6 +500,25 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         L.text = QRectF(0, h, qMin(inner, std::ceil(d->idealWidth()) + 1), d->size().height());
         w = qMax(w, L.text.width());
         h += L.text.height() + 2;
+    }
+    const QJsonArray reacts = m.value("reactions").toArray();
+    if (!reacts.isEmpty()) {
+        const QFontMetricsF rf(reactFont());
+        const qreal rowW = qMax(inner, 160.0);
+        qreal rx = 0;
+        h += 4;
+        for (const auto &v : reacts) {
+            const QJsonObject r = v.toObject();
+            const qreal cw = rf.horizontalAdvance(r.value("emoji").toString() + " " + QString::number(r.value("count").toInt())) + 20;
+            if (rx > 0 && rx + cw > rowW) {
+                rx = 0;
+                h += 30;
+            }
+            L.reacts << QRectF(rx, h, cw, 26);
+            rx += cw + 6;
+            w = qMax(w, rx - 6);
+        }
+        h += 30;
     }
     const QFontMetricsF mf(metaFont());
     const QString time = QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm");
@@ -499,6 +545,8 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     for (QRectF &o : L.options)
         place(o, false);
     place(L.meta, true);
+    for (QRectF &r : L.reacts)
+        r.moveTo(L.bubble.left() + kPadH + r.left(), y + r.top());
     if (!L.image.isNull())
         L.image.moveTo(L.bubble.left() + 4, y + L.image.top());
     if (!L.file.isNull())
@@ -583,16 +631,19 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     const QPainterPath bubble = out ? ui::roundedPath(L.bubble, R, it->groupStart ? R : r, r, R)
                                     : ui::roundedPath(L.bubble, it->groupStart ? R : r, R, R, r);
     const bool undecryptable = m.value("kind").toString() == "undecryptable";
-    p->setPen(undecryptable ? QPen(c.warning, 1, Qt::DashLine) : Qt::NoPen);
-    p->setBrush(out ? c.outgoing : c.raised);
-    p->drawPath(bubble);
+    if (!L.big) {
+        p->setPen(undecryptable ? QPen(c.warning, 1, Qt::DashLine) : Qt::NoPen);
+        p->setBrush(out ? c.outgoing : c.raised);
+        p->drawPath(bubble);
+    }
     if (opt.state & QStyle::State_Selected) {
         p->setPen(QPen(c.accent, 2));
         p->setBrush(Qt::NoBrush);
         p->drawPath(bubble);
     }
-    const QColor fg = out ? c.onOutgoing : (undecryptable ? c.warning : c.text);
-    const QColor meta = out ? c.outgoingMuted : c.muted;
+    const bool tinted = out && !L.big;
+    const QColor fg = tinted ? c.onOutgoing : (undecryptable ? c.warning : c.text);
+    const QColor meta = tinted ? c.outgoingMuted : c.muted;
 
     if (!L.reply.isNull()) {
         const QJsonObject rep = m.value("reply_to").toObject();
@@ -709,6 +760,10 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
                     p->drawEllipse(box);
             }
         }
+    } else if (L.big) {
+        p->setFont(bigEmojiFont(bigEmojiCount(m)));
+        p->setPen(fg);
+        p->drawText(L.text, Qt::AlignLeft | Qt::AlignVCenter, messageText(m));
     } else if (!L.text.isNull()) {
         QTextDocument *d = textDoc(m);
         QAbstractTextDocumentLayout::PaintContext ctx;
@@ -717,6 +772,21 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         p->translate(L.text.topLeft());
         d->documentLayout()->draw(p, ctx);
         p->restore();
+    }
+
+    const QJsonArray reacts = m.value("reactions").toArray();
+    p->setFont(reactFont());
+    for (int i = 0; i < L.reacts.size() && i < reacts.size(); ++i) {
+        const QJsonObject r = reacts[i].toObject();
+        const bool mine = r.value("mine").toBool();
+        QColor bg = tinted ? QColor(255, 255, 255, mine ? 80 : 36) : (mine ? c.action : c.muted);
+        if (!tinted)
+            bg.setAlphaF(mine ? 0.28f : 0.16f);
+        p->setPen(mine ? QPen(tinted ? c.onOutgoing : c.accent, 1) : Qt::NoPen);
+        p->setBrush(bg);
+        p->drawRoundedRect(L.reacts[i].adjusted(0.5, 0.5, -0.5, -0.5), 13, 13);
+        p->setPen(fg);
+        p->drawText(L.reacts[i], Qt::AlignCenter, r.value("emoji").toString() + " " + QString::number(r.value("count").toInt()));
     }
 
     p->setFont(metaFont());
@@ -986,6 +1056,8 @@ QJsonObject MessageView::messageAt(const QPoint &pos, MessageLayout *lay) const
     L.image.translate(vr.topLeft());
     for (QRectF &o : L.options)
         o.translate(vr.topLeft());
+    for (QRectF &r : L.reacts)
+        r.translate(vr.topLeft());
     if (lay)
         *lay = L;
     return it.msg;
@@ -996,7 +1068,7 @@ void MessageView::mouseMoveEvent(QMouseEvent *e)
     MessageLayout L;
     const QJsonObject m = messageAt(e->pos(), &L);
     bool hand = !m.isEmpty() && (L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) ||
-                                 !linkAt(m, L, e->pos()).isEmpty());
+                                 L.bubble.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty());
     if (!m.isEmpty() && !m.value("poll").toObject().value("closed").toBool())
         for (const QRectF &o : L.options)
             hand = hand || o.contains(e->pos());
@@ -1009,18 +1081,37 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
     MessageLayout L;
     const QJsonObject m = messageAt(e->pos(), &L);
     if (e->button() == Qt::LeftButton && !m.isEmpty()) {
+        bool handled = true;
+        const QString link = linkAt(m, L, e->pos());
+        const QJsonArray reacts = m.value("reactions").toArray();
+        int option = -1, chip = -1;
+        for (int i = 0; i < L.options.size(); ++i)
+            if (L.options[i].contains(e->pos()))
+                option = i;
+        for (int i = 0; i < L.reacts.size(); ++i)
+            if (L.reacts[i].contains(e->pos()))
+                chip = i;
         if (L.download.contains(e->pos()))
             openFile(m);
         else if (L.retry.contains(e->pos()))
             retry(m);
         else if (L.image.contains(e->pos()))
             openImage(m);
-        const QString link = linkAt(m, L, e->pos());
-        if (!link.isEmpty())
+        else if (!link.isEmpty())
             QDesktopServices::openUrl(QUrl(link));
-        for (int i = 0; i < L.options.size(); ++i)
-            if (L.options[i].contains(e->pos()))
-                vote(m, i);
+        else if (option >= 0)
+            vote(m, option);
+        else if (chip >= 0 && chip < reacts.size())
+            react(m, reacts[chip].toObject().value("emoji").toString());
+        else
+            handled = false;
+        // A click elsewhere on the message opens reactions and actions.
+        if (!handled && L.bubble.contains(e->pos())) {
+            QListView::mouseReleaseEvent(e);
+            setCurrentIndex(indexAt(e->pos()));
+            showMenu(m, viewport()->mapToGlobal(e->pos()));
+            return;
+        }
     }
     QListView::mouseReleaseEvent(e);
 }
@@ -1123,8 +1214,73 @@ void MessageView::contextMenuEvent(QContextMenuEvent *e)
     if (m.isEmpty())
         return;
     setCurrentIndex(indexAt(pos));
+    showMenu(m, viewport()->mapToGlobal(pos) + QPoint(0, 4));
+}
+
+void MessageView::react(const QJsonObject &m, const QString &emoji)
+{
+    QString mine;
+    for (const auto &v : m.value("reactions").toArray())
+        if (v.toObject().value("mine").toBool())
+            mine = v.toObject().value("emoji").toString();
+    // One reaction per person: the same emoji again removes it.
+    Core::instance()->call("react", {{"message_id", m.value("id")}, {"emoji", emoji == mine ? QString() : emoji}}, this,
+                           [this](const QJsonValue &, const CoreError &e) {
+                               if (!e.ok())
+                                   emit toast(e.message);
+                           });
+}
+
+void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
+{
     QMenu menu(this);
     const QString kind = m.value("kind").toString();
+    const bool reactable = m_canReact && !m_searching && (kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed";
+    if (reactable) {
+        QString mine;
+        for (const auto &v : m.value("reactions").toArray())
+            if (v.toObject().value("mine").toBool())
+                mine = v.toObject().value("emoji").toString();
+        auto *row = new QWidget(&menu);
+        auto *rl = new QHBoxLayout(row);
+        rl->setContentsMargins(8, 4, 8, 4);
+        rl->setSpacing(2);
+        QFont ef(QStringLiteral("Segoe UI Emoji"));
+        ef.setPixelSize(22);
+        for (const QString &e : emoji::quick()) {
+            auto *b = new QToolButton(row);
+            b->setText(e);
+            b->setFont(ef);
+            b->setAutoRaise(true);
+            b->setFixedSize(40, 40);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setCheckable(true);
+            b->setChecked(e == mine);
+            b->setAccessibleName(e == mine ? QStringLiteral("Убрать реакцию ") + e : QStringLiteral("Реакция ") + e);
+            connect(b, &QToolButton::clicked, &menu, [this, &menu, m, e] {
+                menu.close();
+                react(m, e);
+            });
+            rl->addWidget(b);
+        }
+        auto *more = new QToolButton(row);
+        more->setText(QStringLiteral("+"));
+        more->setAutoRaise(true);
+        more->setFixedSize(40, 40);
+        more->setFont(Theme::instance()->font(20, QFont::DemiBold));
+        more->setCursor(Qt::PointingHandCursor);
+        more->setAccessibleName(QStringLiteral("Все эмодзи"));
+        connect(more, &QToolButton::clicked, &menu, [this, &menu, m, globalPos] {
+            menu.close();
+            auto *popup = new EmojiPopup(this, [this, m](const QString &e) { react(m, e); });
+            popup->popup(globalPos + QPoint(196, 408));
+        });
+        rl->addWidget(more);
+        auto *wa = new QWidgetAction(&menu);
+        wa->setDefaultWidget(row);
+        menu.addAction(wa);
+        menu.addSeparator();
+    }
     if (kind != "undecryptable" && !m_searching)
         menu.addAction(QStringLiteral("Ответить"), this, [this, m] { emit replyRequested(m); });
     if (!messageText(m).isEmpty())
@@ -1151,7 +1307,7 @@ void MessageView::contextMenuEvent(QContextMenuEvent *e)
                 emit toast(e.message);
         });
     });
-    menu.exec(mapToGlobal(pos) + QPoint(0, 4));
+    menu.exec(globalPos);
 }
 
 void MessageView::openFile(const QJsonObject &m)

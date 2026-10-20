@@ -15,6 +15,8 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QCursor>
+#include <QDateTime>
+#include <QSet>
 #include <QStandardPaths>
 #include <QImageReader>
 #include <QBuffer>
@@ -148,12 +150,13 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     }
-    void set(const QString &title, const QString &count, const QString &names, const QString &seed)
+    void set(const QString &title, const QString &count, const QString &names, const QString &seed, bool accent = false)
     {
         m_title = title;
         m_count = count;
         m_names = names;
         m_seed = seed;
+        m_accent = accent;
         setAccessibleName(title + (count.isEmpty() ? QString() : ", " + count) + (names.isEmpty() ? QString() : ", " + names) + QStringLiteral(". Сведения"));
         update();
     }
@@ -172,7 +175,7 @@ protected:
         const qreal w = width() - x;
         p.drawText(QRectF(x, 4, w, 24), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(m_title, Qt::ElideRight, int(w)));
         p.setFont(Theme::instance()->font(12.5));
-        p.setPen(c.muted);
+        p.setPen(m_accent ? c.accent : c.muted);
         QString sub = m_count;
         if (!m_names.isEmpty() && width() > 360)
             sub += (sub.isEmpty() ? QString() : QStringLiteral("  ·  ")) + m_names;
@@ -183,6 +186,7 @@ protected:
 
 private:
     QString m_title, m_count, m_names, m_seed;
+    bool m_accent = false;
 };
 
 class ConversationHeader : public QWidget {
@@ -313,12 +317,12 @@ MainWindow::MainWindow()
         }
         QApplication::quit();
     });
-    // First check shortly after start, then every 6 hours.
+    // First check shortly after start, then every hour.
     auto *updateTimer = new QTimer(this);
-    updateTimer->setInterval(6 * 60 * 60 * 1000);
-    connect(updateTimer, &QTimer::timeout, this, &MainWindow::checkUpdate);
+    updateTimer->setInterval(60 * 60 * 1000);
+    connect(updateTimer, &QTimer::timeout, this, [this] { checkUpdate(false); });
     updateTimer->start();
-    QTimer::singleShot(10 * 1000, this, &MainWindow::checkUpdate);
+    QTimer::singleShot(10 * 1000, this, [this] { checkUpdate(false); });
 
     m_onboarding = new Onboarding;
     m_stack->addWidget(m_onboarding);
@@ -475,6 +479,20 @@ MainWindow::MainWindow()
     connect(m_view, &MessageView::replyRequested, m_composer, &Composer::setReply);
     connect(m_view, &MessageView::toast, this, &MainWindow::toast);
     connect(m_view, &MessageView::readable, this, &MainWindow::markRead);
+    connect(m_composer, &Composer::typing, this, [this] {
+        // The core sends the hint at most every 4 s.
+        if (!m_current.isEmpty())
+            Core::instance()->call("send_typing", {{"conversation_id", m_current.value("id")}});
+    });
+    connect(Typing::instance(), &Typing::changed, this, [this](const QString &conv) {
+        if (!m_current.isEmpty() && conv == m_current.value("id").toString())
+            applyConversation(m_current);
+    });
+    // Online dots and "был(а) …" once a minute.
+    auto *presenceTimer = new QTimer(this);
+    presenceTimer->setInterval(60 * 1000);
+    connect(presenceTimer, &QTimer::timeout, this, &MainWindow::refreshPresence);
+    presenceTimer->start();
 
     auto *ctrlK = new QShortcut(QKeySequence(QStringLiteral("Ctrl+K")), this);
     connect(ctrlK, &QShortcut::activated, this, [this] {
@@ -521,17 +539,31 @@ DialogHost MainWindow::host()
         });
     };
     h.enterSendsChanged = [this](bool on) { m_composer->setEnterSends(on); };
+    h.checkUpdate = [this] { checkUpdate(true); };
     return h;
 }
 
-void MainWindow::checkUpdate()
+void MainWindow::checkUpdate(bool manual)
 {
-    if (!m_updatePath.isEmpty())
+    if (!m_updatePath.isEmpty()) {
+        if (manual)
+            toast(QStringLiteral("Обновление уже скачано: нажмите «Перезапустить» вверху окна"));
         return;
+    }
     const QJsonObject p{{"platform", "windows"}, {"version", QStringLiteral(NEOCHAT_VERSION)}};
-    Core::instance()->call("check_update", p, this, [this, p](const QJsonValue &v, const CoreError &e) {
-        if (!e.ok() || !v.toObject().value("available").toBool())
+    Core::instance()->call("check_update", p, this, [this, p, manual](const QJsonValue &v, const CoreError &e) {
+        if (!e.ok()) {
+            if (manual)
+                toast(e.message);
             return;
+        }
+        if (!v.toObject().value("available").toBool()) {
+            if (manual)
+                toast(QStringLiteral("Установлена последняя версия ") + QStringLiteral(NEOCHAT_VERSION));
+            return;
+        }
+        if (manual)
+            toast(QStringLiteral("Скачиваем обновление…"));
         Core::instance()->call("download_update", p, this, [this](const QJsonValue &v, const CoreError &e) {
             if (!e.ok())
                 return;
@@ -571,6 +603,7 @@ void MainWindow::showMain()
     m_stack->setCurrentWidget(m_main);
     Core::instance()->call("set_foreground", {{"active", true}});
     m_panel->reload();
+    QTimer::singleShot(1500, this, &MainWindow::refreshPresence);
     setSidebarHidden(m_sidebarHidden, false);
     updateLayoutMode();
     Core::instance()->call("status", {}, this, [this](const QJsonValue &v, const CoreError &) {
@@ -602,7 +635,12 @@ void MainWindow::onEvent(const QJsonObject &ev)
         if (!m_current.isEmpty() && ev.value("conversation_id").toString() == m_current.value("id").toString())
             m_messagesTimer->start();
     } else if (type == "notify") {
+        Typing::instance()->clear(ev.value("conversation_id").toString());
         notify(ev);
+    } else if (type == "typing") {
+        Typing::instance()->onEvent(ev);
+    } else if (type == "presence") {
+        m_listTimer->start();
     } else if (type == "warning") {
         toast(ev.value("message").toString());
     } else if (type == "sync_reset") {
@@ -660,11 +698,35 @@ void MainWindow::refreshHeader()
     });
 }
 
+void MainWindow::refreshPresence()
+{
+    if (m_stack->currentWidget() != m_main)
+        return;
+    QSet<QString> ids;
+    for (const auto &c : m_panel->all())
+        if (c.value("kind").toString() == "direct" && !c.value("peer_user_id").toString().isEmpty())
+            ids.insert(c.value("peer_user_id").toString());
+    if (!m_current.isEmpty() && m_current.value("kind").toString() == "direct")
+        ids.insert(m_current.value("peer_user_id").toString());
+    if (ids.isEmpty())
+        return;
+    QJsonArray arr;
+    for (const QString &id : ids)
+        if (arr.size() < 200)
+            arr << id;
+    const int tz = QDateTime::currentDateTime().offsetFromUtc() / 60;
+    Core::instance()->call("presence", {{"user_ids", arr}, {"tz_offset", tz}}, this, [this](const QJsonValue &, const CoreError &e) {
+        if (e.ok())
+            m_listTimer->start();
+    });
+}
+
 void MainWindow::applyConversation(const QJsonObject &c)
 {
     const bool group = c.value("kind").toString() == "group";
     const bool channel = c.value("kind").toString() == "channel";
     QString count, names;
+    bool accent = false;
     if (group) {
         count = participants(c.value("member_count").toInt());
         names = memberNames(c.value("members").toArray());
@@ -674,14 +736,26 @@ void MainWindow::applyConversation(const QJsonObject &c)
         for (const auto &x : c.value("members").toArray())
             if (!x.toObject().value("me").toBool())
                 count = "@" + x.toObject().value("username").toString();
+        const QJsonObject presence = c.value("presence").toObject();
+        if (!presence.value("text").toString().isEmpty()) {
+            count = presence.value("text").toString();
+            accent = presence.value("online").toBool();
+        }
     }
     const bool system = c.value("kind").toString() == "system";
     if (system)
         count = QStringLiteral("Коды входа и новые устройства");
-    m_header->title->set(c.value("title").toString(), count, names, c.value("id").toString());
+    const QString typing = system || channel ? QString() : Typing::instance()->text(c.value("id").toString(), c.value("kind").toString() != "direct");
+    if (!typing.isEmpty()) {
+        count = typing;
+        accent = true;
+    }
+    const QString seed = c.value("kind").toString() == "direct" && !c.value("peer_user_id").toString().isEmpty() ? c.value("peer_user_id").toString() : c.value("id").toString();
+    m_header->title->set(c.value("title").toString(), count, names, seed, accent);
     const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
     m_composer->setVisible(!gone && c.value("can_post").toBool(true));
     m_composer->setBlocked(!c.value("key_changed_users").toArray().isEmpty());
+    m_view->setCanReact(!gone && c.value("key_changed_users").toArray().isEmpty());
     updateNotice();
 }
 

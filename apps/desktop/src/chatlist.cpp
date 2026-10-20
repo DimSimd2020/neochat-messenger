@@ -8,10 +8,72 @@
 #include <QDateTime>
 #include <QHBoxLayout>
 #include <QJsonArray>
+#include <QApplication>
 #include <QLocale>
+#include <QMenu>
 #include <QPainter>
 #include <QScrollBar>
+#include <QSettings>
+#include <QTimer>
 #include <QVBoxLayout>
+
+namespace {
+
+const QList<QPair<QString, QString>> &sorts()
+{
+    static const QList<QPair<QString, QString>> s{{"activity", QStringLiteral("По активности")},
+                                                  {"unread", QStringLiteral("Сначала непрочитанные")},
+                                                  {"name", QStringLiteral("По названию")}};
+    return s;
+}
+
+} // namespace
+
+// ---- typing ----
+
+Typing *Typing::instance()
+{
+    static Typing *t = new Typing(qApp);
+    return t;
+}
+
+void Typing::onEvent(const QJsonObject &ev)
+{
+    const QString conv = ev.value("conversation_id").toString();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    Entry &e = m_entries[conv];
+    if (e.until < now)
+        e.names.clear();
+    e.names[ev.value("user_id").toString()] = ev.value("name").toString();
+    e.until = now + 6000;
+    emit changed(conv);
+    QTimer::singleShot(6050, this, [this, conv] { emit changed(conv); });
+}
+
+void Typing::clear(const QString &conv)
+{
+    if (m_entries.remove(conv))
+        emit changed(conv);
+}
+
+QString Typing::text(const QString &conv, bool group) const
+{
+    const auto it = m_entries.constFind(conv);
+    if (it == m_entries.constEnd() || it->until < QDateTime::currentMSecsSinceEpoch() || it->names.isEmpty())
+        return {};
+    if (!group)
+        return QStringLiteral("печатает…");
+    QStringList names;
+    for (const QString &n : it->names) {
+        const QString first = n.section(' ', 0, 0);
+        names << (first.isEmpty() ? QStringLiteral("Кто-то") : first);
+    }
+    if (names.size() == 1)
+        return names[0] + QStringLiteral(" печатает…");
+    if (names.size() == 2)
+        return names[0] + QStringLiteral(" и ") + names[1] + QStringLiteral(" печатают…");
+    return QStringLiteral("Несколько человек печатают…");
+}
 
 QString formatListTime(qint64 ms)
 {
@@ -38,7 +100,13 @@ QVariant ChatListModel::data(const QModelIndex &index, int role) const
     if (role == ObjectRole)
         return c;
     if (role == Qt::DisplayRole || role == Qt::AccessibleTextRole) {
+        if (c.value("_archive").toBool())
+            return QStringLiteral("Архив, чатов: %1").arg(c.value("count").toInt());
         QString s = c.value("title").toString();
+        if (c.value("pinned").toBool())
+            s += QStringLiteral(", закреплён");
+        if (c.value("presence").toObject().value("online").toBool())
+            s += QStringLiteral(", в сети");
         const int unread = c.value("unread").toInt();
         if (unread > 0)
             s += QStringLiteral(", непрочитанных: %1").arg(unread);
@@ -109,7 +177,22 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
 
     const qreal av = 48;
     const QRectF avatar(r.left() + 12, r.center().y() - av / 2, av, av);
-    ui::paintAvatar(p, avatar, o.value("title").toString(), o.value("id").toString());
+    const bool archiveRow = o.value("_archive").toBool();
+    if (archiveRow) {
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor("#5B6B85"));
+        p->drawRoundedRect(avatar, 18, 18);
+        ui::paintIcon(p, avatar.adjusted(12, 12, -12, -12), "archive", QColor(Qt::white), 2.0);
+    } else {
+        const QString kind = o.value("kind").toString();
+        ui::paintAvatar(p, avatar, o.value("title").toString(), kind == "direct" && !o.value("peer_user_id").toString().isEmpty() ? o.value("peer_user_id").toString() : o.value("id").toString());
+        if (kind == "direct" && o.value("presence").toObject().value("online").toBool()) {
+            const QRectF dot(avatar.right() - 12, avatar.bottom() - 12, 14, 14);
+            p->setPen(QPen(selected ? c.selected : c.surface, 2.5));
+            p->setBrush(QColor("#3CC46B"));
+            p->drawEllipse(dot);
+        }
+    }
 
     const qreal x = avatar.right() + 13;
     const qreal right = r.right() - 12;
@@ -127,7 +210,8 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
     p->setFont(titleFont);
     p->setPen(c.text);
     const QRectF titleR(x, top, right - x - timeW - 8, titleH);
-    p->drawText(titleR, Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(titleFont).elidedText(o.value("title").toString(), Qt::ElideRight, titleR.width()));
+    p->drawText(titleR, Qt::AlignLeft | Qt::AlignVCenter,
+                QFontMetricsF(titleFont).elidedText(archiveRow ? QStringLiteral("Архив") : o.value("title").toString(), Qt::ElideRight, titleR.width()));
     p->setFont(timeFont);
     p->setPen(c.muted);
     p->drawText(QRectF(right - timeW, top, timeW, titleH), Qt::AlignRight | Qt::AlignVCenter, time);
@@ -146,12 +230,20 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
         p->setPen(c.onAccent);
         p->drawText(b, Qt::AlignCenter, n);
         badgeW += 8;
+    } else if (o.value("pinned").toBool()) {
+        ui::paintIcon(p, QRectF(right - 18, top + titleH + 4 + (prevH - 18) / 2, 18, 18), "pin", c.muted, 1.8);
+        badgeW = 26;
     }
-    QString preview = o.value("last_preview").toString();
+    QString preview = archiveRow ? o.value("titles").toString() : o.value("last_preview").toString();
     QColor prevColor = selected ? c.text : c.muted;
     const QString draft = o.value("draft").toString().simplified();
     if (!draft.isEmpty() && !selected) {
         preview = QStringLiteral("Черновик: ") + draft;
+        prevColor = c.accent;
+    }
+    const QString typing = archiveRow ? QString() : Typing::instance()->text(o.value("id").toString(), o.value("kind").toString() != "direct");
+    if (!typing.isEmpty()) {
+        preview = typing;
         prevColor = c.accent;
     }
     if (!o.value("key_changed_users").toArray().isEmpty()) {
@@ -224,14 +316,21 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
     pm.setDevicePixelRatio(dpr);
     logo->setPixmap(pm);
     logo->setFixedSize(30, 30);
-    auto *title = new ui::Label(QStringLiteral("Сообщения"), 26, QFont::Bold);
-    title->setAccessibleName(QStringLiteral("Сообщения"));
-    auto *compose = new ui::IconButton("compose", QStringLiteral("Новый чат"), this, 40);
-    connect(compose, &QAbstractButton::clicked, this, &ChatPanel::newChat);
+    m_title = new ui::Label(QStringLiteral("Сообщения"), 26, QFont::Bold);
+    m_title->setAccessibleName(QStringLiteral("Сообщения"));
+    m_back = new ui::IconButton("back", QStringLiteral("Назад к чатам"), this, 40);
+    m_back->hide();
+    connect(m_back, &QAbstractButton::clicked, this, [this] { setArchiveMode(false); });
+    m_sort = new ui::IconButton("sort", QStringLiteral("Сортировка чатов"), this, 40);
+    connect(m_sort, &QAbstractButton::clicked, this, &ChatPanel::showSortMenu);
+    m_compose = new ui::IconButton("compose", QStringLiteral("Новый чат"), this, 40);
+    connect(m_compose, &QAbstractButton::clicked, this, &ChatPanel::newChat);
+    head->addWidget(m_back);
     head->addWidget(logo);
     head->addSpacing(8);
-    head->addWidget(title, 1);
-    head->addWidget(compose);
+    head->addWidget(m_title, 1);
+    head->addWidget(m_sort);
+    head->addWidget(m_compose);
     lay->addLayout(head);
     lay->addSpacing(18);
 
@@ -271,6 +370,8 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
     m_view->viewport()->setAutoFillBackground(false);
     m_view->setAutoFillBackground(false);
     m_view->verticalScrollBar()->setSingleStep(24);
+    m_view->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_view, &QWidget::customContextMenuRequested, this, &ChatPanel::showRowMenu);
     lay->addWidget(m_view, 1);
 
     m_empty = new QWidget;
@@ -303,7 +404,10 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
     connect(m_view->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex &cur) {
         if (!cur.isValid())
             return;
-        const QString id = m_model->at(cur.row()).value("id").toString();
+        const QJsonObject row = m_model->at(cur.row());
+        if (row.value("_archive").toBool())
+            return;
+        const QString id = row.value("id").toString();
         if (id == m_selected)
             return;
         m_selected = id;
@@ -316,6 +420,73 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
         m_view->viewport()->update();
     });
     connect(Theme::instance(), &Theme::fontChanged, this, [this] { m_view->doItemsLayout(); });
+    connect(Typing::instance(), &Typing::changed, m_view->viewport(), qOverload<>(&QWidget::update));
+    auto openArchive = [this](const QModelIndex &i) {
+        if (i.isValid() && m_model->at(i.row()).value("_archive").toBool())
+            QTimer::singleShot(0, this, [this] { setArchiveMode(true); });
+    };
+    connect(m_view, &QAbstractItemView::clicked, this, openArchive);
+    connect(m_view, &QAbstractItemView::activated, this, openArchive);
+}
+
+QString ChatPanel::sortKey() const
+{
+    return QSettings().value(m_archive ? "chats/archiveSort" : "chats/sort", "activity").toString();
+}
+
+void ChatPanel::showSortMenu()
+{
+    QMenu menu(this);
+    menu.setTitle(QStringLiteral("Сортировка"));
+    const QString cur = sortKey();
+    for (const auto &s : sorts()) {
+        QAction *a = menu.addAction(s.second, this, [this, key = s.first] {
+            QSettings().setValue(m_archive ? "chats/archiveSort" : "chats/sort", key);
+            reload();
+        });
+        a->setCheckable(true);
+        a->setChecked(s.first == cur);
+    }
+    menu.exec(m_sort->mapToGlobal(QPoint(0, m_sort->height())));
+}
+
+// Right click: pin (up to 3) and archive, like the swipes on phones.
+void ChatPanel::showRowMenu(const QPoint &pos)
+{
+    const QModelIndex idx = m_view->indexAt(pos);
+    if (!idx.isValid())
+        return;
+    const QJsonObject c = m_model->at(idx.row());
+    if (c.value("_archive").toBool())
+        return;
+    const QString id = c.value("id").toString();
+    auto done = [this](const QJsonValue &, const CoreError &e) {
+        if (!e.ok())
+            m_status->setText(e.message);
+    };
+    QMenu menu(this);
+    const bool pinned = c.value("pinned").toBool();
+    menu.addAction(pinned ? QStringLiteral("Открепить") : QStringLiteral("Закрепить"), this, [this, id, pinned, done] {
+        Core::instance()->call("set_pinned", {{"conversation_id", id}, {"pinned", !pinned}}, this, done);
+    });
+    const bool archived = c.value("in_archive").toBool();
+    menu.addAction(archived ? QStringLiteral("Вернуть из архива") : QStringLiteral("В архив"), this, [this, id, archived, done] {
+        Core::instance()->call("set_archived", {{"conversation_id", id}, {"archived", !archived}}, this, done);
+    });
+    menu.exec(m_view->viewport()->mapToGlobal(pos));
+}
+
+void ChatPanel::setArchiveMode(bool on)
+{
+    if (m_archive == on)
+        return;
+    m_archive = on;
+    m_title->setText(on ? QStringLiteral("Архив") : QStringLiteral("Сообщения"));
+    m_title->setAccessibleName(m_title->text());
+    m_back->setVisible(on);
+    m_compose->setVisible(!on);
+    m_search->edit()->clear();
+    reload();
 }
 
 void ChatPanel::paintEvent(QPaintEvent *)
@@ -331,15 +502,35 @@ void ChatPanel::reload()
 {
     const int gen = ++m_generation;
     const QString query = m_search->edit()->text();
-    Core::instance()->call("list_conversations", {{"query", query}}, this, [this, gen, query](const QJsonValue &v, const CoreError &e) {
+    const bool archive = m_archive;
+    QJsonObject p{{"query", query}, {"sort", sortKey()}};
+    if (archive)
+        p["archived"] = true;
+    Core::instance()->call("list_conversations", p, this, [this, gen, query, archive](const QJsonValue &v, const CoreError &e) {
         if (!e.ok() || gen != m_generation)
             return;
         QList<QJsonObject> rows;
         for (const auto &x : v.toArray())
-            rows << x.toObject();
+            if (!archive || query.isEmpty() || x.toObject().value("in_archive").toBool())
+                rows << x.toObject();
         const bool queryChanged = property("lastQuery").toString() != query;
         setProperty("lastQuery", query);
-        apply(rows, queryChanged);
+        if (archive || !query.isEmpty()) {
+            if (!archive)
+                m_archived.clear();
+            apply(rows, queryChanged);
+            return;
+        }
+        // The archive row on top of the main list shows how many chats are there.
+        Core::instance()->call("list_conversations", {{"archived", true}}, this, [this, gen, rows, queryChanged](const QJsonValue &av, const CoreError &ae) {
+            if (gen != m_generation)
+                return;
+            m_archived.clear();
+            if (ae.ok())
+                for (const auto &x : av.toArray())
+                    m_archived << x.toObject();
+            apply(rows, queryChanged);
+        });
     });
 }
 
@@ -356,6 +547,16 @@ void ChatPanel::apply(const QList<QJsonObject> &all, bool animate)
             continue;
         rows << c;
     }
+    if (!m_archive && filter == 0 && !m_archived.isEmpty() && m_search->edit()->text().isEmpty()) {
+        int unread = 0;
+        QStringList titles;
+        for (const auto &c : m_archived) {
+            unread += c.value("unread").toInt();
+            if (titles.size() < 4)
+                titles << c.value("title").toString();
+        }
+        rows.prepend(QJsonObject{{"_archive", true}, {"id", "_archive"}, {"count", int(m_archived.size())}, {"unread", unread}, {"titles", titles.join(", ")}});
+    }
     m_model->setRows(rows);
     const int idx = m_model->indexOf(m_selected);
     {
@@ -365,7 +566,7 @@ void ChatPanel::apply(const QList<QJsonObject> &all, bool animate)
         else
             m_view->selectionModel()->clearSelection();
     }
-    const bool none = all.isEmpty() && m_search->edit()->text().isEmpty();
+    const bool none = rows.isEmpty() && m_search->edit()->text().isEmpty() && !m_archive;
     m_view->setVisible(!none);
     m_empty->setVisible(none);
     if (animate && Theme::ms(140) > 0) {
@@ -408,7 +609,7 @@ void ChatPanel::setConnection(const QString &state)
 
 QJsonObject ChatPanel::conversation(const QString &id) const
 {
-    for (const auto &c : m_all)
+    for (const auto &c : m_all + m_archived)
         if (c.value("id").toString() == id)
             return c;
     return {};

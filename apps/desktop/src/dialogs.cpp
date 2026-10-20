@@ -6,11 +6,15 @@
 #include "widgets.h"
 
 #include <QButtonGroup>
+#include <QClipboard>
 #include <QDateTime>
+#include <QGuiApplication>
+#include <QLinearGradient>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QMenu>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPointer>
 #include <QScrollArea>
 #include <QSettings>
@@ -111,6 +115,80 @@ public:
 private:
     QVBoxLayout *m_lay;
     int m_max;
+};
+
+// Profile QR in the Telegram style: round dots and rounded eyes on a white plate
+// inside an accent gradient, the avatar in the middle (error correction Q).
+class QrCard : public QWidget {
+public:
+    QrCard()
+    {
+        setFixedSize(300, 340);
+        setAccessibleName(QStringLiteral("QR-код профиля"));
+    }
+    void set(const QStringList &rows, const QString &name, const QString &seed, const QString &handle)
+    {
+        m_rows = rows;
+        m_name = name;
+        m_seed = seed;
+        m_handle = handle;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        QLinearGradient g(0, 0, width(), height());
+        g.setColorAt(0, QColor("#4169CF"));
+        g.setColorAt(0.5, QColor("#7B5CD6"));
+        g.setColorAt(1, QColor("#2FA5B5"));
+        p.setPen(Qt::NoPen);
+        p.setBrush(g);
+        p.drawRoundedRect(rect(), 26, 26);
+        const QRectF plate(26, 22, width() - 52, height() - 44);
+        p.setBrush(Qt::white);
+        p.drawRoundedRect(plate, 22, 22);
+        const int n = int(m_rows.size());
+        if (n == 0)
+            return;
+        const QColor dot("#16233C");
+        const qreal side = plate.width() - 36;
+        const qreal cell = side / n;
+        const QPointF o(plate.left() + 18, plate.top() + 16);
+        int hole = int(std::ceil(58 / cell));
+        if ((n - hole) % 2 == 1)
+            ++hole;
+        const int h0 = (n - hole) / 2, h1 = h0 + hole;
+        auto eye = [n](int x, int y) { return (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7); };
+        p.setBrush(dot);
+        for (int y = 0; y < n; ++y)
+            for (int x = 0; x < n && x < m_rows[y].size(); ++x) {
+                if (m_rows[y][x] != '1' || eye(x, y) || (x >= h0 && x < h1 && y >= h0 && y < h1))
+                    continue;
+                p.drawEllipse(QRectF(o.x() + x * cell + cell * 0.05, o.y() + y * cell + cell * 0.05, cell * 0.9, cell * 0.9));
+            }
+        for (const QPoint e : {QPoint(0, 0), QPoint(n - 7, 0), QPoint(0, n - 7)}) {
+            const qreal l = o.x() + e.x() * cell, t = o.y() + e.y() * cell;
+            // Only slightly rounded finder eyes: strongly rounded ones break many decoders.
+            QPainterPath ring;
+            ring.setFillRule(Qt::OddEvenFill);
+            ring.addRoundedRect(QRectF(l, t, 7 * cell, 7 * cell), cell * 0.35, cell * 0.35);
+            ring.addRoundedRect(QRectF(l + cell, t + cell, 5 * cell, 5 * cell), cell * 0.15, cell * 0.15);
+            p.fillPath(ring, dot);
+            p.drawRoundedRect(QRectF(l + 2 * cell, t + 2 * cell, 3 * cell, 3 * cell), cell * 0.3, cell * 0.3);
+        }
+        const qreal av = 50;
+        ui::paintAvatar(&p, QRectF(o.x() + side / 2 - av / 2, o.y() + side / 2 - av / 2, av, av), m_name, m_seed);
+        p.setFont(Theme::instance()->font(17, QFont::Bold));
+        p.setPen(dot);
+        p.drawText(QRectF(plate.left(), o.y() + side + 6, plate.width(), plate.bottom() - (o.y() + side + 6)), Qt::AlignCenter, m_handle);
+    }
+
+private:
+    QStringList m_rows;
+    QString m_name, m_seed, m_handle;
 };
 
 ui::Label *mutedText(const QString &t)
@@ -234,7 +312,8 @@ void newContact(const DialogHost &h, std::function<void()> added)
     auto *submit = new ui::Button(QStringLiteral("Добавить"));
     for (QWidget *w : {static_cast<QWidget *>(user), static_cast<QWidget *>(first), static_cast<QWidget *>(last), static_cast<QWidget *>(err)})
         sheet->body()->addWidget(w);
-    sheet->body()->addWidget(mutedText(QStringLiteral("Поиск идёт только по точному никнейму: публичного каталога нет. Без своего имени контакт показывается под именем из его профиля.")));
+    sheet->body()->addWidget(mutedText(QStringLiteral("Поиск идёт только по точному никнейму: публичного каталога нет. Без своего имени контакт показывается под именем из его профиля. "
+                                                            "Можно вставить ссылку из QR-кода профиля (neochat://u/…).")));
     sheet->body()->addWidget(submit);
     auto go = [=] {
         if (user->text().trimmed().isEmpty()) {
@@ -244,6 +323,23 @@ void newContact(const DialogHost &h, std::function<void()> added)
         err->hide();
         submit->setEnabled(false);
         sheet->setBusy(true);
+        // A pasted profile link adds the contact with its key already verified.
+        if (user->text().trimmed().startsWith("neochat://u/")) {
+            Core::instance()->call("add_contact_qr", {{"link", user->text().trimmed()}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+                submit->setEnabled(true);
+                sheet->setBusy(false);
+                if (!e.ok()) {
+                    err->setText(e.message);
+                    return err->show();
+                }
+                if (h.toast)
+                    h.toast(QStringLiteral("Контакт добавлен, ключ сверен"));
+                if (added)
+                    added();
+                sheet->close();
+            });
+            return;
+        }
         Core::instance()->call("resolve_contact", {{"username", user->text().trimmed()}, {"first_name", first->text().trimmed()}, {"last_name", last->text().trimmed()}}, sheet,
                                [=](const QJsonValue &, const CoreError &e) {
                                    submit->setEnabled(true);
@@ -519,6 +615,32 @@ void settings(const DialogHost &h)
     });
     sheet->body()->addWidget(twoFactor);
     sheet->body()->addWidget(mutedText(QStringLiteral("При входе на новом устройстве понадобится код. Он придёт в чат «NeoChat уведомления» на ваших устройствах.")));
+    auto *lastSeen = new ui::Toggle(QStringLiteral("Показывать время последнего визита"));
+    lastSeen->setEnabled(false);
+    Core::instance()->call("account_settings", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
+        QSignalBlocker b(lastSeen);
+        lastSeen->setChecked(v.toObject().value("show_last_seen").toBool(true));
+        lastSeen->setEnabled(true);
+    });
+    QObject::connect(lastSeen, &QAbstractButton::toggled, sheet, [=](bool on) {
+        Core::instance()->call("set_last_seen_visible", {{"visible", on}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+            if (!e.ok())
+                fail(h, e);
+        });
+    });
+    sheet->body()->addWidget(lastSeen);
+    sheet->body()->addWidget(mutedText(QStringLiteral("Если скрыть время визита, вы тоже не увидите его у других: останется «был(а) недавно» или «давно».")));
+    auto *bigEmoji = new ui::Toggle(QStringLiteral("Крупные эмодзи без текста"));
+    bigEmoji->setChecked(QSettings().value("chat/bigEmoji", true).toBool());
+    QObject::connect(bigEmoji, &QAbstractButton::toggled, sheet, [](bool on) { QSettings().setValue("chat/bigEmoji", on); });
+    sheet->body()->addWidget(bigEmoji);
+    sheet->body()->addWidget(mutedText(QStringLiteral("Щёлкните по чату правой кнопкой, чтобы закрепить его (до 3 чатов) или убрать в архив.")));
+    auto *update = new ui::Button(QStringLiteral("Проверить обновления · версия ") + QStringLiteral(NEOCHAT_VERSION), ui::Button::Secondary);
+    QObject::connect(update, &QAbstractButton::clicked, sheet, [=] {
+        if (h.checkUpdate)
+            h.checkUpdate();
+    });
+    sheet->body()->addWidget(update);
     sheet->body()->addSpacing(6);
     auto *logout = new ui::Button(QStringLiteral("Выйти из аккаунта"), ui::Button::Danger);
     QObject::connect(logout, &QAbstractButton::clicked, sheet, [=] {
@@ -543,10 +665,26 @@ void profile(const DialogHost &h)
     sub->setWordWrap(true);
     sheet->body()->addWidget(name);
     sheet->body()->addWidget(sub);
+    auto *about = new ui::Label({}, 14);
+    about->setWordWrap(true);
+    about->hide();
+    sheet->body()->addWidget(about);
     auto *edit = new ui::TextField(QStringLiteral("Имя"));
-    auto *save = new ui::Button(QStringLiteral("Сохранить имя"), ui::Button::Secondary);
+    auto *bio = new ui::TextField(QStringLiteral("О себе, до 100 символов"));
+    bio->edit()->setMaxLength(100);
+    auto *count = new ui::Label(QStringLiteral("0/100"), 12.5, 400, ui::Label::Muted);
+    count->setAlignment(Qt::AlignRight);
+    QObject::connect(bio->edit(), &QLineEdit::textChanged, sheet, [=](const QString &t) { count->setText(QStringLiteral("%1/100").arg(t.size())); });
+    auto *save = new ui::Button(QStringLiteral("Сохранить"), ui::Button::Secondary);
     sheet->body()->addWidget(edit);
+    sheet->body()->addWidget(bio);
+    sheet->body()->addWidget(count);
     sheet->body()->addWidget(save);
+    auto *qrButton = new ui::Button(QStringLiteral("Мой QR-код"), ui::Button::Secondary);
+    QObject::connect(qrButton, &QAbstractButton::clicked, sheet, [=] {
+        sheet->close();
+        myQr(h);
+    });
     Core::instance()->call("status", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
         const QJsonObject s = v.toObject();
         const QString nick = "@" + s.value("username").toString();
@@ -558,18 +696,24 @@ void profile(const DialogHost &h)
         sub->setText(line);
         sub->setTextInteractionFlags(Qt::TextSelectableByMouse);
         edit->setText(display);
+        bio->setText(s.value("bio").toString());
+        about->setText(s.value("bio").toString());
+        about->setVisible(!s.value("bio").toString().isEmpty());
     });
     QObject::connect(save, &QAbstractButton::clicked, sheet, [=] {
         const QString n = edit->text().trimmed();
         if (n.isEmpty())
             return h.toast(QStringLiteral("Введите имя"));
         save->setEnabled(false);
-        Core::instance()->call("set_profile", {{"display_name", n}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+        const QString b = bio->text().trimmed();
+        Core::instance()->call("set_profile", {{"display_name", n}, {"bio", b}}, sheet, [=](const QJsonValue &, const CoreError &e) {
             save->setEnabled(true);
             if (!e.ok())
                 return fail(h, e);
             name->setText(n);
-            h.toast(QStringLiteral("Имя сохранено"));
+            about->setText(b);
+            about->setVisible(!b.isEmpty());
+            h.toast(QStringLiteral("Профиль сохранён"));
         });
     });
     auto *dev = new ui::Button(QStringLiteral("Устройства"), ui::Button::Secondary);
@@ -582,8 +726,39 @@ void profile(const DialogHost &h)
         sheet->close();
         settings(h);
     });
+    sheet->body()->addWidget(qrButton);
     sheet->body()->addWidget(dev);
     sheet->body()->addWidget(set);
+    sheet->open();
+}
+
+void myQr(const DialogHost &h)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Мой QR-код"), 380);
+    auto *qr = new QrCard;
+    auto *qrNote = mutedText(QStringLiteral("Собеседник сканирует код в NeoChat на телефоне и сразу добавляет вас; ключ при этом считается сверенным."));
+    auto *copyLink = new ui::Button(QStringLiteral("Скопировать ссылку"), ui::Button::Flat);
+    sheet->body()->addWidget(qr, 0, Qt::AlignHCenter);
+    sheet->body()->addWidget(qrNote);
+    sheet->body()->addWidget(copyLink);
+    Core::instance()->call("my_qr", {}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+        if (!e.ok())
+            return;
+        const QJsonObject o = v.toObject();
+        QStringList rows;
+        for (const auto &r : o.value("qr_rows").toArray())
+            rows << r.toString();
+        const QString link = o.value("link").toString();
+        QObject::connect(copyLink, &QAbstractButton::clicked, sheet, [=] {
+            QGuiApplication::clipboard()->setText(link);
+            h.toast(QStringLiteral("Ссылка скопирована"));
+        });
+        Core::instance()->call("status", {}, sheet, [=](const QJsonValue &sv, const CoreError &) {
+            const QJsonObject s = sv.toObject();
+            const QString display = s.value("display_name").toString().isEmpty() ? s.value("username").toString() : s.value("display_name").toString();
+            qr->set(rows, display, s.value("user_id").toString(), "@" + o.value("username").toString());
+        });
+    });
     sheet->open();
 }
 
@@ -618,11 +793,21 @@ void conversationInfo(const DialogHost &h, const QString &cid)
             }
             if (!group) {
                 const QString peer = c.value("peer_user_id").toString();
+                QString bioText;
+                for (const auto &x : c.value("members").toArray())
+                    if (!x.toObject().value("me").toBool())
+                        bioText = x.toObject().value("bio").toString();
+                const QString seen = c.value("presence").toObject().value("text").toString();
                 Core::instance()->call("contact_info", {{"user_id", peer}}, sheet, [=](const QJsonValue &iv, const CoreError &ie) {
                     if (!ie.ok())
                         return fail(h, ie);
                     const QJsonObject info = iv.toObject();
-                    lay->addWidget(new ui::Label("@" + info.value("username").toString(), 14, 400, ui::Label::Muted));
+                    lay->addWidget(new ui::Label("@" + info.value("username").toString() + (seen.isEmpty() ? QString() : QStringLiteral(" · ") + seen), 14, 400, ui::Label::Muted));
+                    if (!bioText.isEmpty()) {
+                        auto *b = new ui::Label(bioText, 14);
+                        b->setWordWrap(true);
+                        lay->addWidget(b);
+                    }
                     lay->addWidget(new ui::Label(QStringLiteral("Код безопасности"), 15, QFont::DemiBold));
                     lay->addWidget(mutedText(QStringLiteral("Сравните код с собеседником при встрече или по другому надёжному каналу. "
                                                             "Совпадение означает, что сообщения шифруются для его настоящих ключей.")));

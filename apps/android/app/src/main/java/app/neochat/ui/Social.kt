@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -187,16 +188,19 @@ class PrettyQrView(ctx: Context) : View(ctx) {
             if (x in h0 until h1 && y in h0 until h1) continue
             val cx = (x + 0.5f) * cell
             val cy = (y + 0.5f) * cell
-            c.drawCircle(cx, cy, cell * 0.43f, paint)
+            c.drawCircle(cx, cy, cell * 0.45f, paint)
         }
         for ((ex, ey) in listOf(0 to 0, n - 7 to 0, 0 to n - 7)) {
             val l = ex * cell
             val t = ey * cell
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = cell
-            c.drawRoundRect(RectF(l + cell / 2, t + cell / 2, l + 6.5f * cell, t + 6.5f * cell), cell * 2f, cell * 2f, paint)
-            paint.style = Paint.Style.FILL
-            c.drawRoundRect(RectF(l + 2 * cell, t + 2 * cell, l + 5 * cell, t + 5 * cell), cell, cell, paint)
+            // Only slightly rounded finder eyes: strongly rounded ones break many decoders.
+            val ring = Path().apply {
+                fillType = Path.FillType.EVEN_ODD
+                addRoundRect(RectF(l, t, l + 7 * cell, t + 7 * cell), cell * 0.35f, cell * 0.35f, Path.Direction.CW)
+                addRoundRect(RectF(l + cell, t + cell, l + 6 * cell, t + 6 * cell), cell * 0.15f, cell * 0.15f, Path.Direction.CW)
+            }
+            c.drawPath(ring, paint)
+            c.drawRoundRect(RectF(l + 2 * cell, t + 2 * cell, l + 5 * cell, t + 5 * cell), cell * 0.3f, cell * 0.3f, paint)
         }
         // Avatar in the middle.
         val size = (hole - 1) * cell

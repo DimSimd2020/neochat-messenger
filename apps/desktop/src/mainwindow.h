@@ -49,7 +49,8 @@ private:
     void toast(const QString &text);
     void notify(const QJsonObject &ev);
     DialogHost host();
-    void checkUpdate();
+    void checkUpdate(bool manual = false);
+    void refreshPresence();
 
     QStackedWidget *m_stack;
     Onboarding *m_onboarding;

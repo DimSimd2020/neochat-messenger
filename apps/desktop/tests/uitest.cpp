@@ -20,6 +20,9 @@
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QMenu>
+#include <QTimer>
+#include <QToolButton>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
@@ -94,6 +97,7 @@ private slots:
     void addContactAndOpenChat();
     void composeSendAndFile();
     void receiptsAndGroup();
+    void socialFeatures();
     void themeSettingsAndSidebar();
     void keyChangeBlocksSending();
     void cleanupTestCase();
@@ -337,6 +341,96 @@ void UiTest::receiptsAndGroup()
     panel->select(m_conv);
     emit panel->activated(m_conv);
     QTRY_VERIFY(view->conversation() == m_conv);
+}
+
+void UiTest::socialFeatures()
+{
+    auto *view = find<MessageView>([](MessageView *) { return true; });
+    auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
+    auto headerHas = [this](const QString &part) {
+        return find<QAbstractButton>([&](QAbstractButton *b) { return b->accessibleName().contains(part); }) != nullptr;
+    };
+
+    // "печатает…" from the peer shows in the header, then a large emoji-only message.
+    m_alice->call("send_typing", {{"conversation_id", m_conv}});
+    QTRY_VERIFY_WITH_TIMEOUT(headerHas(QStringLiteral("печатает")), 15000);
+    shot("11c-typing");
+    m_alice->call("send_text", {{"conversation_id", m_conv}, {"text", QStringLiteral("🔥🔥")}});
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("emoji_only").toInt() == 2, 20000);
+    QTRY_VERIFY_WITH_TIMEOUT(!headerHas(QStringLiteral("печатает")), 10000);
+
+    // A click on the message opens the menu; the first quick reaction is set.
+    QTest::qWait(300);
+    const QModelIndex last = view->model()->index(view->model()->rowCount() - 1, 0);
+    view->scrollTo(last);
+    const QRect vr = view->visualRect(last);
+    const auto *item = static_cast<const MessageItem *>(last.data(MessageModel::ItemRole).value<const void *>());
+    const MessageLayout L = MessageDelegate::layout(*item, vr.width(), false);
+    const QPoint at = vr.topLeft() + L.text.center().toPoint();
+    bool menuShown = false;
+    QTimer::singleShot(600, this, [this, &menuShown] {
+        auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+        if (!menu)
+            return;
+        menuShown = true;
+        m_window->grab().save(m_shots + "/11d-message-menu.png");
+        for (auto *b : menu->findChildren<QToolButton *>())
+            if (b->text() == QStringLiteral("👍")) {
+                b->click();
+                return;
+            }
+        menu->close();
+    });
+    QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, at);
+    QTRY_VERIFY_WITH_TIMEOUT(menuShown, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!lastMessage(view).value("reactions").toArray().isEmpty(), 10000);
+    QCOMPARE(lastMessage(view).value("reactions").toArray().first().toObject().value("emoji").toString(), QStringLiteral("👍"));
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            m_alice->call("sync_now");
+            const QJsonArray ms = m_alice->call("list_messages", {{"conversation_id", m_conv}}).toArray();
+            return !ms.isEmpty() && !ms.last().toObject().value("reactions").toArray().isEmpty();
+        }(),
+        20000);
+    // The peer answers with a reaction too: two chips on one message.
+    m_alice->call("react", {{"message_id", lastMessage(view).value("id")}, {"emoji", QStringLiteral("❤️")}});
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("reactions").toArray().size() == 2, 20000);
+    shot("11e-reactions-big-emoji");
+    auto *composer = find<Composer>([](Composer *) { return true; });
+    composer->setReply(lastMessage(view));
+    shot("11e2-inline-reply");
+    composer->clearReply();
+    find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().startsWith(QStringLiteral("Профиль")); })->click();
+    QTRY_VERIFY_WITH_TIMEOUT(button(QStringLiteral("Мой QR-код")), 5000);
+    shot("11e3-profile");
+    button(QStringLiteral("Мой QR-код"))->click();
+    QTRY_VERIFY_WITH_TIMEOUT(find<QWidget>([](QWidget *w) { return w->accessibleName() == QStringLiteral("QR-код профиля"); }), 5000);
+    QTest::qWait(1500);
+    shot("11e4-my-qr");
+    QTest::keyClick(QApplication::focusWidget() ? QApplication::focusWidget() : m_window, Qt::Key_Escape);
+    QTest::qWait(600);
+
+    // Archive and pins from the list menu's core calls; the archive row appears on top.
+    QString gid;
+    for (const auto &c : panel->all())
+        if (c.value("kind").toString() == "group")
+            gid = c.value("id").toString();
+    QVERIFY(!gid.isEmpty());
+    Core::instance()->call("set_pinned", {{"conversation_id", m_conv}, {"pinned", true}});
+    Core::instance()->call("set_archived", {{"conversation_id", gid}, {"archived", true}});
+    auto *list = panel->findChild<QListView *>();
+    QTRY_VERIFY_WITH_TIMEOUT(list->model()->rowCount() > 0 && list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("_archive").toBool(), 10000);
+    QTRY_VERIFY(list->model()->index(1, 0).data(ChatListModel::ObjectRole).toJsonObject().value("pinned").toBool());
+    shot("11f-archive-row-pinned");
+    panel->setArchiveMode(true);
+    QTRY_VERIFY_WITH_TIMEOUT(list->model()->rowCount() == 1 && list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("id").toString() == gid, 10000);
+    shot("11g-archive");
+    Core::instance()->call("set_archived", {{"conversation_id", gid}, {"archived", false}});
+    panel->setArchiveMode(false);
+    QTRY_VERIFY_WITH_TIMEOUT(!panel->conversation(gid).value("in_archive").toBool() && !list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("_archive").toBool(), 10000);
 }
 
 void UiTest::themeSettingsAndSidebar()

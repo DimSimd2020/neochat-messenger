@@ -309,15 +309,17 @@ final class PrettyQrView: UIView {
         dot.setStroke()
         for y in 0..<n {
             for x in 0..<n where rows[y][x] && !eye(x, y) && !(x >= h0 && x < h1 && y >= h0 && y < h1) {
-                ctx.fillEllipse(in: CGRect(x: CGFloat(x) * cell + cell * 0.07, y: CGFloat(y) * cell + cell * 0.07, width: cell * 0.86, height: cell * 0.86))
+                ctx.fillEllipse(in: CGRect(x: CGFloat(x) * cell + cell * 0.05, y: CGFloat(y) * cell + cell * 0.05, width: cell * 0.9, height: cell * 0.9))
             }
         }
         for (ex, ey) in [(0, 0), (n - 7, 0), (0, n - 7)] {
             let l = CGFloat(ex) * cell, t = CGFloat(ey) * cell
-            let outer = UIBezierPath(roundedRect: CGRect(x: l + cell / 2, y: t + cell / 2, width: 6 * cell, height: 6 * cell), cornerRadius: cell * 2)
-            outer.lineWidth = cell
-            outer.stroke()
-            UIBezierPath(roundedRect: CGRect(x: l + 2 * cell, y: t + 2 * cell, width: 3 * cell, height: 3 * cell), cornerRadius: cell).fill()
+            // Only slightly rounded finder eyes: strongly rounded ones break many decoders.
+            let ring = UIBezierPath(roundedRect: CGRect(x: l, y: t, width: 7 * cell, height: 7 * cell), cornerRadius: cell * 0.35)
+            ring.append(UIBezierPath(roundedRect: CGRect(x: l + cell, y: t + cell, width: 5 * cell, height: 5 * cell), cornerRadius: cell * 0.15))
+            ring.usesEvenOddFillRule = true
+            ring.fill()
+            UIBezierPath(roundedRect: CGRect(x: l + 2 * cell, y: t + 2 * cell, width: 3 * cell, height: 3 * cell), cornerRadius: cell * 0.3).fill()
         }
     }
 }

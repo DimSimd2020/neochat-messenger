@@ -1,5 +1,6 @@
 #include "composer.h"
 
+#include "emoji.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -92,72 +93,6 @@ void ComposerEdit::insertFromMimeData(const QMimeData *source)
     if (source->hasText())
         insertPlainText(source->text());
 }
-
-// ---- emoji picker ----
-
-namespace {
-
-class EmojiPopup : public QWidget {
-public:
-    EmojiPopup(QWidget *anchor, std::function<void(const QString &)> pick) : QWidget(anchor, Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint)
-    {
-        setAttribute(Qt::WA_TranslucentBackground);
-        setAttribute(Qt::WA_DeleteOnClose);
-        setAccessibleName(QStringLiteral("Выбор эмодзи"));
-        static const QStringList emoji = QString::fromUtf8(
-            "😀 😄 😁 😂 🤣 😊 😍 😘 😉 😎 🤔 😐 😴 😢 😭 😡 👍 👎 👌 🙏 👏 🙌 💪 🤝 "
-            "❤️ 🔥 ✨ 🎉 ✅ ❌ ⚡ ☕ 🍕 🎂 🌞 🌧️ 🚗 ✈️ 🏠 📎 📷 🎵 💡 📌 ⏰ 🙂 😅 🤗")
-                                             .split(' ', Qt::SkipEmptyParts);
-        auto *grid = new QGridLayout(this);
-        grid->setContentsMargins(12, 12, 12, 12);
-        grid->setSpacing(2);
-        for (int i = 0; i < emoji.size(); ++i) {
-            auto *b = new QPushButton(emoji[i], this);
-            b->setFlat(true);
-            b->setFixedSize(38, 38);
-            b->setCursor(Qt::PointingHandCursor);
-            b->setAccessibleName(emoji[i]);
-            QFont f(QStringLiteral("Segoe UI Emoji"));
-            f.setPixelSize(22);
-            b->setFont(f);
-            connect(b, &QPushButton::clicked, this, [this, pick, e = emoji[i]] {
-                pick(e);
-                close();
-            });
-            grid->addWidget(b, i / 8, i % 8);
-        }
-        m_fade.setStartValue(0.0);
-        m_fade.setEndValue(1.0);
-        m_fade.setDuration(qMax(1, Theme::ms(180)));
-        connect(&m_fade, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) { setWindowOpacity(v.toReal()); });
-    }
-    void popup(const QPoint &bottomRight)
-    {
-        adjustSize();
-        move(bottomRight - QPoint(width(), height() + 8));
-        setWindowOpacity(Theme::ms(180) ? 0.0 : 1.0);
-        show();
-        m_fade.start();
-        if (auto *first = findChild<QPushButton *>())
-            first->setFocus();
-    }
-
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        const Palette &c = Theme::p();
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(QPen(c.border, 1));
-        p.setBrush(c.surface);
-        p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 16, 16);
-    }
-
-private:
-    QVariantAnimation m_fade;
-};
-
-} // namespace
 
 // ---- composer ----
 
@@ -271,8 +206,11 @@ void Composer::onTextChanged()
         m_hasText = has;
         updateSendState(!m_settingDraft);
     }
-    if (!m_settingDraft)
+    if (!m_settingDraft) {
         m_draftTimer->start();
+        if (has)
+            emit typing();
+    }
 }
 
 void Composer::setBlocked(bool blocked)
@@ -338,7 +276,8 @@ void Composer::relayout()
     const qreal reply = m_replyAnim.currentValue().isValid() ? m_replyAnim.currentValue().toReal() : 0;
     const int side = width() < 560 ? 12 : 24;
     const int replyH = int(reply * 50);
-    const QRect box(side, 8 + replyH, width() - 2 * side, height() - 8 - 12 - replyH);
+    const QRect box(side, 8, width() - 2 * side, height() - 8 - 12);
+    const QRect inner(box.left(), box.top() + replyH, box.width(), box.height() - replyH);
     const int cy = box.bottom() - 28;
     m_attach->move(box.left() + 10, cy - 20 + 1);
     const qreal p = m_send->progress;
@@ -348,8 +287,8 @@ void Composer::relayout()
     const int left = box.left() + 58;
     const int right = int(sendX - p * kShift) - 6;
     const int eh = editHeight();
-    m_edit->setGeometry(left, box.top() + (box.height() - eh) / 2, right - left, eh);
-    m_cancelReply->move(box.right() - 34, 8 + 10);
+    m_edit->setGeometry(left, inner.top() + (inner.height() - eh) / 2, right - left, eh);
+    m_cancelReply->move(box.right() - 40, box.top() + 12);
     m_cancelReply->setVisible(replyH > 30);
 }
 
@@ -361,25 +300,25 @@ void Composer::paintEvent(QPaintEvent *)
     const qreal reply = m_replyAnim.currentValue().isValid() ? m_replyAnim.currentValue().toReal() : 0;
     const int side = width() < 560 ? 12 : 24;
     const int replyH = int(reply * 50);
+    const QRectF box(side + 0.5, 8.5, width() - 2 * side - 1, height() - 8 - 12 - 1);
+    p.setPen(QPen(m_edit->hasFocus() ? c.accent : c.border, 1));
+    p.setBrush(c.surface);
+    p.drawRoundedRect(box, 20, 20);
     if (replyH > 0) {
         p.setOpacity(reply);
-        const QRectF r(side + 6, 8, width() - 2 * side - 12, 42);
+        const QRectF r(side + 16, 8 + 8, width() - 2 * side - 32, 42);
         p.setPen(Qt::NoPen);
         p.setBrush(c.accent);
         p.drawRoundedRect(QRectF(r.left(), r.top() + 4, 3, r.height() - 8), 1.5, 1.5);
         p.setFont(Theme::instance()->font(12.5, QFont::DemiBold));
         p.setPen(c.accent);
-        p.drawText(r.adjusted(14, 2, -44, -20), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("Ответ: ") + m_reply.value("sender_name").toString());
+        p.drawText(r.adjusted(14, 2, -44, -20), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("В ответ ") + m_reply.value("sender_name").toString());
         p.setFont(Theme::instance()->font(13));
         p.setPen(c.muted);
         const QString t = m_reply.value("kind").toString() == "file" ? m_reply.value("file").toObject().value("name").toString() : m_reply.value("text").toString().simplified();
         p.drawText(r.adjusted(14, 20, -44, -2), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(t, Qt::ElideRight, int(r.width()) - 60));
         p.setOpacity(1);
     }
-    const QRectF box(side + 0.5, 8 + replyH + 0.5, width() - 2 * side - 1, height() - 8 - 12 - replyH - 1);
-    p.setPen(QPen(m_edit->hasFocus() ? c.accent : c.border, 1));
-    p.setBrush(c.surface);
-    p.drawRoundedRect(box, 20, 20);
 }
 
 bool Composer::eventFilter(QObject *o, QEvent *e)

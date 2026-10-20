@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QHash>
+#include <QMap>
 #include <QJsonObject>
 #include <QListView>
 #include <QStyledItemDelegate>
@@ -16,6 +18,27 @@ class Button;
 }
 
 QString formatListTime(qint64 ms);
+
+// "печатает…" hints by conversation; each lasts 6 s after the last one.
+class Typing : public QObject {
+    Q_OBJECT
+public:
+    static Typing *instance();
+    void onEvent(const QJsonObject &ev);
+    void clear(const QString &conv);
+    QString text(const QString &conv, bool group) const;
+
+signals:
+    void changed(const QString &conv);
+
+private:
+    using QObject::QObject;
+    struct Entry {
+        qint64 until = 0;
+        QMap<QString, QString> names;
+    };
+    QHash<QString, Entry> m_entries;
+};
 
 class ChatListModel : public QAbstractListModel {
     Q_OBJECT
@@ -53,6 +76,8 @@ public:
     void focusSearch();
     void setConnection(const QString &state);
     QJsonObject conversation(const QString &id) const;
+    QList<QJsonObject> all() const { return m_all + m_archived; }
+    void setArchiveMode(bool on);
 
 signals:
     void activated(const QString &id);
@@ -63,6 +88,9 @@ protected:
 
 private:
     void apply(const QList<QJsonObject> &all, bool animate);
+    void showSortMenu();
+    void showRowMenu(const QPoint &pos);
+    QString sortKey() const;
 
     ui::SearchField *m_search;
     QButtonGroup *m_filters;
@@ -71,6 +99,12 @@ private:
     QWidget *m_empty;
     ui::Label *m_emptyText;
     ui::Label *m_status;
+    ui::Label *m_title;
+    ui::IconButton *m_back;
+    ui::IconButton *m_compose;
+    ui::IconButton *m_sort;
+    QList<QJsonObject> m_archived;
+    bool m_archive = false;
     QVariantAnimation m_refresh;
     QList<QJsonObject> m_all;
     QString m_selected;

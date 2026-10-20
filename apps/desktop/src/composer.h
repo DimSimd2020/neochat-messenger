@@ -48,6 +48,7 @@ signals:
     void attach();
     void filesDropped(const QStringList &paths);
     void draftChanged(const QString &text);
+    void typing();
 
 protected:
     void paintEvent(QPaintEvent *) override;

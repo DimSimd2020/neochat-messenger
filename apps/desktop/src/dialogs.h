@@ -12,6 +12,7 @@ struct DialogHost {
     std::function<void(const QString &text)> toast;
     std::function<void()> logout;
     std::function<void(bool enterSends)> enterSendsChanged;
+    std::function<void()> checkUpdate;
 };
 
 namespace dialogs {
@@ -21,6 +22,7 @@ void newChat(const DialogHost &h);
 void devices(const DialogHost &h);
 void settings(const DialogHost &h);
 void profile(const DialogHost &h);
+void myQr(const DialogHost &h);
 void conversationInfo(const DialogHost &h, const QString &conversationId);
 void newPoll(const DialogHost &h, const QString &conversationId);
 }

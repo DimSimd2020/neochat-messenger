@@ -46,6 +46,10 @@ const QHash<QString, QString> &icons()
         {"close", R"(<path d="m6 6 12 12M18 6 6 18"/>)"},
         {"reply", R"(<path d="M9 7 4 12l5 5"/><path d="M4 12h10a6 6 0 0 1 6 6v1"/>)"},
         {"down", R"(<path d="m6 9 6 6 6-6"/>)"},
+        {"pin", R"(<path d="M9 4h6l-1 6 4 4H6l4-4-1-6ZM12 14v7"/>)"},
+        {"archive", R"(<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/>)"},
+        {"sort", R"(<path d="M7 4v16m-4-4 4 4 4-4M17 20V4m-4 4 4-4 4 4"/>)"},
+        {"qr", R"(<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3h-3zM20 14v.1M14 20h.1M17 20h4v-3"/>)"},
         {"copy", R"(<rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>)"},
     };
     return map;

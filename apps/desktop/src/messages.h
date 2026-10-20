@@ -53,6 +53,8 @@ private:
 struct MessageLayout {
     QRectF bubble, name, avatar, text, meta, reply, file, download, retry, image, pollInfo;
     QList<QRectF> options; // poll answers
+    QList<QRectF> reacts;  // reaction chips
+    bool big = false;      // emoji-only message without a bubble
     qreal height = 0;
 };
 
@@ -92,6 +94,7 @@ public:
     void showSearch(const QString &query);
     void scrollToNewest();
     bool atBottom() const;
+    void setCanReact(bool on) { m_canReact = on; }
 
 signals:
     void replyRequested(const QJsonObject &msg);
@@ -118,6 +121,8 @@ private:
     void retry(const QJsonObject &m);
     void openImage(const QJsonObject &m);
     void vote(const QJsonObject &m, int option);
+    void react(const QJsonObject &m, const QString &emoji);
+    void showMenu(const QJsonObject &m, const QPoint &globalPos);
     QString linkAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const;
     void placeJump();
     QJsonObject messageAt(const QPoint &pos, MessageLayout *lay = nullptr) const;
@@ -127,6 +132,7 @@ private:
     bool m_loading = false;
     bool m_hasMore = true;
     bool m_searching = false;
+    bool m_canReact = true;
     int m_generation = 0;
     int m_newBelow = 0;
     QTimer m_anim;
