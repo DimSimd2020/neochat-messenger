@@ -96,6 +96,23 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(message.waitForExistence(timeout: 10))
         shot("08-chat-opened")
 
+        // Touch a populated cell: the old swipe-back check only covered an empty chat.
+        // Repeat after the reply composer changes the layout and opens the keyboard.
+        for _ in 0..<2 {
+            message.swipeLeft()
+            XCTAssertEqual(app.state, .runningForeground)
+            XCTAssertTrue(input.exists)
+            message.tap()
+            XCTAssertTrue(app.buttons["Ответить"].waitForExistence(timeout: 5))
+            app.buttons["Ответить"].tap()
+            XCTAssertTrue(app.buttons["Отменить ответ"].waitForExistence(timeout: 5))
+            app.buttons["Отменить ответ"].tap()
+            XCTAssertTrue(message.exists)
+            XCTAssertTrue(input.exists)
+            XCTAssertEqual(app.state, .runningForeground)
+        }
+        shot("08-message-interactions")
+
         // Cancellation keeps history, confirmation clears it while the chat stays open.
         app.buttons["Действия чата"].tap()
         app.buttons["Очистить чат…"].tap()

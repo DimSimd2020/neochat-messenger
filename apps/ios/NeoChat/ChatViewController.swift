@@ -1074,6 +1074,7 @@ final class BubbleCell: UITableViewCell {
     private let avatar = AvatarView(size: 30)
     private let reactRow = UIStackView()
     private let bubbleTap = UITapGestureRecognizer()
+    private let bubbleTapDelegate = BubbleTapDelegate()
     private let sender = label("", 13, .semibold, color: Theme.muted)
     private let bubble = UIView()
     private let content = UIStackView()
@@ -1163,7 +1164,8 @@ final class BubbleCell: UITableViewCell {
         [fwd, quote, fileRow, text, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
         inner.setCustomSpacing(6, after: reactRow)
         bubbleTap.addTarget(self, action: #selector(tapped))
-        bubbleTap.delegate = self
+        bubbleTapDelegate.photo = photo
+        bubbleTap.delegate = bubbleTapDelegate
         contentView.addGestureRecognizer(bubbleTap)
         bubble.isUserInteractionEnabled = true
         inner.isLayoutMarginsRelativeArrangement = true
@@ -1201,17 +1203,6 @@ final class BubbleCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError() }
 
     @objc private func tapped() { onTap?() }
-
-    /// Photos, poll answers and reaction chips handle their own taps.
-    override func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        guard g === bubbleTap else { return super.gestureRecognizer(g, shouldReceive: touch) }
-        var v = touch.view
-        while let x = v, x !== contentView {
-            if x is UIControl || x === photo { return false }
-            v = x.superview
-        }
-        return true
-    }
 
     func bind(_ m: JSON, group: Bool, first: Bool, last: Bool) {
         boundId = m.str("id")
@@ -1382,6 +1373,21 @@ final class BubbleCell: UITableViewCell {
             if closed { row.isEnabled = false } else { row.onTap = { [weak self] in self?.onVote?(i) } }
             pollOptions.addArrangedSubview(row)
         }
+    }
+}
+
+/// Keep our recognizer separate from UITableViewCell's internal gesture delegate.
+/// Photos, poll answers and reaction chips handle their own taps.
+private final class BubbleTapDelegate: NSObject, UIGestureRecognizerDelegate {
+    weak var photo: UIView?
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        var v = touch.view
+        while let x = v, x !== g.view {
+            if x is UIControl || x === photo { return false }
+            v = x.superview
+        }
+        return true
     }
 }
 
