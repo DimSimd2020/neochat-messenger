@@ -215,8 +215,9 @@ final class NewChatViewController: SheetViewController {
                 case .failure(let e): self?.toast(e.message)
                 case .success(let v):
                     let id = (v as? JSON)?.str("id") ?? ""
-                    let tabs = self?.presentingViewController as? MainTabController
-                    self?.dismiss(animated: true) { tabs?.open(id) }
+                    self?.dismiss(animated: !Theme.reducedMotion) {
+                        NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": id])
+                    }
                 }
             }
             return
@@ -244,8 +245,9 @@ final class NewChatViewController: SheetViewController {
             case .failure(let e): self?.toast(e.message)
             case .success(let v):
                 let id = (v as? JSON)?.str("id") ?? ""
-                let tabs = self?.presentingViewController as? MainTabController
-                self?.dismiss(animated: true) { tabs?.open(id) }
+                self?.dismiss(animated: !Theme.reducedMotion) {
+                    NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": id])
+                }
             }
         }
     }

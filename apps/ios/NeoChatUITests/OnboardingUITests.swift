@@ -30,13 +30,11 @@ final class OnboardingUITests: XCTestCase {
             shot("03-submit-failed")
             XCTFail("recovery page did not appear")
         }
-        shot("03-recovery")
         app.switches.firstMatch.tap()
         app.buttons["Продолжить"].tap()
         if !app.tabBars.buttons["Чаты"].waitForExistence(timeout: 20) {
             shot("04-chats-failed")
             print("APP STATE:", app.state.rawValue)
-            print(app.debugDescription)
             XCTFail("chat list did not appear")
         }
         shot("04-chats")
@@ -52,7 +50,10 @@ final class OnboardingUITests: XCTestCase {
         channel.typeText("Проверка чатов 062")
         app.buttons["Создать канал"].tap()
         let input = app.textViews["Текст сообщения"]
-        XCTAssertTrue(input.waitForExistence(timeout: 20))
+        guard input.waitForExistence(timeout: 20) else {
+            shot("06-open-chat-failed")
+            return XCTFail("chat did not open after channel creation")
+        }
         input.tap()
         input.typeText("черновик")
         // Exercise back navigation with the keyboard up, then repeat it after reopening.
