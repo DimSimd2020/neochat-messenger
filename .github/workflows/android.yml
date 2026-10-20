@@ -1,0 +1,102 @@
+name: Android APK
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing GitHub release tag to upload to"
+        required: true
+        default: "v0.5.1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release tag
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then TAG="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then TAG="${GITHUB_REF_NAME}"
+          else TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "uploading to $TAG"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK
+        run: |
+          ANDROID_HOME=/usr/local/lib/android/sdk
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SM=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | tail -n1)
+          yes | "$SM" --licenses >/dev/null || true
+          "$SM" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r26d
+          add-to-path: true
+
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler perl
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: android-core-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Core (Android)
+        working-directory: core
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a -t x86_64 --platform 26 -o ../apps/android/app/src/main/jniLibs build --release --lib
+
+      - name: APK
+        working-directory: apps/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          APK="Neochat-${TAG}.apk"
+          cp apps/android/app/build/outputs/apk/release/app-release.apk "$APK"
+          ls -la "$APK"
+          gh release upload "$TAG" "$APK" --clobber --repo "${{ github.repository }}"
