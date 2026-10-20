@@ -24,7 +24,6 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextUtils
 import android.text.TextWatcher
-import android.text.method.LinkMovementMethod
 import android.text.style.BackgroundColorSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
@@ -286,8 +285,24 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val gone = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private var shown = false
     private var readPending = false
+    private val replyName = ctx.label("", 13.5f, 600, Theme.Role.ACCENT)
+    private val replyLine = View(ctx)
+    private val composerBox = LinearLayout(ctx)
+    private val composerBg = GlassDrawable(ctx, radius = ctx.dpf(31))
+    private val textSp = Prefs.textSize(ctx)
+    private val bigEmoji = Prefs.of(ctx).getBoolean("big_emoji", true)
+    private val enterSends = Prefs.of(ctx).getBoolean("enter_send", false)
+    private var baseSubtitle = ""
 
     private val reload = Runnable { load(false) }
+    private val typingChanged: (String) -> Unit = { if (it == conversationId) updateSubtitle() }
+    // Presence of the other person while the chat is open.
+    private val presenceTick = object : Runnable {
+        override fun run() {
+            requestPresence()
+            root.postDelayed(this, 30_000)
+        }
+    }
 
     init {
         column.orientation = LinearLayout.VERTICAL
@@ -439,13 +454,16 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId })
             val members = conv.optJSONArray("members") ?: JSONArray()
             val channel = conv.str("kind") == "channel"
-            subtitle.text = when (conv.str("kind")) {
+            baseSubtitle = when (conv.str("kind")) {
                 "group" -> memberCount(conv.optInt("member_count"))
                 "channel" -> memberCount(conv.optInt("member_count"), true)
-                else -> members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
+                else -> conv.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }
+                    ?: members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
             }
+            avatar.online = conv.optJSONObject("presence")?.optBoolean("online") == true
             val system = conv.str("kind") == "system"
-            if (system) subtitle.text = "Системные сообщения"
+            if (system) baseSubtitle = "Системные сообщения"
+            updateSubtitle()
             val left = conv.optBoolean("left") || conv.optBoolean("archived") || system
             val muteComposer = left || !conv.optBoolean("can_post", true)
             composer.visibility = if (muteComposer) View.GONE else View.VISIBLE
@@ -474,15 +492,20 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
     }
 
-    private fun memberCount(n: Int, channel: Boolean = false): String {
-        val m10 = n % 10
-        val m100 = n % 100
-        val w = when {
-            m10 == 1 && m100 != 11 -> if (channel) "подписчик" else "участник"
-            m10 in 2..4 && m100 !in 12..14 -> if (channel) "подписчика" else "участника"
-            else -> if (channel) "подписчиков" else "участников"
+    /** "печатает…" wins over presence and the member count for a few seconds. */
+    private fun updateSubtitle() {
+        val typing = Typing.text(conversationId, conv.str("kind") != "direct")
+        subtitle.text = typing ?: baseSubtitle
+        subtitle.role(if (typing != null || avatar.online) Theme.Role.ACCENT else Theme.Role.MUTED)
+    }
+
+    private fun requestPresence() {
+        val peer = conv.str("peer_user_id")
+        if (peer.isEmpty() || !shown) return
+        val tz = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000
+        CoreClient.call("presence", JSONObject().put("user_ids", JSONArray().put(peer)).put("tz_offset", tz)) { _, e ->
+            if (e == null) refreshConversation(false)
         }
-        return "$n $w"
     }
 
     // ---- history ----
@@ -709,6 +732,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private val pollQuestion = ctx.label("", 16f, 700)
         private val pollInfo = ctx.label("", 12.5f)
         private val pollOptions = LinearLayout(ctx)
+        private val reactRow = FlowRow(ctx)
         private val meta = LinearLayout(ctx)
         private val time = ctx.label("", 11.5f)
         private val status = ImageView(ctx)
@@ -759,6 +783,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             photo.isClickable = true
             photo.setOnClickListener { openPhoto(m) }
             photo.setOnLongClickListener { menu(m, bubble); true }
+            fileIcon.setOnClickListener { openFile(m) }
+            fileAction.setOnClickListener { openFile(m) }
             bubble.addView(photo, LayoutParams(dp(200), dp(150)))
             poll.orientation = VERTICAL
             poll.minimumWidth = dp(240)
@@ -775,8 +801,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             text.setTextIsSelectable(false)
             text.setLineSpacing(0f, 1.2f)
             text.setOnLongClickListener { menu(m, bubble); true }
+            text.setOnClickListener { menu(m, bubble) }
+            text.setOnTouchListener { v, e -> openLinkAt(v as TextView, e) }
             pollQuestion.maxWidth = maxText
             bubble.addView(text, LayoutParams(WRAP, WRAP))
+            bubble.addView(reactRow, LayoutParams(WRAP, WRAP).apply { topMargin = dp(6) })
             meta.gravity = Gravity.CENTER_VERTICAL or Gravity.END
             meta.addView(time)
             meta.addView(status, LayoutParams(dp(16), dp(16)).apply { marginStart = dp(4) })
@@ -791,7 +820,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             bubble.isClickable = true
             bubble.isLongClickable = true
             bubble.setOnLongClickListener { menu(m, bubble); true }
-            bubble.setOnClickListener { if (isImage(m)) openPhoto(m) else if (m.str("kind") == "file") openFile(m) }
+            // A tap opens reactions and actions, like a long press; photos open the viewer.
+            bubble.setOnClickListener { if (isImage(m)) openPhoto(m) else menu(m, bubble) }
         }
 
         fun bind(item: Item) {
@@ -846,7 +876,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 val id = m.str("id")
                 val cached = Photos.full.get(id)
                 photo.setImageBitmap(cached ?: Photos.thumb(m))
-                if (cached == null) Photos.load(m) { bmp -> if (m.str("id") == id) photo.setImageBitmap(bmp) }
+                if (cached == null && Prefs.autoloadPhotos(ctx)) Photos.load(m) { bmp -> if (m.str("id") == id) photo.setImageBitmap(bmp) }
             }
             poll.visibility = if (kind == "poll") VISIBLE else GONE
             if (kind == "poll") bindPoll(m, fg, muted)
@@ -863,8 +893,19 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val rich = if (undecryptable) body else spanned(m)
             text.text = rich
             text.setLinkTextColor(fg)
-            text.movementMethod = if (rich is Spanned && rich.getSpans(0, rich.length, URLSpan::class.java).isNotEmpty()) LinkMovementMethod.getInstance() else null
             if (undecryptable) text.setTextColor(Theme.p.warning)
+            // One to three emoji without anything else are shown large and without a bubble.
+            val emoji = if (bigEmoji && rep == null && f == null) m.optInt("emoji_only") else 0
+            text.setTextSize(TypedValue.COMPLEX_UNIT_SP, when (emoji) { 1 -> 52f; 2 -> 42f; 3 -> 34f; else -> textSp })
+            if (emoji > 0) {
+                bubble.background = null
+                bubble.setPadding(dp(2), 0, dp(2), dp(2))
+                text.setTextColor(Theme.p.text)
+                time.setTextColor(Theme.p.muted)
+            } else {
+                bubble.background = bg
+            }
+            bindReactions(m, out && emoji == 0)
             time.text = hhmm(m.optLong("sent_at"))
             val st = m.str("status")
             status.visibility = if (out) VISIBLE else GONE
@@ -882,6 +923,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 }
             )
             status.alpha = if (st == "delivered") 0.75f else 1f
+            if (emoji > 0 && st != "failed") status.imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.muted)
             retry.visibility = if (out && st == "failed") VISIBLE else GONE
             bubble.contentDescription = buildString {
                 append(m.str("sender_name")).append(", ").append(time.text).append(": ")
@@ -890,8 +932,16 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 append(body)
                 if (out && statusText(m).isNotEmpty()) append(". ").append(statusText(m))
                 if (group && out && m.optInt("delivered_count") > 0) append(", доставлено: ").append(m.optInt("delivered_count"))
+                for (r in m.optJSONArray("reactions")?.objects() ?: emptyList()) append(", ").append(r.str("emoji")).append(" ").append(r.optInt("count"))
             }
             invalidate()
+        }
+
+        private fun bindReactions(m: JSONObject, onAccent: Boolean) {
+            reactRow.removeAllViews()
+            val list = m.optJSONArray("reactions")?.objects() ?: emptyList()
+            reactRow.visibility = if (list.isEmpty()) GONE else VISIBLE
+            for (r in list) reactRow.addView(reactionChip(ctx, r, onAccent) { react(m, r.str("emoji")) })
         }
 
         private fun bindPoll(m: JSONObject, fg: Int, muted: Int) {
@@ -1001,8 +1051,68 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         v.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { root.removeView(v) }.start()
     }
 
+    /** Opens a link under the finger; any other tap falls through to the bubble's actions. */
+    private fun openLinkAt(tv: TextView, e: MotionEvent): Boolean {
+        if (e.action != MotionEvent.ACTION_UP) return false
+        val text = tv.text as? Spanned ?: return false
+        val layout = tv.layout ?: return false
+        val x = e.x.toInt() - tv.totalPaddingLeft + tv.scrollX
+        val y = e.y.toInt() - tv.totalPaddingTop + tv.scrollY
+        val line = layout.getLineForVertical(y)
+        if (x < layout.getLineLeft(line) || x > layout.getLineRight(line)) return false
+        val off = layout.getOffsetForHorizontal(line, x.toFloat())
+        val link = text.getSpans(off, off, URLSpan::class.java).firstOrNull() ?: return false
+        try {
+            act.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link.url)))
+        } catch (_: Exception) {
+            act.toast("Не удалось открыть ссылку")
+        }
+        return true
+    }
+
+    private fun canReact(m: JSONObject) = m.str("kind") in setOf("text", "file", "poll") &&
+        conv.str("kind") != "system" && !conv.optBoolean("left") && !conv.optBoolean("archived") &&
+        (conv.optJSONArray("key_changed_users")?.length() ?: 0) == 0
+
+    /** A tap on my current reaction removes it; another emoji replaces it. */
+    private fun react(m: JSONObject, emoji: String) {
+        val mine = m.optJSONArray("reactions")?.objects()?.firstOrNull { it.optBoolean("mine") }?.str("emoji")
+        val next = if (mine == emoji) "" else emoji
+        CoreClient.call("react", JSONObject().put("message_id", m.str("id")).put("emoji", next)) { _, e -> if (e != null) act.toast(e.message) }
+    }
+
+    private fun quickReactions(m: JSONObject, close: () -> Unit): View {
+        val mine = m.optJSONArray("reactions")?.objects()?.firstOrNull { it.optBoolean("mine") }?.str("emoji")
+        val row = LinearLayout(ctx).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), 0, dp(6), dp(4))
+        }
+        for (e in Emoji.QUICK) {
+            val tv = TextView(ctx).apply {
+                text = e
+                textSize = 23f
+                gravity = Gravity.CENTER
+                contentDescription = "Реакция $e" + if (e == mine) ", выбрана" else ""
+                isClickable = true
+                background = if (e == mine) GradientDrawable().apply { setColor((Theme.p.accent and 0x00FFFFFF) or 0x40000000); cornerRadius = ctx.dpf(18) }
+                else GlassDrawable(ctx, GlassDrawable.Kind.NONE, ctx.dpf(18), rim = false)
+                pressFeedback()
+                setOnClickListener { close(); react(m, e) }
+            }
+            row.addView(tv, lp(0, dp(42), 1f))
+        }
+        val more = IconButton(ctx, R.drawable.ic_smile, "Другие реакции", 40)
+        more.setOnClickListener {
+            close()
+            Emoji.sheet(act, "Реакция") { react(m, it) }
+        }
+        row.addView(more, lp(dp(40), dp(40)))
+        return row
+    }
+
     private fun menu(m: JSONObject, anchor: View) {
         val pm = PopupMenu(act, anchor)
+        if (canReact(m)) pm.header(quickReactions(m) { pm.dismiss() })
         val ok = m.str("kind") != "undecryptable"
         val gone = composer.visibility != View.VISIBLE
         if (ok && !gone) pm.add("Ответить") { setReply(m) }
@@ -1073,20 +1183,28 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun buildComposer() {
         composer.orientation = LinearLayout.VERTICAL
+        // The reply preview is the top part of the same glass field, not a separate strip.
+        composerBox.orientation = LinearLayout.VERTICAL
+        composerBox.background = composerBg
         replyBar.gravity = Gravity.CENTER_VERTICAL
-        replyBar.background = GlassDrawable(ctx, radius = ctx.dpf(20))
-        replyBar.setPadding(dp(16), dp(4), dp(4), dp(4))
+        replyBar.setPadding(dp(18), dp(8), dp(4), 0)
+        replyLine.background = GradientDrawable().apply { cornerRadius = ctx.dpf(2) }
+        replyBar.addView(replyLine, lp(dp(3), dp(34)))
+        val replyCol = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        replyName.maxLines = 1
+        replyName.ellipsize = TextUtils.TruncateAt.END
         replyText.maxLines = 1
         replyText.ellipsize = TextUtils.TruncateAt.END
-        replyBar.addView(replyText, lp(0, WRAP, 1f))
-        val cancel = IconButton(ctx, R.drawable.ic_close, "Отменить ответ")
+        replyCol.addView(replyName)
+        replyCol.addView(replyText)
+        replyBar.addView(replyCol, lp(0, WRAP, 1f).apply { marginStart = dp(10) })
+        val cancel = IconButton(ctx, R.drawable.ic_close, "Отменить ответ", 40)
         cancel.setOnClickListener { setReply(null) }
-        replyBar.addView(cancel)
+        replyBar.addView(cancel, lp(dp(40), dp(40)))
         replyBar.visibility = View.GONE
-        composer.addView(replyBar, lp().apply { bottomMargin = dp(6) })
+        composerBox.addView(replyBar, lp())
 
         capsule.gravity = Gravity.BOTTOM
-        capsule.background = GlassDrawable(ctx, radius = ctx.dpf(31))
         capsule.setPadding(dp(4), dp(4), dp(4), dp(4))
         val attach = IconButton(ctx, R.drawable.ic_attach, "Прикрепить")
         // Ask what is attached first: photos open the gallery and arrive as photos.
@@ -1108,8 +1226,16 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         edit.maxLines = 5
         edit.minHeight = dp(48)
         edit.setPadding(dp(8), dp(12), dp(8), dp(12))
+        if (enterSends) {
+            edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            edit.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+            edit.setOnEditorActionListener { _, _, _ -> sendText(); true }
+        }
         edit.addTextChangedListener(object : TextWatcher {
-            override fun afterTextChanged(s: Editable?) = updateSend(true)
+            override fun afterTextChanged(s: Editable?) {
+                updateSend(true)
+                if (!s.isNullOrBlank() && !blocked && shown) CoreClient.call("send_typing", JSONObject().put("conversation_id", conversationId))
+            }
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
@@ -1122,7 +1248,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         sendSlot.clipChildren = false
         sendSlot.addView(send, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.CENTER_VERTICAL).apply { setMargins(0, dp(2), dp(2), dp(2)) })
         capsule.addView(sendSlot, lp(0, dp(48)))
-        composer.addView(capsule, lp())
+        composerBox.addView(capsule, lp())
+        composer.addView(composerBox, lp())
         updateSend(false)
     }
 
@@ -1179,9 +1306,19 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun setReply(m: JSONObject?) {
         replyTo = m
+        composerBg.radius = ctx.dpf(if (m != null) 24 else 31)
+        composerBox.invalidate()
+        (replyLine.background as GradientDrawable).setColor(Theme.p.accent)
         if (m != null) {
-            val t = if (m.str("kind") == "file") "Файл" else m.str("text").replace('\n', ' ')
-            replyText.text = "Ответ: ${m.str("sender_name")} — $t"
+            val t = when {
+                isImage(m) -> "Фото"
+                m.str("kind") == "file" -> "Файл"
+                m.str("kind") == "poll" -> "Опрос: " + m.str("text")
+                else -> m.str("text").replace('\n', ' ')
+            }
+            replyName.text = "В ответ ${m.str("sender_name")}"
+            replyText.text = t
+            replyBar.contentDescription = "Ответ на сообщение ${m.str("sender_name")}: $t"
             edit.requestFocus()
             edit.post {
                 (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
@@ -1298,10 +1435,15 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         shown = true
         Notifier.visibleConversation = conversationId
         list.post { markRead() }
+        Typing.listeners += typingChanged
+        root.removeCallbacks(presenceTick)
+        root.postDelayed(presenceTick, 300)
     }
 
     override fun onHidden() {
         shown = false
+        Typing.listeners -= typingChanged
+        root.removeCallbacks(presenceTick)
         if (Notifier.visibleConversation == conversationId) Notifier.visibleConversation = null
         hideKeyboard()
         saveDraft()
@@ -1319,6 +1461,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 refreshConversation(false)
             }
             "conversations_changed", "contacts_changed", "identity_changed" -> refreshConversation(false)
+            "presence" -> if (ev.str("user_id") == conv.str("peer_user_id")) refreshConversation(false)
             "connection" -> refreshConversation(false)
         }
     }

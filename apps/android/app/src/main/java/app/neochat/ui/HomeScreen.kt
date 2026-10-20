@@ -52,6 +52,7 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
     val time = ctx.label("", 12.5f, 400, Theme.Role.MUTED)
     private val badge = TextView(ctx)
     val check = ImageView(ctx)
+    val pin = ImageView(ctx)
 
     init {
         orientation = HORIZONTAL
@@ -68,7 +69,11 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
         title.maxLines = 1
         title.ellipsize = TextUtils.TruncateAt.END
         top.addView(title, lp(0, WRAP, 1f))
-        top.addView(time, lp(WRAP, WRAP).apply { marginStart = dp(8) })
+        pin.setImageResource(R.drawable.ic_pin)
+        pin.visibility = GONE
+        pin.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        top.addView(pin, lp(dp(15), dp(15)).apply { marginStart = dp(6) })
+        top.addView(time, lp(WRAP, WRAP).apply { marginStart = dp(6) })
         text.addView(top, lp())
         val bottom = LinearLayout(ctx).apply { gravity = Gravity.CENTER_VERTICAL }
         subtitle.maxLines = 1
@@ -101,6 +106,7 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
 
     override fun applyTheme() {
         badge.setTextColor(Theme.p.onAccent)
+        pin.imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.muted)
         check.imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.accent)
     }
 }
@@ -144,8 +150,11 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private val chatList = RecyclerView(ctx)
     private val chatEmpty = ctx.label("Чатов пока нет. Начните переписку с человеком по его имени пользователя.", 14.5f, 400, Theme.Role.MUTED)
     private var allChats: List<JSONObject> = emptyList()
+    private var archiveRow: JSONObject? = null
     private var chatGen = 0
-    private val chatAdapter = RowAdapter { row, c -> bindChat(row, c) }
+    private val chatAdapter = RowAdapter { row, c -> if (c.optBoolean("_archive")) bindArchiveRow(act, row, c) else bindChatRow(act, row, c) }
+    private var presenceAt = 0L
+    private val typing: (String) -> Unit = { conv -> if (allChats.any { it.str("id") == conv }) chatAdapter.notifyDataSetChanged() }
 
     // contacts
     private val contactsPage = LinearLayout(ctx)
@@ -157,11 +166,9 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private var contactGen = 0
     private val contactAdapter = RowAdapter(48) { row, c -> bindContact(row, c) }
 
-    // profile
-    private val profilePage = LinearLayout(ctx)
-    private val profileAvatar = AvatarView(ctx, 88)
-    private val profileName = ctx.label("", 22f, 700)
-    private val profileSub = ctx.label("", 14.5f, 400, Theme.Role.MUTED)
+    // profile and settings
+    private val settingsPage = SettingsPage(act)
+    private val profilePage: View = settingsPage.view
 
     private val refresh = Runnable { reloadChats(false); reloadContacts(false) }
 
@@ -175,7 +182,6 @@ class HomeScreen(private val act: MainActivity) : Screen {
         column.addView(sections, lp(MATCH, 0, 1f))
         buildChats()
         buildContacts()
-        buildProfile()
         for ((i, p) in listOf(chatsPage, contactsPage, profilePage).withIndex()) {
             sections.addView(p, FrameLayout.LayoutParams(MATCH, MATCH))
             p.visibility = if (i == 0) View.VISIBLE else View.GONE
@@ -184,7 +190,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
         nav.onSelect = { selectTab(it) }
         reloadChats(false)
         reloadContacts(false)
-        loadProfile()
+        Typing.listeners += typing
         CoreClient.call("status") { v, _ -> setConnection((v as? JSONObject)?.str("connection") ?: "") }
     }
 
@@ -202,7 +208,8 @@ class HomeScreen(private val act: MainActivity) : Screen {
         val more = IconButton(ctx, R.drawable.ic_more, "Меню")
         more.setOnClickListener {
             PopupMenu(act, more)
-                .add("Настройки") { Dialogs.settings(act) }
+                .add("Настройки") { nav.select(2); selectTab(2) }
+                .add("Мой QR-код") { Qr.showMine(act) }
                 .add("Устройства") { Dialogs.devices(act) }
                 .show()
         }
@@ -234,6 +241,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
         chatsPage.addView(chatSearch, lp(MATCH, dp(48)).apply { setMargins(dp(16), dp(4), dp(16), 0) })
         watch(chatSearch) { reloadChats(true) }
         val chips = LinearLayout(ctx)
+        chips.gravity = Gravity.CENTER_VERTICAL
         filterChips.forEachIndexed { i, c ->
             c.isSelected = i == 0
             c.setOnClickListener {
@@ -243,8 +251,21 @@ class HomeScreen(private val act: MainActivity) : Screen {
             }
             chips.addView(c, lp(WRAP, WRAP).apply { marginEnd = dp(4) })
         }
+        chips.addView(View(ctx), lp(0, 1, 1f))
+        val sortBtn = IconButton(ctx, R.drawable.ic_sort, "Сортировка чатов")
+        sortBtn.setOnClickListener {
+            val cur = Prefs.of(ctx).getString("chat_sort", "activity")
+            val m = PopupMenu(act, sortBtn)
+            for ((k, name) in CHAT_SORTS) m.add(name, checked = k == cur) {
+                Prefs.of(ctx).edit().putString("chat_sort", k).apply()
+                reloadChats(true)
+            }
+            m.show()
+        }
+        chips.addView(sortBtn, lp(dp(44), dp(44)))
         chatsPage.addView(chips, lp().apply { setMargins(dp(12), dp(10), dp(12), dp(4)) })
         list(chatList, chatAdapter)
+        androidx.recyclerview.widget.ItemTouchHelper(ChatSwipe(act, false, { chatAdapter.rows.getOrNull(it) }) { reloadChats(false) }).attachToRecyclerView(chatList)
         val holder = FrameLayout(ctx)
         holder.addView(chatList, FrameLayout.LayoutParams(MATCH, MATCH))
         chatEmpty.gravity = Gravity.CENTER
@@ -254,53 +275,47 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     private fun reloadChats(animate: Boolean) {
         val gen = ++chatGen
-        CoreClient.call("list_conversations", JSONObject().put("query", chatSearch.edit.text.toString())) { v, e ->
+        val q = chatSearch.edit.text.toString()
+        val p = JSONObject().put("query", q).put("sort", Prefs.of(ctx).getString("chat_sort", "activity"))
+        CoreClient.call("list_conversations", p) { v, e ->
             if (e != null || gen != chatGen) return@call
             allChats = (v as? JSONArray)?.objects() ?: emptyList()
-            applyChats(animate)
+            if (q.isNotEmpty()) {
+                archiveRow = null
+                return@call applyChats(animate)
+            }
+            CoreClient.call("list_conversations", JSONObject().put("archived", true)) { av, ae ->
+                if (gen != chatGen) return@call
+                archiveRow = if (ae == null) archiveSummary((av as? JSONArray)?.objects() ?: emptyList()) else null
+                applyChats(animate)
+            }
+            refreshPresence()
         }
     }
 
+    /** Presence of direct chat partners, at most once a minute; the core caches it for the list. */
+    private fun refreshPresence() {
+        val now = System.currentTimeMillis()
+        if (now - presenceAt < 60_000) return
+        presenceAt = now
+        val ids = JSONArray(allChats.filter { it.str("kind") == "direct" }.map { it.str("peer_user_id") }.filter { it.isNotEmpty() })
+        if (ids.length() == 0) return
+        val tz = java.util.TimeZone.getDefault().getOffset(now) / 60_000
+        CoreClient.call("presence", JSONObject().put("user_ids", ids).put("tz_offset", tz)) { _, e -> if (e == null) reloadChats(false) }
+    }
+
     private fun applyChats(animate: Boolean) {
-        chatAdapter.rows = allChats.filter {
+        val shown = allChats.filter {
             when (filter) {
                 1 -> it.str("kind") == "direct"
                 2 -> it.str("kind") == "group" || it.str("kind") == "channel"
                 else -> true
             }
         }
-        val none = allChats.isEmpty() && chatSearch.edit.text.isEmpty()
+        chatAdapter.rows = listOfNotNull(archiveRow.takeIf { filter == 0 }) + shown
+        val none = allChats.isEmpty() && archiveRow == null && chatSearch.edit.text.isEmpty()
         chatEmpty.visibility = if (none) View.VISIBLE else View.GONE
         if (animate) fadeIn(chatList)
-    }
-
-    private fun bindChat(row: ListRow, c: JSONObject) {
-        val title = c.str("title")
-        row.avatar.set(title, c.str("peer_user_id").ifEmpty { c.str("id") })
-        row.title.text = title
-        row.time.text = formatListTime(c.optLong("last_activity"))
-        val unread = c.optInt("unread")
-        row.setBadge(unread)
-        var preview = c.str("last_preview")
-        var role = Theme.Role.MUTED
-        val draft = c.str("draft").trim().replace('\n', ' ')
-        if (draft.isNotEmpty()) {
-            preview = "Черновик: $draft"
-            role = Theme.Role.ACCENT
-        }
-        if ((c.optJSONArray("key_changed_users")?.length() ?: 0) > 0) {
-            preview = "Ключ собеседника изменился"
-            role = Theme.Role.WARNING
-        }
-        row.subtitle.text = preview.replace('\n', ' ')
-        row.subtitle.role(role)
-        row.contentDescription = buildString {
-            append(title)
-            if (unread > 0) append(", непрочитанных: $unread")
-            if (preview.isNotEmpty()) append(", ").append(preview)
-            if (row.time.text.isNotEmpty()) append(", ").append(row.time.text)
-        }
-        row.setOnClickListener { act.openChat(c.str("id")) }
     }
 
     // ---- contacts ----
@@ -309,6 +324,14 @@ class HomeScreen(private val act: MainActivity) : Screen {
         contactsPage.orientation = LinearLayout.VERTICAL
         contactsPage.addView(contactSearch, lp(MATCH, dp(48)).apply { setMargins(dp(16), dp(4), dp(16), 0) })
         watch(contactSearch) { reloadContacts(true) }
+        val scanQr = IconButton(ctx, R.drawable.ic_qr, "Добавить по QR-коду", glass = true)
+        scanQr.setOnClickListener { Qr.scanContact(act) }
+        val searchRow = contactsPage.getChildAt(0)
+        contactsPage.removeView(searchRow)
+        val sr = LinearLayout(ctx).apply { gravity = Gravity.CENTER_VERTICAL }
+        sr.addView(searchRow, lp(0, dp(48), 1f))
+        sr.addView(scanQr, lp(dp(48), dp(48)).apply { marginStart = dp(8) })
+        contactsPage.addView(sr, lp().apply { setMargins(dp(16), dp(4), dp(16), 0) })
         val actions = LinearLayout(ctx)
         val add = PillButton(ctx, "Новый контакт", primary = false, icon = R.drawable.ic_person_add)
         add.setOnClickListener { Dialogs.newContact(act) }
@@ -387,56 +410,6 @@ class HomeScreen(private val act: MainActivity) : Screen {
         }
     }
 
-    // ---- profile ----
-
-    private fun buildProfile() {
-        profilePage.orientation = LinearLayout.VERTICAL
-        profilePage.gravity = Gravity.CENTER_HORIZONTAL
-        profilePage.addView(profileAvatar, lp(dp(88), dp(88)).apply { topMargin = dp(24) })
-        profileName.gravity = Gravity.CENTER
-        profilePage.addView(profileName, lp(WRAP, WRAP).apply { topMargin = dp(14) })
-        profileSub.gravity = Gravity.CENTER
-        profilePage.addView(profileSub, lp(WRAP, WRAP).apply { topMargin = dp(6) })
-        val card = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            background = GlassDrawable(ctx, radius = ctx.dpf(25))
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-        }
-        card.addView(navRow(R.drawable.ic_profile, "Изменить имя") { Dialogs.editName(act, profileName.text.toString()) { loadProfile() } })
-        card.addView(navRow(R.drawable.ic_devices, "Устройства") { Dialogs.devices(act) })
-        card.addView(navRow(R.drawable.ic_settings, "Настройки") { Dialogs.settings(act) })
-        profilePage.addView(card, lp().apply { setMargins(dp(16), dp(24), dp(16), 0) })
-    }
-
-    private fun navRow(icon: Int, text: String, onClick: () -> Unit): View {
-        val row = LinearLayout(ctx).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(56)
-            setPadding(dp(14), 0, dp(14), 0)
-            isClickable = true
-            isFocusable = true
-            contentDescription = text
-            background = GlassDrawable(ctx, GlassDrawable.Kind.NONE, ctx.dpf(20), rim = false)
-            pressFeedback()
-            setOnClickListener { onClick() }
-        }
-        row.addView(TintedIcon(ctx, icon), lp(dp(24), dp(24)))
-        row.addView(ctx.label(text, 16f), lp(0, WRAP, 1f).apply { marginStart = dp(16) })
-        return row
-    }
-
-    private fun loadProfile() {
-        CoreClient.call("status") { v, _ ->
-            val s = v as? JSONObject ?: return@call
-            val user = s.str("username")
-            val display = s.str("display_name").ifEmpty { user }
-            profileAvatar.set(display, s.str("user_id"))
-            profileName.text = display
-            profileSub.text = "@$user" + s.str("number").takeIf { it.isNotEmpty() }?.let { " · ID $it" }.orEmpty()
-            profileSub.setTextIsSelectable(true)
-        }
-    }
-
     // ---- navigation ----
 
     private fun selectTab(i: Int) {
@@ -497,6 +470,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
         nav.requestLayout()
         val listPad = bottom + dp(80)
         for (rv in listOf(chatList, contactList)) rv.setPadding(dp(8), dp(4), dp(8), listPad)
+        settingsPage.setBottomPadding(listPad)
         // The bar stays put while the keyboard is open; lists end above the keyboard.
         nav.visibility = if (ime > 0) View.INVISIBLE else View.VISIBLE
         sections.setPadding(0, 0, 0, if (ime > 0) maxOf(0, ime - bottom - dp(72)) else 0)
@@ -523,7 +497,11 @@ class HomeScreen(private val act: MainActivity) : Screen {
                 root.removeCallbacks(refresh)
                 root.postDelayed(refresh, 120)
             }
-            "account_changed" -> loadProfile()
+            "account_changed" -> settingsPage.load()
+            "presence" -> {
+                root.removeCallbacks(refresh)
+                root.postDelayed(refresh, 120)
+            }
         }
     }
 

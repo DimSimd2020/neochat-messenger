@@ -174,6 +174,14 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
     private var closed = false
     private var preferAbove = false
     private var pivotSet = false
+    private var header: View? = null
+    private val width get() = ctx.dp(if (header != null) 312 else 200)
+
+    /** A row above the items, e.g. quick reactions; the menu gets wider. */
+    fun header(v: View): PopupMenu {
+        header = v
+        return this
+    }
 
     fun add(text: String, checked: Boolean = false, danger: Boolean = false, action: () -> Unit): PopupMenu {
         items += Item(text, checked, danger, action)
@@ -189,6 +197,7 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
         box.background = GlassDrawable(ctx, GlassDrawable.Kind.STRONG, ctx.dpf(20))
         box.elevation = ctx.dpf(8)
         box.setPadding(0, ctx.dp(6), 0, ctx.dp(6))
+        header?.let { box.addView(it, lp()) }
         for (it in items) {
             val row = LinearLayout(ctx).apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -211,7 +220,7 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
             box.addView(row, lp())
         }
         ov.addView(catcher, FrameLayout.LayoutParams(MATCH, MATCH))
-        ov.addView(box, FrameLayout.LayoutParams(ctx.dp(200), WRAP))
+        ov.addView(box, FrameLayout.LayoutParams(width, WRAP))
         host.pushBack(back)
         host.addInsetListener(insets)
         place()
@@ -237,8 +246,8 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
         val ovLoc = IntArray(2)
         anchor.getLocationInWindow(loc)
         ov.getLocationInWindow(ovLoc)
-        box.measure(View.MeasureSpec.makeMeasureSpec(ctx.dp(280), View.MeasureSpec.AT_MOST), View.MeasureSpec.UNSPECIFIED)
-        val w = maxOf(box.measuredWidth, ctx.dp(200))
+        box.measure(View.MeasureSpec.makeMeasureSpec(maxOf(ctx.dp(280), width), View.MeasureSpec.AT_MOST), View.MeasureSpec.UNSPECIFIED)
+        val w = maxOf(box.measuredWidth, width)
         val h = box.measuredHeight
         val pad = ctx.dp(8)
         val visibleTop = maxOf(host.topInset, pad)

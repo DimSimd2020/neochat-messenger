@@ -406,6 +406,15 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
     }
 
+    /** Green dot in the corner while the person is online. */
+    var online = false
+        set(v) {
+            if (field != v) {
+                field = v
+                invalidate()
+            }
+        }
+
     fun set(name: String, seed: String) {
         this.name = name
         this.seed = seed
@@ -424,6 +433,13 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
         textPaint.textSize = height * 0.36f
         val y = height / 2f - (textPaint.descent() + textPaint.ascent()) / 2
         c.drawText(initials(name), width / 2f, y, textPaint)
+        if (online) {
+            val d = width * 0.30f
+            paint.color = Theme.p.bg0
+            c.drawCircle(width - d / 2, height - d / 2, d / 2, paint)
+            paint.color = 0xFF3CC56B.toInt()
+            c.drawCircle(width - d / 2, height - d / 2, d / 2 - dpf(2), paint)
+        }
     }
 
     override fun applyTheme() = invalidate()

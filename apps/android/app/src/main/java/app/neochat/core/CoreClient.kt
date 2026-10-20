@@ -33,6 +33,12 @@ object CoreClient {
     fun addListener(l: (JSONObject) -> Unit) = listeners.add(l)
     fun removeListener(l: (JSONObject) -> Unit) = listeners.remove(l)
 
+    /** Delivers an app-side event (e.g. a changed local setting) like a core event. */
+    fun emitLocal(type: String) {
+        val ev = JSONObject().put("type", type)
+        main.post { listeners.toList().forEach { it(ev) } }
+    }
+
     /** Synchronous call for background jobs; never use it on the main thread. */
     fun callBlocking(method: String, params: JSONObject = JSONObject()): Pair<Any?, CoreError?> {
         val res = JSONObject(NativeCore.call(handle, method, params.toString()))

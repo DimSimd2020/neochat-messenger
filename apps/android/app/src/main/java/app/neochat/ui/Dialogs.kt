@@ -6,7 +6,6 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.InputMethodManager
-import android.widget.GridLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import app.neochat.R
@@ -56,6 +55,9 @@ object Dialogs {
         s.muted("Поиск идёт только по точному никнейму: публичного каталога нет. Без своего имени контакт показывается под именем из его профиля.", 10)
         s.add(err, 8)
         s.add(submit, 14)
+        val scan = PillButton(ctx, "Сканировать QR-код", primary = false, icon = R.drawable.ic_qr)
+        scan.setOnClickListener { s.dismiss(); Qr.scanContact(act) }
+        s.add(scan, 10)
         submit.setOnClickListener {
             if (user.text.isBlank()) return@setOnClickListener err.show("Введите никнейм")
             err.show("")
@@ -285,104 +287,13 @@ object Dialogs {
         s.show()
     }
 
-    // ---- profile ----
-
-    fun editName(act: MainActivity, current: String, saved: () -> Unit) {
-        val s = Sheet(act, "Имя")
-        val field = FloatingField(s.ctx, "Имя")
-        field.setText(current)
-        field.edit.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_WORDS
-        val save = PillButton(s.ctx, "Сохранить")
-        s.add(field, 4)
-        s.muted("Имя видят ваши собеседники. Никнейм и ID не меняются.", 8)
-        s.add(save, 14)
-        save.setOnClickListener {
-            if (field.text.isBlank()) return@setOnClickListener act.toast("Введите имя")
-            save.isEnabled = false
-            CoreClient.call("set_profile", JSONObject().put("display_name", field.text.trim())) { _, e ->
-                save.isEnabled = true
-                if (e != null) return@call act.toast(e.message)
-                s.dismiss()
-                saved()
-            }
-        }
-        s.show()
-    }
-
-    // ---- settings ----
-
-    fun settings(act: MainActivity) {
-        val s = Sheet(act, "Настройки")
-        val ctx = s.ctx
-        val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
-        s.heading("Тема", 0)
-        val slider = ThemeSlider(ctx)
-        slider.setValue(Theme.mode.ordinal, false)
-        slider.onChange = { Theme.setMode(ctx, Theme.Mode.entries[it]) }
-        s.add(slider, 10)
-        s.muted("Размер текста следует системной настройке шрифта.", 4)
-        val notify = ToggleRow(ctx, "Уведомления о новых сообщениях")
-        notify.setChecked(prefs.getBoolean("notifications", true), false)
-        notify.onToggle = { prefs.edit().putBoolean("notifications", it).apply() }
-        s.add(notify, 14)
-        s.muted("В уведомлении видно только название чата, текст сообщения не показывается.", 2)
-        val twoFactor = ToggleRow(ctx, "Подтверждение входа")
-        s.add(twoFactor, 10)
-        s.muted("При входе на новом устройстве понадобится код. Он придёт в чат «NeoChat уведомления» на ваших устройствах.", 2)
-        CoreClient.call("account_settings") { v, _ -> twoFactor.setChecked((v as? JSONObject)?.optBoolean("two_factor") == true, false) }
-        twoFactor.onToggle = { on ->
-            CoreClient.call("set_two_factor", JSONObject().put("enabled", on)) { _, e ->
-                if (e != null) {
-                    act.toast(e.message)
-                    twoFactor.setChecked(!on, true)
-                }
-            }
-        }
-        val logout = PillButton(ctx, "Выйти из аккаунта", primary = false)
-        logout.label.role(Theme.Role.WARNING)
-        logout.setOnClickListener {
-            PopupMenu(act, logout).add("Выйти: ключи и история на этом телефоне будут удалены", danger = true) {
-                s.dismiss()
-                CoreClient.call("logout") { _, e ->
-                    if (e != null) act.toast(e.message)
-                    CoreClient.call("status") { sv, _ -> act.showOnboarding(sv as? JSONObject ?: JSONObject()) }
-                }
-            }.show()
-        }
-        s.add(logout, 20)
-        s.show()
-    }
-
     // ---- emoji ----
-
-    private val EMOJI = ("😀 😃 😄 😁 😆 😅 😂 🙂 😉 😊 😍 😘 😎 🤔 😐 😴 😢 😭 😡 😱 " +
-        "👍 👎 👌 🙏 👏 🙌 💪 🤝 👋 ✌️ ❤️ 🧡 💛 💚 💙 💜 🔥 ✨ 🎉 ☕").split(' ')
 
     fun emoji(act: MainActivity, pick: (String) -> Unit) {
         act.currentFocus?.clearFocus()
         (act.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
             .hideSoftInputFromWindow(act.overlay.windowToken, 0)
-        val s = Sheet(act, "Эмодзи")
-        val grid = GridLayout(s.ctx).apply { columnCount = 8 }
-        for (e in EMOJI) {
-            val tv = TextView(s.ctx).apply {
-                text = e
-                textSize = 24f
-                gravity = Gravity.CENTER
-                isClickable = true
-                isFocusable = true
-                contentDescription = e
-                background = GlassDrawable(s.ctx, GlassDrawable.Kind.NONE, s.ctx.dpf(14), rim = false)
-                pressFeedback()
-                setOnClickListener { pick(e); s.dismiss() }
-            }
-            grid.addView(tv, GridLayout.LayoutParams(GridLayout.spec(GridLayout.UNDEFINED, 1f), GridLayout.spec(GridLayout.UNDEFINED, 1f)).apply {
-                width = 0
-                height = s.ctx.dp(48)
-            })
-        }
-        s.add(grid, 0)
-        s.show()
+        Emoji.sheet(act, pick = pick)
     }
 
     // ---- conversation info ----
@@ -408,11 +319,18 @@ object Dialogs {
                 val members = c.optJSONArray("members")?.objects() ?: emptyList()
                 if (c.str("kind") == "direct") {
                     val peer = c.str("peer_user_id")
-                    head.subtitle.text = members.firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
+                    val other = members.firstOrNull { !it.optBoolean("me") }
+                    head.subtitle.text = (other?.let { "@" + it.str("username") } ?: "") +
+                        (c.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }?.let { " · $it" } ?: "")
+                    head.avatar.online = c.optJSONObject("presence")?.optBoolean("online") == true
                     add(head)
                     CoreClient.call("contact_info", JSONObject().put("user_id", peer)) { iv, ie ->
                         if (ie != null) return@call act.toast(ie.message)
                         val info = iv as JSONObject
+                        if (info.str("bio").isNotEmpty()) {
+                            add(ctx.label("О себе", 13.5f, 600, Theme.Role.MUTED), 14)
+                            add(ctx.label(info.str("bio"), 15.5f).apply { setTextIsSelectable(true) }, 4)
+                        }
                         add(ctx.label("Код безопасности", 15.5f, 600), 16)
                         muted("Сравните код с собеседником при встрече или по другому надёжному каналу. Совпадение означает, что сообщения шифруются для его настоящих ключей.")
                         val num = ctx.label(info.str("safety_number"), 17f, 600, Theme.Role.ACCENT)
@@ -466,7 +384,7 @@ object Dialogs {
                         reload()
                     }
                 }
-                head.subtitle.text = if (channel) "Канал" else "Группа"
+                head.subtitle.text = memberCount(c.optInt("member_count"), channel)
                 add(head)
                 if (c.str("description").isNotEmpty()) add(ctx.label(c.str("description"), 14.5f).apply { setTextIsSelectable(true) }, 10)
                 if (c.optBoolean("can_edit_info") && !gone) {

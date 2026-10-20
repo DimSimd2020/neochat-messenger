@@ -47,6 +47,7 @@ class MainActivity : Activity(), Sheet.Host {
     var scanner: QrScanner? = null
 
     private var home: HomeScreen? = null
+    private var archive: ArchiveScreen? = null
     private var chat: ChatScreen? = null
     private var current: Screen? = null
     private var pendingConversation: String? = null
@@ -66,6 +67,7 @@ class MainActivity : Activity(), Sheet.Host {
         edgeToEdge()
         Theme.onModeApplied = { dark -> barAppearance(dark) }
         Theme.init(this, root)
+        Prefs.applySecure(this)
         CoreClient.addListener(listener)
         pendingConversation = intent?.getStringExtra("conversation_id")
         start()
@@ -145,6 +147,7 @@ class MainActivity : Activity(), Sheet.Host {
     fun showOnboarding(status: JSONObject) {
         closeOverlays()
         home = null
+        archive = null
         chat = null
         Notifier.visibleConversation = null
         show(OnboardingScreen(this, status) { showMain() }, 0f)
@@ -153,8 +156,10 @@ class MainActivity : Activity(), Sheet.Host {
     fun showMain() {
         val h = HomeScreen(this)
         home = h
+        archive = null
         chat = null
         show(h, 0f)
+        AppLock.maybeLock(this)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         pendingConversation?.let {
@@ -176,6 +181,20 @@ class MainActivity : Activity(), Sheet.Host {
         val h = home ?: return
         if (chat == null) return
         chat = null
+        show(archive ?: h, -dp(22).toFloat())
+    }
+
+    fun openArchive() {
+        if (home == null || archive != null) return
+        val a = ArchiveScreen(this)
+        archive = a
+        show(a, dp(22).toFloat())
+    }
+
+    fun closeArchive() {
+        val h = home ?: return
+        if (archive == null) return
+        archive = null
         show(h, -dp(22).toFloat())
     }
 
@@ -195,7 +214,8 @@ class MainActivity : Activity(), Sheet.Host {
         Theme.apply()
         next.onShown()
         val pv = prev?.view
-        val drop = { if (pv != null && pv !== v) { if (prev === home) pv.visibility = View.GONE else content.removeView(pv) } }
+        // Home and an open archive stay alive under a conversation.
+        val drop = { if (pv != null && pv !== v) { if (prev === home || (prev === archive && next is ChatScreen)) pv.visibility = View.GONE else content.removeView(pv) } }
         v.animate().cancel()
         pv?.animate()?.cancel()
         if (Theme.reducedMotion || pv == null || shift == 0f) {
@@ -227,7 +247,10 @@ class MainActivity : Activity(), Sheet.Host {
             return
         }
         if (type == "warning") toast(ev.str("message"))
+        if (type == "typing") Typing.onEvent(ev)
+        if (type == "notify") Typing.clear(ev.str("conversation_id"))
         home?.onEvent(ev)
+        archive?.onEvent(ev)
         chat?.onEvent(ev)
     }
 
@@ -272,26 +295,41 @@ class MainActivity : Activity(), Sheet.Host {
         super.onPause()
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (home != null) AppLock.maybeLock(this)
+    }
+
+    override fun onStop() {
+        AppLock.onBackground()
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
         chat?.onResumed()
-        // At most every 6 hours; the download runs in the background.
+        // At most once an hour; the download runs in the background.
         val now = System.currentTimeMillis()
-        if (now - lastUpdateCheck > 6 * 60 * 60 * 1000L) {
+        if (now - lastUpdateCheck > 60 * 60 * 1000L) {
             lastUpdateCheck = now
             checkUpdate()
         }
     }
 
-    private fun checkUpdate() {
+    /** Checks the signed manifest; [manual] reports "no update" and progress too. */
+    fun checkUpdate(manual: Boolean = false) {
         if (updateBanner != null) return
         val version = packageManager.getPackageInfo(packageName, 0).versionName ?: return
         val p = JSONObject().put("platform", "android").put("version", version)
         CoreClient.call("check_update", p) { v, e ->
-            if (e != null || (v as? JSONObject)?.optBoolean("available") != true) return@call
+            if (e != null) return@call run { if (manual) toast(e.message) }
+            val o = v as? JSONObject
+            if (o?.optBoolean("available") != true) return@call run { if (manual) toast("У вас последняя версия ($version)") }
+            if (manual) toast("Загружаем версию ${o.str("version")}…")
             CoreClient.call("download_update", p) { r, err ->
-                val o = r as? JSONObject
-                if (err == null && o != null && updateBanner == null) showUpdateBanner(o.str("version"), File(o.str("path")))
+                val d = r as? JSONObject
+                if (err != null && manual) toast(err.message)
+                if (err == null && d != null && updateBanner == null) showUpdateBanner(d.str("version"), File(d.str("path")))
             }
         }
     }

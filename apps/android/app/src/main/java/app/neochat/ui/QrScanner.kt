@@ -40,11 +40,17 @@ import kotlin.math.min
  * Full-screen camera view that reads a QR code with the given prefix and hands its text back.
  * Frames are decoded on a background thread and never leave the device.
  */
-class QrScanner(private val act: MainActivity, private val prefix: String, private val onResult: (String) -> Unit) {
+class QrScanner(
+    private val act: MainActivity,
+    private val prefix: String,
+    hintText: String = "Наведите камеру на QR-код на экране входа компьютера",
+    private val wrongText: String = "Это не QR-код входа NeoChat",
+    private val onResult: (String) -> Unit,
+) {
     private val ctx: Context = act
     private val root = FrameLayout(ctx)
     private val preview = TextureView(ctx)
-    private val hint = ctx.label("Наведите камеру на QR-код на экране входа компьютера", 15f, 500)
+    private val hint = ctx.label(hintText, 15f, 500)
     private val worker = HandlerThread("qr").apply { start() }
     private val bg = Handler(worker.looper)
     private val main = Handler(Looper.getMainLooper())
@@ -187,7 +193,7 @@ class QrScanner(private val act: MainActivity, private val prefix: String, priva
                     onResult(text)
                 }
             } else if (text != null) {
-                main.post { hint.text = "Это не QR-код входа NeoChat" }
+                main.post { hint.text = wrongText }
             }
         } catch (_: Exception) {
         } finally {

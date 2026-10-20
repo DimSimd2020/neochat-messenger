@@ -75,13 +75,15 @@ object Theme {
     /** cubic-bezier(.22,.8,.25,1) from the motion spec. */
     val surfaceCurve = PathInterpolator(0.22f, 0.8f, 0.25f, 1f)
 
-    /** Reduced motion: the system animator scale is off. Read live. */
-    val reducedMotion get() = !ValueAnimator.areAnimatorsEnabled()
+    /** Reduced motion: the system animator scale is off or the app setting is on. Read live. */
+    var forceReduced = false
+    val reducedMotion get() = forceReduced || !ValueAnimator.areAnimatorsEnabled()
     fun ms(d: Long) = if (reducedMotion) 0L else d
 
     fun init(ctx: Context, root: View) {
         this.root = root
         mode = Mode.entries[ctx.getSharedPreferences("settings", Context.MODE_PRIVATE).getInt("theme", 0).coerceIn(0, 2)]
+        forceReduced = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("reduce_motion", false)
         target = resolve(ctx)
         p = target
         apply()
