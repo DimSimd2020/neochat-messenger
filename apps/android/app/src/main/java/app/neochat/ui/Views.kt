@@ -1,5 +1,7 @@
 package app.neochat.ui
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
@@ -15,17 +17,22 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
+import android.os.Build
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.animation.OvershootInterpolator
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -699,5 +706,252 @@ class QrView(ctx: Context) : View(ctx) {
         paint.color = android.graphics.Color.BLACK
         for (y in 0 until n) for (x in rows[y].indices) if (rows[y][x] == '1')
             c.drawRect(off + x * cell, off + y * cell, off + (x + 1) * cell + 0.5f, off + (y + 1) * cell + 0.5f, paint)
+    }
+}
+
+/**
+ * Telegram-like swipe-to-reply over a message row. Horizontal drag (either
+ * direction) slides the bubble and reveals a reply arrow; vertical motion is
+ * left to the parent so the history still scrolls. Touches that begin in the
+ * system back-edge zone do not claim the inward swipe.
+ */
+class SwipeToReplyLayout(
+    ctx: Context,
+    private val canReply: () -> Boolean,
+    private val onBubble: (MotionEvent) -> Boolean,
+    private val onReply: () -> Unit,
+) : FrameLayout(ctx), Themed {
+    private val icon = ImageView(ctx).apply {
+        setImageResource(app.neochat.R.drawable.ic_reply)
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        alpha = 0f
+        scaleX = 0.6f
+        scaleY = 0.6f
+    }
+    private var content: View? = null
+    private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
+    private val threshold = ctx.dpf(64)
+    private val maxShift = ctx.dpf(96)
+    private var pointerId = MotionEvent.INVALID_POINTER_ID
+    private var downX = 0f
+    private var downY = 0f
+    private var capturedTx = 0f
+    private var tracking = false
+    private var dragging = false
+    private var armed = false
+    private var iconOnStart = true
+    private var anim: ValueAnimator? = null
+
+    init {
+        clipChildren = false
+        clipToPadding = false
+        isMotionEventSplittingEnabled = false
+        addView(icon, LayoutParams(dp(24), dp(24), Gravity.CENTER_VERTICAL or Gravity.START).apply {
+            marginStart = dp(10)
+            marginEnd = dp(10)
+        })
+        applyTheme()
+    }
+
+    fun attach(child: View) {
+        content?.let { removeView(it) }
+        content = child
+        addView(child, LayoutParams(MATCH, WRAP))
+    }
+
+    fun reset() {
+        val running = anim
+        anim = null
+        running?.cancel()
+        icon.animate().cancel()
+        content?.translationX = 0f
+        applyIcon(0f)
+        dragging = false
+        tracking = false
+        armed = false
+        pointerId = MotionEvent.INVALID_POINTER_ID
+        parent?.requestDisallowInterceptTouchEvent(false)
+    }
+
+    override fun applyTheme() {
+        icon.imageTintList = ColorStateList.valueOf(Theme.p.accent)
+    }
+
+    override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                pointerId = e.getPointerId(0)
+                downX = e.rawX
+                downY = e.rawY
+                dragging = false
+                tracking = onBubble(e) && canReply()
+                if (tracking) {
+                    val running = anim
+                    anim = null
+                    running?.cancel()
+                }
+                capturedTx = content?.translationX ?: 0f
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!tracking || dragging) return dragging
+                val idx = e.findPointerIndex(pointerId)
+                if (idx < 0) return false
+                val dx = e.getRawX(idx) - downX
+                val dy = e.getRawY(idx) - downY
+                if (abs(dy) > slop && abs(dy) >= abs(dx)) {
+                    tracking = false
+                    return false
+                }
+                if (abs(dx) > slop && abs(dx) > abs(dy)) {
+                    if (blockedByBackEdge(dx)) {
+                        tracking = false
+                        return false
+                    }
+                    dragging = true
+                    parent.requestDisallowInterceptTouchEvent(true)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                tracking = false
+                dragging = false
+                pointerId = MotionEvent.INVALID_POINTER_ID
+            }
+        }
+        return dragging
+    }
+
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (!dragging && !tracking) return super.onTouchEvent(e)
+        when (e.actionMasked) {
+            MotionEvent.ACTION_MOVE -> {
+                val idx = e.findPointerIndex(pointerId)
+                if (idx < 0) return true
+                val dx = e.getRawX(idx) - downX
+                if (!dragging) {
+                    val dy = e.getRawY(idx) - downY
+                    if (abs(dx) > slop && abs(dx) > abs(dy) && !blockedByBackEdge(dx)) {
+                        dragging = true
+                        parent.requestDisallowInterceptTouchEvent(true)
+                    } else if (abs(dy) > slop && abs(dy) >= abs(dx)) {
+                        tracking = false
+                        return false
+                    }
+                }
+                if (dragging) applyShift(shiftFor(capturedTx + dx))
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                if (e.actionMasked == MotionEvent.ACTION_POINTER_UP && e.getPointerId(e.actionIndex) != pointerId) return true
+                val trigger = dragging && abs(content?.translationX ?: 0f) >= threshold
+                parent.requestDisallowInterceptTouchEvent(false)
+                settle(trigger)
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                parent.requestDisallowInterceptTouchEvent(false)
+                settle(false)
+            }
+        }
+        return true
+    }
+
+    private fun blockedByBackEdge(dx: Float): Boolean {
+        val w = resources.displayMetrics.widthPixels.toFloat()
+        if (dx > 0f && downX <= edgeStart()) return true
+        if (dx < 0f && downX >= w - edgeEnd()) return true
+        return false
+    }
+
+    private fun edgeStart(): Float {
+        val ins = rootWindowInsets ?: return dpf(24)
+        return if (Build.VERSION.SDK_INT >= 30) {
+            ins.getInsets(WindowInsets.Type.systemGestures()).left.toFloat().coerceAtLeast(dpf(20))
+        } else {
+            @Suppress("DEPRECATION")
+            if (Build.VERSION.SDK_INT >= 29) ins.systemGestureInsets.left.toFloat().coerceAtLeast(dpf(20)) else dpf(24)
+        }
+    }
+
+    private fun edgeEnd(): Float {
+        val ins = rootWindowInsets ?: return dpf(24)
+        return if (Build.VERSION.SDK_INT >= 30) {
+            ins.getInsets(WindowInsets.Type.systemGestures()).right.toFloat().coerceAtLeast(dpf(20))
+        } else {
+            @Suppress("DEPRECATION")
+            if (Build.VERSION.SDK_INT >= 29) ins.systemGestureInsets.right.toFloat().coerceAtLeast(dpf(20)) else dpf(24)
+        }
+    }
+
+    private fun shiftFor(dx: Float): Float {
+        val sign = if (dx >= 0f) 1f else -1f
+        val a = abs(dx)
+        val raw = if (a <= threshold) a else threshold + (a - threshold) * 0.4f
+        return sign * raw.coerceAtMost(maxShift)
+    }
+
+    private fun applyShift(tx: Float) {
+        content?.translationX = tx
+        val nowArmed = abs(tx) >= threshold
+        if (nowArmed && !armed) {
+            armed = true
+            val kind = if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
+            else HapticFeedbackConstants.KEYBOARD_TAP
+            performHapticFeedback(kind)
+        } else if (!nowArmed) {
+            armed = false
+        }
+        applyIcon(tx)
+    }
+
+    private fun applyIcon(tx: Float) {
+        val p = (abs(tx) / threshold).coerceIn(0f, 1f)
+        icon.alpha = p
+        val mag = 0.6f + 0.4f * p
+        // Arrow points toward the bubble on the side being revealed.
+        icon.scaleX = if (tx >= 0f) -mag else mag
+        icon.scaleY = mag
+        val start = tx >= 0f
+        if (start != iconOnStart && tx != 0f) {
+            iconOnStart = start
+            val lp = icon.layoutParams as LayoutParams
+            lp.gravity = Gravity.CENTER_VERTICAL or if (start) Gravity.START else Gravity.END
+            icon.layoutParams = lp
+        }
+        icon.visibility = if (p == 0f) INVISIBLE else VISIBLE
+    }
+
+    private fun settle(trigger: Boolean) {
+        val child = content
+        dragging = false
+        tracking = false
+        armed = false
+        pointerId = MotionEvent.INVALID_POINTER_ID
+        if (child == null) return
+        val start = child.translationX
+        val running = anim
+        anim = null
+        running?.cancel()
+        icon.animate().cancel()
+        icon.animate().alpha(0f).setDuration(Theme.ms(120)).withEndAction { applyIcon(0f) }.start()
+        if (Theme.reducedMotion || start == 0f) {
+            child.translationX = 0f
+            applyIcon(0f)
+            if (trigger) onReply()
+            return
+        }
+        anim = ValueAnimator.ofFloat(start, 0f).apply {
+            duration = Theme.ms(280)
+            interpolator = OvershootInterpolator(1.35f)
+            addUpdateListener { child.translationX = it.animatedValue as Float }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(a: Animator) {
+                    if (anim === a) {
+                        anim = null
+                        child.translationX = 0f
+                    }
+                }
+            })
+            start()
+        }
+        if (trigger) onReply()
     }
 }

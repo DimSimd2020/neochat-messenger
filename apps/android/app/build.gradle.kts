@@ -18,8 +18,8 @@ android {
         applicationId = "app.neochat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.5.2"
+        versionCode = 9
+        versionName = "0.5.3"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 

@@ -2,6 +2,8 @@ name: iOS
 
 on:
   push:
+    tags: ["v*"]
+    branches: ["main"]
     paths: ["core/**", "apps/ios/**", ".github/workflows/ios.yml"]
   workflow_dispatch:
 

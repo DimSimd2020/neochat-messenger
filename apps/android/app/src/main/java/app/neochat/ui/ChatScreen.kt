@@ -34,6 +34,7 @@ import android.util.Base64
 import android.util.LruCache
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -619,27 +620,46 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
             if (viewType == 0) object : RecyclerView.ViewHolder(DateRow(ctx)) {}
-            else object : RecyclerView.ViewHolder(BubbleRow(ctx)) {}
+            else {
+                val row = BubbleRow(ctx)
+                val swipe = SwipeToReplyLayout(
+                    ctx,
+                    canReply = { canSwipeReply(row.message) },
+                    onBubble = { e -> row.touchesBubble(e) },
+                    onReply = { startSwipeReply(row.message) },
+                )
+                swipe.attach(row)
+                swipe.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
+                MessageHolder(swipe, row)
+            }
 
         override fun onBindViewHolder(h: RecyclerView.ViewHolder, position: Int) {
             val it = items[position]
             if (it is String) return (h.itemView as DateRow).set(it)
+            val holder = h as MessageHolder
             val item = it as Item
-            val row = h.itemView as BubbleRow
-            row.bind(item)
+            holder.swipe.reset()
+            holder.row.bind(item)
+            val appear = holder.itemView
             val id = item.m.str("id")
             if (id in animate && !Theme.reducedMotion) {
                 animate = animate - id
-                row.alpha = 0f
-                row.translationY = ctx.dpf(12)
-                row.animate().alpha(1f).translationY(0f).setDuration(220).setInterpolator(Theme.surfaceCurve).start()
+                appear.alpha = 0f
+                appear.translationY = ctx.dpf(12)
+                appear.animate().alpha(1f).translationY(0f).setDuration(220).setInterpolator(Theme.surfaceCurve).start()
             } else {
-                row.animate().cancel()
-                row.alpha = 1f
-                row.translationY = 0f
+                appear.animate().cancel()
+                appear.alpha = 1f
+                appear.translationY = 0f
             }
         }
+
+        override fun onViewRecycled(h: RecyclerView.ViewHolder) {
+            (h as? MessageHolder)?.swipe?.reset()
+        }
     }
+
+    private class MessageHolder(val swipe: SwipeToReplyLayout, val row: BubbleRow) : RecyclerView.ViewHolder(swipe)
 
     private inner class DateRow(ctx: Context) : LinearLayout(ctx) {
         private val text = ctx.label("", 12.5f, 500, Theme.Role.MUTED)
@@ -662,6 +682,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     private inner class BubbleRow(ctx: Context) : LinearLayout(ctx) {
+        val message: JSONObject get() = m
+
+        fun touchesBubble(e: MotionEvent): Boolean {
+            val loc = IntArray(2)
+            bubble.getLocationOnScreen(loc)
+            return e.rawX >= loc[0] && e.rawX < loc[0] + bubble.width &&
+                e.rawY >= loc[1] && e.rawY < loc[1] + bubble.height
+        }
         private val av = AvatarView(ctx, 30)
         private val col = LinearLayout(ctx)
         private val sender = ctx.label("", 12.5f, 600, Theme.Role.MUTED)
@@ -1141,12 +1169,24 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         send.importantForAccessibility = if (sendShown < 1f && edit.text.isBlank()) View.IMPORTANT_FOR_ACCESSIBILITY_NO else View.IMPORTANT_FOR_ACCESSIBILITY_YES
     }
 
+    private fun canSwipeReply(m: JSONObject) =
+        m.str("kind") != "undecryptable" && composer.visibility == View.VISIBLE
+
+    private fun startSwipeReply(m: JSONObject) {
+        if (!canSwipeReply(m)) return
+        setReply(m)
+    }
+
     private fun setReply(m: JSONObject?) {
         replyTo = m
         if (m != null) {
             val t = if (m.str("kind") == "file") "Файл" else m.str("text").replace('\n', ' ')
             replyText.text = "Ответ: ${m.str("sender_name")} — $t"
             edit.requestFocus()
+            edit.post {
+                (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                    .showSoftInput(edit, 0)
+            }
         }
         expand(replyBar, m != null)
     }
