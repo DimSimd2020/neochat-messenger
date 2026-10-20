@@ -34,6 +34,41 @@ private func statusText(_ s: String) -> String {
     ["queued": "В очереди", "sent": "На сервере", "delivered": "Доставлено", "read": "Прочитано", "failed": "Не отправлено"][s] ?? ""
 }
 
+/// Delivery marks use the same 24-point paths and states as Android.
+private final class DeliveryMarkView: UIView {
+    var status = "" { didSet { setNeedsDisplay() } }
+    var color = UIColor.white { didSet { setNeedsDisplay() } }
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        ctx.scaleBy(x: bounds.width / 24, y: bounds.height / 24)
+        ctx.setStrokeColor(color.cgColor)
+        ctx.setLineWidth(1.8)
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        if status == "sent" {
+            ctx.move(to: CGPoint(x: 5, y: 12))
+            ctx.addLine(to: CGPoint(x: 9, y: 16))
+            ctx.addLine(to: CGPoint(x: 19, y: 6))
+        } else if status == "delivered" || status == "read" {
+            ctx.move(to: CGPoint(x: 3, y: 12))
+            ctx.addLine(to: CGPoint(x: 7, y: 16))
+            ctx.addLine(to: CGPoint(x: 18, y: 5))
+            ctx.move(to: CGPoint(x: 11, y: 16))
+            ctx.addLine(to: CGPoint(x: 22, y: 5))
+        } else {
+            ctx.strokeEllipse(in: CGRect(x: 4, y: 4, width: 16, height: 16))
+            ctx.move(to: CGPoint(x: 12, y: status == "failed" ? 8 : 7))
+            ctx.addLine(to: CGPoint(x: 12, y: status == "failed" ? 13 : 12))
+            if status == "failed" {
+                ctx.move(to: CGPoint(x: 12, y: 16))
+                ctx.addLine(to: CGPoint(x: 12, y: 16.1))
+            } else { ctx.addLine(to: CGPoint(x: 16, y: 14)) }
+        }
+        ctx.strokePath()
+    }
+}
+
 private func votesText(_ n: Int) -> String {
     let m10 = n % 10, m100 = n % 100
     let w = m10 == 1 && m100 != 11 ? "голос" : (2...4).contains(m10) && !(12...14).contains(m100) ? "голоса" : "голосов"
@@ -354,6 +389,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         Notifier.visibleConversation = conversationId
+        navigationController?.interactivePopGestureRecognizer?.isEnabled = true
         markRead()
         presenceTimer?.invalidate()
         presenceTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refreshPresence() }
@@ -361,6 +397,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        // Detach the keyboard before the transition: the interactive keyboard
+        // dismissal and the pop animation together can tear the layout guide.
+        view.endEditing(true)
         if Notifier.visibleConversation == conversationId { Notifier.visibleConversation = nil }
         presenceTimer?.invalidate()
         presenceTimer = nil
@@ -707,7 +746,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             page.forEach(put)
             messages.forEach(put)
         } else {
-            let oldest = page.first?.int64("local_id") ?? .max
+            let oldest = page.first?.int64("local_id") ?? 0
             messages.filter { $0.int64("local_id") < oldest }.forEach(put)
             page.forEach(put)
         }
@@ -880,6 +919,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             acts.append(MenuAction(title: "Сохранить как…", icon: "square.and.arrow.down") { [weak self] in self?.saveFile(m) })
         }
         if m.str("status") == "failed" { acts.append(MenuAction(title: "Повторить отправку", icon: "arrow.clockwise") { [weak self] in self?.retry(m) }) }
+        if ok && m.str("status") != "failed", ["text", "file", "poll"].contains(m.str("kind")) {
+            acts.append(MenuAction(title: "Переслать", icon: "arrowshape.turn.up.right") { [weak self] in
+                self?.presentSheet(ForwardPickerViewController(msgs: [m]))
+            })
+        }
+        if m.bool("outgoing") && m.str("status") != "failed" && ["text", "file", "poll"].contains(m.str("kind")) {
+            acts.append(MenuAction(title: "Удалить у всех", icon: "trash.slash", destructive: true) { [weak self] in
+                Core.shared.call("delete_everywhere", ["message_id": m.str("id")]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
+            })
+        }
         acts.append(MenuAction(title: "Удалить у себя", icon: "trash", destructive: true) { [weak self] in
             Core.shared.call("delete_local_message", ["message_id": m.str("id")]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
         })
@@ -1010,6 +1059,7 @@ final class BubbleCell: UITableViewCell {
     private var photoW: NSLayoutConstraint!
     private var photoH: NSLayoutConstraint!
     private let inner = UIStackView()
+    private let fwd = label("", 13, .semibold)
     private let quote = label("", 13)
     private let fileRow = UIStackView()
     private let fileName = label("", 15, .semibold)
@@ -1020,11 +1070,14 @@ final class BubbleCell: UITableViewCell {
     private let pollInfo = label("", 13)
     private let pollOptions = UIStackView()
     private let meta = label("", 12)
+    private let delivery = DeliveryMarkView()
     private let retry = UIButton(type: .system)
     private var lead: NSLayoutConstraint!
     private var trail: NSLayoutConstraint!
     private var topGap: NSLayoutConstraint!
     private var boundId = ""
+    private var lastReactsId = ""
+    private var lastReactsSig: String?
     var onRetry: (() -> Void)?
     var onPhoto: (() -> Void)?
     var onVote: ((Int) -> Void)?
@@ -1051,6 +1104,15 @@ final class BubbleCell: UITableViewCell {
         fileRow.alignment = .center
         quote.numberOfLines = 2
         meta.textAlignment = .right
+        delivery.backgroundColor = .clear
+        delivery.isOpaque = false
+        delivery.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([delivery.widthAnchor.constraint(equalToConstant: 16), delivery.heightAnchor.constraint(equalToConstant: 16)])
+        let metaSpacer = UIView()
+        metaSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let metaRow = UIStackView(arrangedSubviews: [metaSpacer, meta, delivery])
+        metaRow.spacing = 4
+        metaRow.alignment = .center
         photo.contentMode = .scaleAspectFill
         photo.clipsToBounds = true
         photo.layer.cornerRadius = 19
@@ -1076,11 +1138,11 @@ final class BubbleCell: UITableViewCell {
         let spacer = UIView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         reactRow.addArrangedSubview(spacer)
-        [quote, fileRow, text, poll, reactRow, meta].forEach(inner.addArrangedSubview)
+        [fwd, quote, fileRow, text, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
         inner.setCustomSpacing(6, after: reactRow)
         bubbleTap.addTarget(self, action: #selector(tapped))
         bubbleTap.delegate = self
-        bubble.addGestureRecognizer(bubbleTap)
+        contentView.addGestureRecognizer(bubbleTap)
         bubble.isUserInteractionEnabled = true
         inner.isLayoutMarginsRelativeArrangement = true
         content.axis = .vertical
@@ -1122,7 +1184,7 @@ final class BubbleCell: UITableViewCell {
     override func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         guard g === bubbleTap else { return super.gestureRecognizer(g, shouldReceive: touch) }
         var v = touch.view
-        while let x = v, x !== bubble {
+        while let x = v, x !== contentView {
             if x is UIControl || x === photo { return false }
             v = x.superview
         }
@@ -1161,6 +1223,11 @@ final class BubbleCell: UITableViewCell {
         fileMeta.textColor = muted
         quote.textColor = muted
         meta.textColor = muted
+        fwd.textColor = out ? .white : Theme.accent
+        if let f = m.obj("fwd"), !f.str("name").isEmpty {
+            fwd.isHidden = false
+            fwd.text = "Переслано: " + f.str("name")
+        } else { fwd.isHidden = true }
         if let r = m.obj("reply_to") {
             quote.isHidden = false
             quote.text = r.str("sender_name") + ": " + (r.str("kind") == "file" ? "Файл" : r.str("text").replacingOccurrences(of: "\n", with: " "))
@@ -1217,8 +1284,11 @@ final class BubbleCell: UITableViewCell {
         bindReactions(m.arr("reactions"), out: out && !big, fg: fg)
         text.isHidden = body.isEmpty || kind == "poll"
         let st = m.str("status")
-        let mark = ["queued": " ◷", "sent": " ✓", "delivered": " ✓✓", "read": " ✓✓", "failed": " !"][st] ?? ""
-        meta.text = hhmm(m.int64("sent_at")) + (out ? mark : "")
+        meta.text = hhmm(m.int64("sent_at"))
+        delivery.isHidden = !out
+        delivery.status = st
+        delivery.color = st == "failed" ? Theme.warning : (big ? Theme.muted : (st == "read" ? .white : muted))
+        delivery.alpha = st == "delivered" ? 0.75 : 1
         retry.isHidden = !(out && st == "failed")
         // Poll answers stay separate buttons for VoiceOver.
         isAccessibilityElement = kind != "poll"
@@ -1234,6 +1304,11 @@ final class BubbleCell: UITableViewCell {
     private func bindReactions(_ list: [JSON], out: Bool, fg: UIColor) {
         reactRow.arrangedSubviews.dropLast().forEach { $0.removeFromSuperview() }
         reactRow.isHidden = list.isEmpty
+        // Chips pop in when the reactions of the bound message changed.
+        let sig = list.map { $0.str("emoji") + String($0.int("count")) }.joined(separator: " ")
+        let pop = lastReactsId == boundId && lastReactsSig != nil && lastReactsSig != sig
+        lastReactsId = boundId
+        lastReactsSig = sig
         for (i, r) in list.prefix(8).enumerated() {
             let mine = r.bool("mine")
             let e = r.str("emoji")
@@ -1251,6 +1326,11 @@ final class BubbleCell: UITableViewCell {
             let names = r.str("names")
             b.accessibilityLabel = "Реакция \(e), \(r.int("count"))" + (mine ? ", ваша" : "") + (names.isEmpty ? "" : ", " + names)
             b.addAction(UIAction { [weak self] _ in self?.onReact?(e) }, for: .touchUpInside)
+            if pop {
+                b.transform = CGAffineTransform(scaleX: 0.4, y: 0.4)
+                b.alpha = 0
+                Theme.animate(0.2, { b.transform = .identity; b.alpha = 1 })
+            }
             reactRow.insertArrangedSubview(b, at: i)
         }
     }

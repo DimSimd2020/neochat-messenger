@@ -21,6 +21,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMenu>
+#include <QClipboard>
+#include <QMouseEvent>
 #include <QScrollBar>
 #include <QTimer>
 #include <QToolButton>
@@ -93,6 +95,7 @@ class UiTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void refreshedPageRemovesDeletedMessages();
     void initTestCase();
     void registerAccount();
     void addContactAndOpenChat();
@@ -145,6 +148,19 @@ private:
     Peer *m_alice = nullptr;
     QString m_aliceName, m_aliceCode, m_bobName, m_conv;
 };
+
+void UiTest::refreshedPageRemovesDeletedMessages()
+{
+    MessageModel model;
+    auto msg = [](int i) {
+        return QJsonObject{{"id", QString::number(i)}, {"local_id", i}, {"kind", "text"}, {"text", QString::number(i)}};
+    };
+    model.merge({msg(1), msg(2), msg(3)}, false);
+    model.merge({msg(2)}, false);
+    QCOMPARE(model.messageCount(), 2); // older history stays; deleted newest disappears
+    model.merge({}, false);
+    QCOMPARE(model.messageCount(), 0); // deleting the last message clears the view
+}
 
 void UiTest::initTestCase()
 {
@@ -411,6 +427,66 @@ void UiTest::socialFeatures()
     shot("11e2-jump-down");
     find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName() == QStringLiteral("В самый низ"); })->click();
     QTRY_VERIFY(view->atBottom());
+    {
+        // Drag across the last message's text selects part of it; Ctrl+C copies the selection.
+        const QModelIndex li = view->model()->index(view->model()->rowCount() - 1, 0);
+        const QRect lr = view->visualRect(li);
+        const auto *li_item = static_cast<const MessageItem *>(li.data(MessageModel::ItemRole).value<const void *>());
+        const QRectF tr = MessageDelegate::layout(*li_item, lr.width(), false).text.translated(lr.topLeft());
+        const QPoint from(int(tr.left()) + 2, int(tr.center().y())), to(int(tr.left() + tr.width() * 0.6), int(tr.center().y()));
+        QTest::mousePress(view->viewport(), Qt::LeftButton, {}, from);
+        QMouseEvent move(QEvent::MouseMove, QPointF(to), view->viewport()->mapToGlobal(QPointF(to)), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(view->viewport(), &move);
+        QTest::mouseRelease(view->viewport(), Qt::LeftButton, {}, to);
+        shot("11e3-text-selection");
+        QApplication::clipboard()->clear();
+        QTest::keyClick(view, Qt::Key_C, Qt::ControlModifier);
+        const QString copied = QApplication::clipboard()->text();
+        QVERIFY2(!copied.isEmpty() && QStringLiteral("строка 29").startsWith(copied) && copied.size() < 9, qPrintable(copied));
+    }
+    {
+        // Check mode: pick the last two messages from the menu and copy them together.
+        bool menuShown = false;
+        QTimer::singleShot(600, this, [this, &menuShown] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu)
+                return;
+            menuShown = true;
+            for (auto *a : menu->actions())
+                if (a->text() == QStringLiteral("Выбрать")) {
+                    a->trigger();
+                    menu->close();
+                    return;
+                }
+            menu->close();
+        });
+        const QRect lastRow = view->visualRect(view->model()->index(view->model()->rowCount() - 1, 0));
+        // Empty space beside the bubble belongs to the same message's hitbox.
+        QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, QPoint(view->viewport()->width() - 8, lastRow.center().y()));
+        QTRY_VERIFY_WITH_TIMEOUT(menuShown, 5000);
+        QTRY_VERIFY(view->checkMode());
+        auto *mm = static_cast<MessageModel *>(view->model());
+        int row = mm->rowCount() - 2;
+        while (row >= 0 && mm->item(row).isDate)
+            --row;
+        QVERIFY(row >= 0);
+        QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, view->visualRect(mm->index(row, 0)).center());
+        QTest::qWait(300);
+        shot("11e4-check-mode");
+        QApplication::clipboard()->clear();
+        button(QStringLiteral("Копировать"))->click();
+        const QString joined = QApplication::clipboard()->text();
+        QVERIFY2(joined.contains(QStringLiteral("строка 29")) && joined.contains(QStringLiteral("строка 28")), qPrintable(joined));
+        QTest::keyClick(view, Qt::Key_Escape);
+        QTRY_VERIFY(!view->checkMode());
+    }
+    // A remote deletion must disappear from the open, already populated view.
+    const QString deletedId = lastMessage(view).value("id").toString();
+    const int beforeDelete = messageCount(view);
+    m_alice->call("delete_everywhere", {{"message_id", deletedId}});
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(messageCount(view) == beforeDelete - 1, 20000);
+    QVERIFY(lastMessage(view).value("id").toString() != deletedId);
     auto *composer = find<Composer>([](Composer *) { return true; });
     composer->setReply(lastMessage(view));
     shot("11e2-inline-reply");
@@ -448,6 +524,9 @@ void UiTest::socialFeatures()
 void UiTest::themeSettingsAndSidebar()
 {
     button("Настройки")->click();
+    QTRY_VERIFY(button("Графика"));
+    shot("12a-settings-main");
+    button("Графика")->click();
     QTRY_VERIFY(find<ui::ThemeSlider>([](ui::ThemeSlider *) { return true; }));
     shot("12-settings-dark");
     auto *slider = find<ui::ThemeSlider>([](ui::ThemeSlider *) { return true; });

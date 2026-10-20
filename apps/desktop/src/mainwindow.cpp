@@ -477,6 +477,7 @@ MainWindow::MainWindow()
             Core::instance()->call("set_draft", {{"conversation_id", m_current.value("id")}, {"text", text}});
     });
     connect(m_view, &MessageView::replyRequested, m_composer, &Composer::setReply);
+    connect(m_view, &MessageView::forwardRequested, this, [this](const QJsonArray &msgs) { dialogs::forward(host(), msgs); });
     connect(m_view, &MessageView::toast, this, &MainWindow::toast);
     connect(m_view, &MessageView::readable, this, &MainWindow::markRead);
     connect(m_composer, &Composer::typing, this, [this] {

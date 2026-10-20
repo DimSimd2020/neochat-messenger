@@ -120,7 +120,7 @@ impl Inner {
             let last_at: i64 = kv_get_str(&db.conn, "history_uploaded_at")?.and_then(|v| v.parse().ok()).unwrap_or(0);
             let last_mark = kv_get_str(&db.conn, "history_mark")?.unwrap_or_default();
             let mark: String = db.conn.query_row(
-                "SELECT COALESCE(MAX(local_id), 0) || ':' || (SELECT count(*) FROM contacts) || ':' || (SELECT count(*) FROM conversations) FROM messages",
+                "SELECT COALESCE(MAX(local_id), 0) || ':' || count(*) || ':' || (SELECT count(*) FROM deleted_messages) || ':' || (SELECT count(*) FROM contacts) || ':' || (SELECT count(*) FROM conversations) FROM messages",
                 [],
                 |r| r.get(0),
             )?;
@@ -227,7 +227,7 @@ impl Inner {
         }
         drop(rows);
         let mut st = db.conn.prepare(
-            "SELECT id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll FROM messages
+            "SELECT id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll, fwd FROM messages
              WHERE kind IN ('text','file','poll') AND status NOT IN ('queued','sending','failed') ORDER BY local_id",
         )?;
         let mut rows = st.query([])?;
@@ -235,7 +235,7 @@ impl Inner {
             let line = json!({"t": "message", "id": r.get::<_, String>(0)?, "conversation_id": r.get::<_, String>(1)?, "sender_user_id": r.get::<_, String>(2)?,
                 "sender_device_id": r.get::<_, String>(3)?, "outgoing": r.get::<_, i64>(4)?, "kind": r.get::<_, String>(5)?, "body": r.get::<_, String>(6)?,
                 "reply_to": r.get::<_, Option<String>>(7)?, "file": r.get::<_, Option<String>>(8)?, "status": r.get::<_, String>(9)?,
-                "server_id": r.get::<_, Option<String>>(10)?, "sent_at": r.get::<_, i64>(11)?, "poll": r.get::<_, Option<String>>(12)?});
+                "server_id": r.get::<_, Option<String>>(10)?, "sent_at": r.get::<_, i64>(11)?, "poll": r.get::<_, Option<String>>(12)?, "fwd": r.get::<_, Option<String>>(13)?});
             writeln!(w, "{line}")?;
         }
         drop(rows);
@@ -246,6 +246,12 @@ impl Inner {
             writeln!(w, "{line}")?;
         }
         drop(rows);
+        let mut st = db.conn.prepare("SELECT message_id, conversation_id, sender_user_id FROM deleted_messages")?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let line = json!({"t": "delete", "id": r.get::<_, String>(0)?, "conversation_id": r.get::<_, String>(1)?, "sender_user_id": r.get::<_, String>(2)?});
+            writeln!(w, "{line}")?;
+        }
         w.flush()?;
         Ok(())
     }
@@ -278,11 +284,15 @@ impl Inner {
                 }
                 "message" => {
                     tx.execute(
-                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll, fwd)
+                         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                         WHERE NOT EXISTS(SELECT 1 FROM deleted_messages WHERE message_id=?1 AND conversation_id=?2 AND sender_user_id=?3)",
                         params![st("id"), st("conversation_id"), st("sender_user_id"), st("sender_device_id"), int("outgoing"), st("kind"), st("body"),
-                            v["reply_to"].as_str(), v["file"].as_str(), st("status"), v["server_id"].as_str(), int("sent_at"), v["poll"].as_str()],
+                            v["reply_to"].as_str(), v["file"].as_str(), st("status"), v["server_id"].as_str(), int("sent_at"), v["poll"].as_str(), v["fwd"].as_str()],
                     )?;
+                }
+                "delete" => {
+                    Self::apply_delete(&tx, &st("conversation_id"), &st("sender_user_id"), &json!({"id": st("id")}))?;
                 }
                 "vote" => {
                     tx.execute(

@@ -755,6 +755,62 @@ final class ArchiveViewController: ListViewController {
     }
 }
 
+/// Sheet that picks the chat to forward messages into.
+final class ForwardPickerViewController: ListViewController {
+    private let msgs: [JSON]
+
+    init(msgs: [JSON]) {
+        self.msgs = msgs
+        super.init(style: .plain)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Переслать"
+        navigationItem.largeTitleDisplayMode = .never
+        search.searchBar.placeholder = "Поиск чата"
+        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
+            self?.dismiss(animated: !Theme.reducedMotion)
+        })
+    }
+
+    override func reacts(to t: String) -> Bool { ["conversations_changed", "contacts_changed", "presence"].contains(t) }
+
+    override func reload() {
+        let q = query
+        Core.shared.call("list_conversations", ["query": q]) { [weak self] r in
+            guard let self, q == self.query, case .success(let v) = r else { return }
+            let list = (v as? [JSON] ?? []).filter { $0.bool("can_send") }
+            self.apply(list, empty: q.isEmpty ? "Некуда пересылать: чатов пока нет." : "Ничего не нашли")
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: RowCell.id, for: indexPath) as! RowCell
+        bindChatCell(cell, rows[indexPath.row])
+        return cell
+    }
+
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        let cid = rows[indexPath.row].str("id")
+        let msgs = self.msgs
+        weak var host = presentingViewController
+        dismiss(animated: !Theme.reducedMotion) {
+            var left = msgs.count
+            for m in msgs {
+                Core.shared.call("forward_message", ["message_id": m.str("id"), "conversation_id": cid]) { r in
+                    left -= 1
+                    if case .failure(let e) = r { host?.toast(e.message) }
+                    if left == 0 { NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": cid]) }
+                }
+            }
+        }
+    }
+}
+
 /// Right to left: to the archive or back to the chats.
 func chatSwipe(_ host: UIViewController, _ c: JSON, archive: Bool) -> UISwipeActionsConfiguration? {
     if c.bool("_archive") { return nil }

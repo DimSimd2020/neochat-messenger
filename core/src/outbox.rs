@@ -21,7 +21,7 @@ use crate::engine::{Inner, s};
 use crate::error::{Error, Result, crypto};
 use crate::files;
 use crate::keys::{b64, unb64};
-use crate::store::{SignalStore, now_ms};
+use crate::store::{SignalStore, kv_get_str, now_ms};
 
 pub const MAX_TEXT: usize = 4096;
 const PAUSED: i64 = i64::MAX;
@@ -74,6 +74,9 @@ pub struct Payload {
     /// A poll: {options, multiple, anonymous}; the question is `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<Value>,
+    /// Forward header: {"name": <original sender>, "ts": <original sent_at>}.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fwd: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -126,8 +129,8 @@ impl Inner {
         let tx = db.conn.transaction()?;
         if visible {
             tx.execute(
-                "INSERT INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, sent_at, poll)
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, 'queued', ?9, ?10)",
+                "INSERT INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, sent_at, poll, fwd)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, 'queued', ?9, ?10, ?11)",
                 params![
                     p.mid,
                     p.cid,
@@ -139,6 +142,7 @@ impl Inner {
                     p.file.as_ref().map(|f| serde_json::to_string(f)).transpose()?,
                     p.ts,
                     p.poll.as_ref().map(|v| v.to_string()),
+                    p.fwd.as_ref().map(|v| v.to_string()),
                 ],
             )?;
             tx.execute(
@@ -448,16 +452,160 @@ impl Inner {
         Ok(req)
     }
 
+    /// Removes a message from the local tables inside `tx`: the row, its unsent
+    /// outbox entry, reactions and poll votes; an unread incoming message also
+    /// lowers the conversation badge.
+    pub(crate) fn erase_message(conn: &rusqlite::Connection, id: &str, conv: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE conversations SET unread=max(0, unread-1) WHERE id=?1 AND EXISTS(SELECT 1 FROM messages WHERE id=?2 AND conversation_id=?1 AND outgoing=0 AND NOT EXISTS(SELECT 1 FROM receipts WHERE message_id=?2 AND kind='read'))",
+            params![conv, id],
+        )?;
+        conn.execute("DELETE FROM messages WHERE id=?1", [id])?;
+        conn.execute("DELETE FROM outbox WHERE id=?1 AND request IS NULL", [id])?;
+        conn.execute("DELETE FROM reactions WHERE message_id=?1", [id])?;
+        conn.execute("DELETE FROM poll_votes WHERE poll_id=?1", [id])?;
+        conn.execute(
+            "UPDATE conversations SET last_preview=COALESCE((SELECT CASE kind WHEN 'file' THEN '📎 Файл' WHEN 'poll' THEN '📊 ' || body ELSE body END FROM messages WHERE conversation_id=?1 ORDER BY local_id DESC LIMIT 1),'') WHERE id=?1",
+            [conv],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_local_message(&self, p: &Value) -> Result<Value> {
         let id = s(p, "message_id")?;
         let conv = self.message_conv(id)?;
-        let db = self.db();
-        db.conn.execute("DELETE FROM messages WHERE id=?1", [id])?;
-        db.conn.execute("DELETE FROM outbox WHERE id=?1 AND request IS NULL", [id])?;
+        {
+            let mut db = self.db();
+            let tx = db.conn.transaction()?;
+            Self::erase_message(&tx, &id, &conv)?;
+            tx.commit()?;
+        }
         let _ = std::fs::remove_file(self.data_dir.join("files").join(format!("{id}.enc")));
-        drop(db);
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
+        self.emit(json!({"type": "conversations_changed"}));
         Ok(Value::Null)
+    }
+
+    /// Deletes the message here and sends an E2EE control message that removes it
+    /// on every device — ours and the recipients' ("delete for all"). Own messages only.
+    pub fn delete_everywhere(&self, p: &Value) -> Result<Value> {
+        let id = s(p, "message_id")?;
+        let (conv, outgoing): (String, i64) = self
+            .db()
+            .conn
+            .query_row("SELECT conversation_id, outgoing FROM messages WHERE id=?1 AND kind IN ('text','file','poll')", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?
+            .ok_or_else(|| Error::Invalid("Сообщение не найдено".into()))?;
+        if outgoing != 1 {
+            return Err(Error::Invalid("Удалить у всех можно только свои сообщения".into()));
+        }
+        self.check_can_send(&conv)?;
+        let mut control = self.new_payload(&conv, "delete")?;
+        control.group = Some(json!({"id": id}));
+        {
+            let mut db = self.db();
+            let tx = db.conn.transaction()?;
+            Self::erase_message(&tx, &id, &conv)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO deleted_messages(message_id, conversation_id, sender_user_id) VALUES (?1, ?2, ?3)",
+                params![id, conv, control.sender],
+            )?;
+            tx.execute(
+                "INSERT INTO outbox(id, conversation_id, payload, visible, created_at) VALUES (?1, ?2, ?3, 0, ?4)",
+                params![control.mid, conv, serde_json::to_vec(&control)?, now_ms()],
+            )?;
+            tx.commit()?;
+        }
+        let _ = std::fs::remove_file(self.data_dir.join("files").join(format!("{id}.enc")));
+        self.wake();
+        self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
+        self.emit(json!({"type": "conversations_changed"}));
+        Ok(Value::Null)
+    }
+
+    /// The sender name shown on a forwarded message: the original author's.
+    fn forward_name(&self, sconv: &str, sender: &str) -> Result<String> {
+        let (me, _) = self.me()?;
+        let db = self.db();
+        let (kind, title): (String, String) = db.conn.query_row("SELECT kind, title FROM conversations WHERE id=?1", [sconv], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if kind == "channel" {
+            return Ok(if title.is_empty() { "Канал".into() } else { title });
+        }
+        if sender == me {
+            let name = kv_get_str(&db.conn, "display_name")?.unwrap_or_default();
+            let user = kv_get_str(&db.conn, "username")?.unwrap_or_default();
+            return Ok(if name.trim().is_empty() { format!("@{user}") } else { name });
+        }
+        let contact: Option<(String, String, String)> = db
+            .conn
+            .query_row(
+                "SELECT COALESCE(CASE WHEN first_name='' AND last_name='' THEN profile_name ELSE first_name END,''), COALESCE(last_name,''), COALESCE(username,'') FROM contacts WHERE user_id=?1",
+                [sender],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((f, l, u)) = contact {
+            let n = crate::engine::display_name(&f, &l, &u);
+            if !n.is_empty() && n != "@" {
+                return Ok(n);
+            }
+        }
+        Ok(if kind == "direct" && !title.is_empty() { title } else { "Участник".into() })
+    }
+
+    /// Re-sends a local message into another conversation with a forward header.
+    /// A file keeps its key: the same ciphertext is uploaded as a new attachment,
+    /// because downloads are limited to members of the source conversation.
+    pub fn forward_message(&self, p: &Value) -> Result<Value> {
+        let id = s(p, "message_id")?;
+        let conv = s(p, "conversation_id")?;
+        let (kind, body, file, poll, sconv, sender, ts): (String, String, Option<String>, Option<String>, String, String, i64) = self
+            .db()
+            .conn
+            .query_row("SELECT kind, body, file, poll, conversation_id, sender_user_id, sent_at FROM messages WHERE id=?1 AND kind IN ('text','file','poll')", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
+            .optional()?
+            .ok_or_else(|| Error::Invalid("Сообщение не найдено".into()))?;
+        self.check_can_send(&conv)?;
+        let rights = self.conversation_json(&conv)?;
+        if (kind == "file" && rights["can_media"] == false) || (kind == "poll" && rights["can_polls"] == false) {
+            return Err(Error::Invalid("Недостаточно прав для пересылки сюда".into()));
+        }
+        let mut pl = self.new_payload(&conv, &kind)?;
+        pl.text = if body.is_empty() { None } else { Some(body) };
+        pl.poll = poll.map(|s| serde_json::from_str(&s)).transpose()?;
+        pl.fwd = Some(json!({"name": self.forward_name(&sconv, &sender)?, "ts": ts}));
+        let mut att: Option<PathBuf> = None;
+        if kind == "file" {
+            let mut f: FileMeta = serde_json::from_str(&file.ok_or_else(|| Error::Invalid("В сообщении нет файла".into()))?)?;
+            let src = self.data_dir.join("files").join(format!("{id}.enc"));
+            if !src.exists() {
+                return Err(Error::Invalid("Сначала скачайте файл".into()));
+            }
+            let dst = self.data_dir.join("outgoing").join(format!("{}.enc", pl.mid));
+            if let Some(dir) = dst.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::copy(&src, &dst)?;
+            std::fs::copy(&src, self.data_dir.join("files").join(format!("{}.enc", pl.mid)))?;
+            f.id = String::new();
+            pl.file = Some(f);
+            att = Some(dst);
+        }
+        let pv = match &pl.file {
+            Some(f) if f.thumb.is_some() && f.mime.starts_with("image/") => "🖼 Фото".to_string(),
+            Some(f) => format!("📎 {}", f.name),
+            None if kind == "poll" => format!("📊 {}", pl.text.as_deref().unwrap_or("")),
+            None => preview(pl.text.as_deref().unwrap_or("")),
+        };
+        self.enqueue(&pl, true, att.as_deref(), &pv)?;
+        self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
+        self.emit(json!({"type": "conversations_changed"}));
+        self.wake();
+        self.message_json(&pl.mid)
     }
 
     fn file_meta(&self, id: &str) -> Result<FileMeta> {

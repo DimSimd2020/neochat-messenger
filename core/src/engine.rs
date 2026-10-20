@@ -293,6 +293,8 @@ impl Inner {
             "send_file" => self.send_file(p),
             "retry_message" => self.retry_message(p),
             "delete_local_message" => self.delete_local_message(p),
+            "delete_everywhere" => self.delete_everywhere(p),
+            "forward_message" => self.forward_message(p),
             "download_file" => self.download_file(p),
             "export_file" => self.export_file(p),
             "set_draft" => self.set_draft(p),

@@ -93,6 +93,10 @@ CREATE TABLE IF NOT EXISTS outbox (
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS processed (event_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS deleted_messages (
+    message_id TEXT NOT NULL, conversation_id TEXT NOT NULL, sender_user_id TEXT NOT NULL,
+    PRIMARY KEY (message_id, conversation_id, sender_user_id)
+);
 "#;
 
 pub struct Db {
@@ -134,6 +138,8 @@ impl Db {
             "ALTER TABLE conversations ADD COLUMN in_archive INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE contacts ADD COLUMN bio TEXT NOT NULL DEFAULT ''",
+            // Forwarded messages keep a small header: who originally sent it and when.
+            "ALTER TABLE messages ADD COLUMN fwd TEXT",
         ] {
             let _ = conn.execute(sql, []);
         }

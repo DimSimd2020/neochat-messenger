@@ -586,7 +586,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             for (m in messages) merged[m.str("id")] = m
         } else {
             // A fresh page replaces its range; older loaded messages stay above it.
-            val oldest = page.firstOrNull()?.optLong("local_id") ?: Long.MAX_VALUE
+            val oldest = page.firstOrNull()?.optLong("local_id") ?: 0L
             for (m in messages) if (m.optLong("local_id") < oldest) merged[m.str("id")] = m
             for (m in page) merged[m.str("id")] = m
         }
@@ -768,6 +768,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private val sender = ctx.label("", 12.5f, 600, Theme.Role.MUTED)
         private val bubble = LinearLayout(ctx)
         private val bg = GlassDrawable(ctx, GlassDrawable.Kind.INCOMING, ctx.dpf(23))
+        private val fwd = ctx.label("", 12.5f, 600)
         private val quote = LinearLayout(ctx)
         private val quoteName = ctx.label("", 12.5f, 600)
         private val quoteText = ctx.label("", 13f, 400)
@@ -788,6 +789,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private val status = ImageView(ctx)
         private val retry = ctx.label("Не отправлено · Повторить", 12.5f, 600, Theme.Role.WARNING)
         private var m = JSONObject()
+        private var reactsId = ""
+        private var reactsSig = ""
 
         init {
             orientation = HORIZONTAL
@@ -807,6 +810,9 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             quoteText.maxLines = 2
             quoteText.ellipsize = TextUtils.TruncateAt.END
             quote.addView(quoteText, LayoutParams(WRAP, WRAP))
+            fwd.maxLines = 1
+            fwd.ellipsize = TextUtils.TruncateAt.END
+            bubble.addView(fwd, LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(4) })
             bubble.addView(quote, LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(6) })
             file.gravity = Gravity.CENTER_VERTICAL
             fileIcon.background = GlassDrawable(ctx, GlassDrawable.Kind.STRONG, ctx.dpf(12))
@@ -847,6 +853,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val maxText = (ctx.resources.displayMetrics.widthPixels * 0.78f).toInt() - dp(29 + 38)
             text.maxWidth = maxText
             quoteText.maxWidth = maxText
+            fwd.maxWidth = maxText
             fileName.maxWidth = maxText - dp(46 + 60)
             text.setTextIsSelectable(false)
             text.setLineSpacing(0f, 1.2f)
@@ -872,6 +879,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             bubble.setOnLongClickListener { menu(m, bubble); true }
             // A tap opens reactions and actions, like a long press; photos open the viewer.
             bubble.setOnClickListener { if (isImage(m)) openPhoto(m) else menu(m, bubble) }
+            setOnClickListener { menu(m, bubble) }
+            setOnLongClickListener { menu(m, bubble); true }
         }
 
         fun bind(item: Item) {
@@ -900,6 +909,12 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             fileMeta.setTextColor(muted)
             fileAction.imageTintList = android.content.res.ColorStateList.valueOf(fg)
 
+            val fw = m.optJSONObject("fwd")?.str("name").orEmpty()
+            fwd.visibility = if (fw.isEmpty()) GONE else VISIBLE
+            if (fw.isNotEmpty()) {
+                fwd.text = "Переслано: $fw"
+                fwd.setTextColor(if (out) Theme.p.onAccent else Theme.p.accent)
+            }
             val rep = m.optJSONObject("reply_to")
             quote.visibility = if (rep != null) VISIBLE else GONE
             if (rep != null) {
@@ -991,7 +1006,19 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             reactRow.removeAllViews()
             val list = m.optJSONArray("reactions")?.objects() ?: emptyList()
             reactRow.visibility = if (list.isEmpty()) GONE else VISIBLE
-            for (r in list) reactRow.addView(reactionChip(ctx, r, onAccent) { react(m, r.str("emoji")) })
+            // Chips pop in when the reactions of the bound message changed.
+            val sig = list.joinToString(" ") { it.str("emoji") + it.optInt("count") }
+            val pop = reactsId == m.str("id") && reactsSig != sig
+            reactsId = m.str("id")
+            reactsSig = sig
+            for (r in list) reactRow.addView(reactionChip(ctx, r, onAccent) { react(m, r.str("emoji")) }.apply {
+                if (pop && Theme.ms(200) > 0) {
+                    alpha = 0f
+                    scaleX = 0.4f
+                    scaleY = 0.4f
+                    animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(Theme.ms(200)).start()
+                }
+            })
         }
 
         private fun bindPoll(m: JSONObject, fg: Int, muted: Int) {
@@ -1179,6 +1206,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             pm.add("Сохранить как…") { saveFile(m) }
         }
         if (m.str("status") == "failed") pm.add("Повторить отправку") { retry(m) }
+        if (ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll"))
+            pm.add("Переслать") { Dialogs.forward(act, listOf(m)) }
+        if (m.optBoolean("outgoing") && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll"))
+            pm.add("Удалить у всех", danger = true) {
+                CoreClient.call("delete_everywhere", JSONObject().put("message_id", m.str("id"))) { _, e ->
+                    if (e != null) act.toast(e.message)
+                }
+            }
         pm.add("Удалить у себя", danger = true) {
             CoreClient.call("delete_local_message", JSONObject().put("message_id", m.str("id"))) { _, e ->
                 if (e != null) act.toast(e.message)

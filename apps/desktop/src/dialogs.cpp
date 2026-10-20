@@ -7,6 +7,9 @@
 
 #include <QButtonGroup>
 #include <QClipboard>
+#include <QMouseEvent>
+#include <functional>
+#include <memory>
 #include <QDateTime>
 #include <QGuiApplication>
 #include <QLinearGradient>
@@ -189,6 +192,33 @@ protected:
 private:
     QStringList m_rows;
     QString m_name, m_seed, m_handle;
+};
+
+// Muted line that copies `value` on click.
+class CopyLabel : public ui::Label {
+public:
+    CopyLabel(const QString &text, const QString &value, std::function<void()> copied)
+        : ui::Label(text, 14, 400, ui::Label::Muted), m_value(value), m_copied(std::move(copied))
+    {
+        setCursor(Qt::PointingHandCursor);
+        setToolTip(QStringLiteral("Скопировать"));
+        setWordWrap(true);
+    }
+    void setValue(const QString &v) { m_value = v; }
+
+protected:
+    void mousePressEvent(QMouseEvent *e) override
+    {
+        if (e->button() != Qt::LeftButton)
+            return ui::Label::mousePressEvent(e);
+        QGuiApplication::clipboard()->setText(m_value);
+        if (m_copied)
+            m_copied();
+    }
+
+private:
+    QString m_value;
+    std::function<void()> m_copied;
 };
 
 ui::Label *mutedText(const QString &t)
@@ -552,9 +582,9 @@ void devices(const DialogHost &h)
 
 // ---- settings ----
 
-void settings(const DialogHost &h)
+void graphicsSettings(const DialogHost &h)
 {
-    auto *sheet = new Sheet(h.host, QStringLiteral("Настройки"), 480);
+    auto *sheet = new Sheet(h.host, QStringLiteral("Графика"), 480);
     auto *themeHead = new QHBoxLayout;
     themeHead->addWidget(new ui::Label(QStringLiteral("Тема"), 15, QFont::DemiBold), 1);
     static const char *const names[] = {"Устройство", "День", "Ночь"};
@@ -585,6 +615,58 @@ void settings(const DialogHost &h)
         Theme::instance()->setFontScale(scales[id].second);
     });
     sheet->body()->addLayout(sizes);
+    sheet->open();
+}
+
+// Account-wide: stored on the server and applied on every device.
+void privacySettings(const DialogHost &h)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Конфиденциальность"), 480);
+    auto *twoFactor = new ui::Toggle(QStringLiteral("Подтверждение входа"));
+    auto *lastSeen = new ui::Toggle(QStringLiteral("Время последнего визита"));
+    twoFactor->setEnabled(false);
+    lastSeen->setEnabled(false);
+    Core::instance()->call("account_settings", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
+        QSignalBlocker b1(twoFactor), b2(lastSeen);
+        twoFactor->setChecked(v.toObject().value("two_factor").toBool());
+        lastSeen->setChecked(v.toObject().value("show_last_seen").toBool(true));
+        twoFactor->setEnabled(true);
+        lastSeen->setEnabled(true);
+    });
+    QObject::connect(twoFactor, &QAbstractButton::toggled, sheet, [=](bool on) {
+        Core::instance()->call("set_two_factor", {{"enabled", on}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+            if (!e.ok())
+                fail(h, e);
+        });
+    });
+    QObject::connect(lastSeen, &QAbstractButton::toggled, sheet, [=](bool on) {
+        Core::instance()->call("set_last_seen_visible", {{"visible", on}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+            if (!e.ok())
+                fail(h, e);
+        });
+    });
+    sheet->body()->addWidget(twoFactor);
+    sheet->body()->addWidget(lastSeen);
+    sheet->open();
+}
+
+void settings(const DialogHost &h)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Настройки"), 480);
+    auto *groups = new QHBoxLayout;
+    auto *graphics = new ui::Button(QStringLiteral("Графика"), ui::Button::Secondary);
+    auto *privacy = new ui::Button(QStringLiteral("Конфиденциальность"), ui::Button::Secondary);
+    QObject::connect(graphics, &QAbstractButton::clicked, sheet, [=] {
+        sheet->close();
+        graphicsSettings(h);
+    });
+    QObject::connect(privacy, &QAbstractButton::clicked, sheet, [=] {
+        sheet->close();
+        privacySettings(h);
+    });
+    groups->addWidget(graphics);
+    groups->addWidget(privacy);
+    sheet->body()->addLayout(groups);
 
     sheet->body()->addSpacing(4);
     auto *enter = new ui::Toggle(QStringLiteral("Enter отправляет сообщение"));
@@ -595,46 +677,10 @@ void settings(const DialogHost &h)
             h.enterSendsChanged(on);
     });
     sheet->body()->addWidget(enter);
-    sheet->body()->addWidget(mutedText(QStringLiteral("Перенос строки — Shift+Enter. Если выключить, отправка — Ctrl+Enter.")));
     auto *notify = new ui::Toggle(QStringLiteral("Уведомления о новых сообщениях"));
     notify->setChecked(QSettings().value("notifications/enabled", true).toBool());
     QObject::connect(notify, &QAbstractButton::toggled, sheet, [](bool on) { QSettings().setValue("notifications/enabled", on); });
     sheet->body()->addWidget(notify);
-    auto *twoFactor = new ui::Toggle(QStringLiteral("Подтверждение входа"));
-    twoFactor->setEnabled(false);
-    Core::instance()->call("account_settings", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
-        QSignalBlocker b(twoFactor);
-        twoFactor->setChecked(v.toObject().value("two_factor").toBool());
-        twoFactor->setEnabled(true);
-    });
-    QObject::connect(twoFactor, &QAbstractButton::toggled, sheet, [=](bool on) {
-        Core::instance()->call("set_two_factor", {{"enabled", on}}, sheet, [=](const QJsonValue &, const CoreError &e) {
-            if (!e.ok())
-                fail(h, e);
-        });
-    });
-    sheet->body()->addWidget(twoFactor);
-    sheet->body()->addWidget(mutedText(QStringLiteral("При входе на новом устройстве понадобится код. Он придёт в чат «NeoChat уведомления» на ваших устройствах.")));
-    auto *lastSeen = new ui::Toggle(QStringLiteral("Показывать время последнего визита"));
-    lastSeen->setEnabled(false);
-    Core::instance()->call("account_settings", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
-        QSignalBlocker b(lastSeen);
-        lastSeen->setChecked(v.toObject().value("show_last_seen").toBool(true));
-        lastSeen->setEnabled(true);
-    });
-    QObject::connect(lastSeen, &QAbstractButton::toggled, sheet, [=](bool on) {
-        Core::instance()->call("set_last_seen_visible", {{"visible", on}}, sheet, [=](const QJsonValue &, const CoreError &e) {
-            if (!e.ok())
-                fail(h, e);
-        });
-    });
-    sheet->body()->addWidget(lastSeen);
-    sheet->body()->addWidget(mutedText(QStringLiteral("Если скрыть время визита, вы тоже не увидите его у других: останется «был(а) недавно» или «давно».")));
-    auto *bigEmoji = new ui::Toggle(QStringLiteral("Крупные эмодзи без текста"));
-    bigEmoji->setChecked(QSettings().value("chat/bigEmoji", true).toBool());
-    QObject::connect(bigEmoji, &QAbstractButton::toggled, sheet, [](bool on) { QSettings().setValue("chat/bigEmoji", on); });
-    sheet->body()->addWidget(bigEmoji);
-    sheet->body()->addWidget(mutedText(QStringLiteral("Щёлкните по чату правой кнопкой, чтобы закрепить его (до 3 чатов) или убрать в архив.")));
     auto *update = new ui::Button(QStringLiteral("Проверить обновления · версия ") + QStringLiteral(NEOCHAT_VERSION), ui::Button::Secondary);
     QObject::connect(update, &QAbstractButton::clicked, sheet, [=] {
         if (h.checkUpdate)
@@ -661,8 +707,7 @@ void profile(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Профиль"), 420);
     auto *name = new ui::Label({}, 20, QFont::Bold);
-    auto *sub = new ui::Label({}, 13.5, 400, ui::Label::Muted);
-    sub->setWordWrap(true);
+    auto *sub = new CopyLabel({}, {}, [h] { h.toast(QStringLiteral("Имя пользователя скопировано")); });
     sheet->body()->addWidget(name);
     sheet->body()->addWidget(sub);
     auto *about = new ui::Label({}, 14);
@@ -694,7 +739,7 @@ void profile(const DialogHost &h)
         if (!s.value("number").toString().isEmpty())
             line += QStringLiteral(" · ID ") + s.value("number").toString();
         sub->setText(line);
-        sub->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        sub->setValue(nick);
         edit->setText(display);
         bio->setText(s.value("bio").toString());
         about->setText(s.value("bio").toString());
@@ -736,10 +781,8 @@ void myQr(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Мой QR-код"), 380);
     auto *qr = new QrCard;
-    auto *qrNote = mutedText(QStringLiteral("Собеседник сканирует код в NeoChat на телефоне и сразу добавляет вас; ключ при этом считается сверенным."));
     auto *copyLink = new ui::Button(QStringLiteral("Скопировать ссылку"), ui::Button::Flat);
     sheet->body()->addWidget(qr, 0, Qt::AlignHCenter);
-    sheet->body()->addWidget(qrNote);
     sheet->body()->addWidget(copyLink);
     Core::instance()->call("my_qr", {}, sheet, [=](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
@@ -802,7 +845,9 @@ void conversationInfo(const DialogHost &h, const QString &cid)
                     if (!ie.ok())
                         return fail(h, ie);
                     const QJsonObject info = iv.toObject();
-                    lay->addWidget(new ui::Label("@" + info.value("username").toString() + (seen.isEmpty() ? QString() : QStringLiteral(" · ") + seen), 14, 400, ui::Label::Muted));
+                    const QString nick = "@" + info.value("username").toString();
+                    lay->addWidget(new CopyLabel(nick + (seen.isEmpty() ? QString() : QStringLiteral(" · ") + seen), nick,
+                                                 [h] { h.toast(QStringLiteral("Имя пользователя скопировано")); }));
                     if (!bioText.isEmpty()) {
                         auto *b = new ui::Label(bioText, 14);
                         b->setWordWrap(true);
@@ -1105,6 +1150,60 @@ void newPoll(const DialogHost &h, const QString &cid)
             sheet->close();
         });
     });
+    sheet->open();
+}
+
+void forward(const DialogHost &h, const QJsonArray &msgs)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Переслать"), 480);
+    auto *search = new ui::SearchField(QStringLiteral("Поиск чата"));
+    sheet->body()->addWidget(search);
+    auto *list = new RowList(380);
+    auto *empty = mutedText({});
+    sheet->body()->addWidget(list);
+    sheet->body()->addWidget(empty);
+    auto reload = [=] {
+        Core::instance()->call("list_conversations", {{"query", search->edit()->text()}}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+            if (!e.ok())
+                return fail(h, e);
+            list->clear();
+            const QJsonArray arr = v.toArray();
+            int count = 0;
+            for (const auto &x : arr) {
+                const QJsonObject c = x.toObject();
+                if (!c.value("can_send").toBool())
+                    continue;
+                const QString cid = c.value("id").toString();
+                static const QHash<QString, QString> kinds{
+                    {"direct", QStringLiteral("Личный чат")}, {"group", QStringLiteral("Группа")}, {"channel", QStringLiteral("Канал")}};
+                auto *row = new PersonRow(c.value("title").toString(), kinds.value(c.value("kind").toString()), cid);
+                QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
+                    sheet->close();
+                    auto sent = std::make_shared<int>(0);
+                    const int total = int(msgs.size());
+                    for (const auto &mx : msgs) {
+                        const QString mid = mx.toObject().value("id").toString();
+                        Core::instance()->call("forward_message", {{"message_id", mid}, {"conversation_id", cid}}, h.host,
+                                               [h, cid, sent, total](const QJsonValue &, const CoreError &fe) mutable {
+                                                   if (!fe.ok())
+                                                       return fail(h, fe);
+                                                   if (++*sent == total)
+                                                       h.openChat(cid);
+                                               });
+                    }
+                });
+                list->add(row);
+                ++count;
+            }
+            list->fit();
+            const bool noChats = count == 0;
+            empty->setText(noChats ? QStringLiteral("Нет чатов по этому запросу.") : QString());
+            empty->setVisible(noChats);
+            list->setVisible(!noChats);
+        });
+    };
+    QObject::connect(search->edit(), &QLineEdit::textChanged, sheet, reload);
+    reload();
     sheet->open();
 }
 

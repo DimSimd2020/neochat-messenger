@@ -72,6 +72,30 @@ impl Inner {
         Ok(true)
     }
 
+    /// A "delete for all" control: the original sender removes the message on
+    /// every device. Deletes for somebody else's messages are ignored.
+    pub fn apply_delete(conn: &rusqlite::Connection, conv: &str, sender: &str, g: &Value) -> Result<bool> {
+        let id = g["id"].as_str().unwrap_or_default();
+        if uuid::Uuid::parse_str(id).is_err() {
+            return Ok(false);
+        }
+        // A retry of the original message can arrive after its delete control.
+        conn.execute(
+            "INSERT OR IGNORE INTO deleted_messages(message_id, conversation_id, sender_user_id) VALUES (?1, ?2, ?3)",
+            params![id, conv, sender],
+        )?;
+        let theirs: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND conversation_id=?2 AND sender_user_id=?3)",
+            params![id, conv, sender],
+            |r| r.get(0),
+        )?;
+        if !theirs {
+            return Ok(false);
+        }
+        Inner::erase_message(conn, id, conv)?;
+        Ok(true)
+    }
+
     /// Reactions of one message, in the order they first appeared.
     pub fn reactions_json(&self, conn: &rusqlite::Connection, id: &str, me: &str) -> Result<Value> {
         let mut st = conn.prepare_cached(&format!(

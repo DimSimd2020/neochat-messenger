@@ -190,6 +190,103 @@ fn group_membership_and_files() {
 }
 
 #[test]
+fn delete_everywhere_and_forward() {
+    let Some(e) = env() else { return };
+    let (alice, _) = register(&e, &uname("alice"));
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+
+    let contact = alice.call("resolve_contact", json!({"username": bname, "first_name": "Боб"}));
+    let conv = alice.call("open_direct", json!({"user_id": contact["user_id"]}));
+    let cid = conv["id"].as_str().unwrap().to_string();
+
+    // "Delete for everyone" removes the message on both sides; deleting somebody
+    // else's message is rejected. A replayed delete control stays a no-op.
+    alice.call("send_text", json!({"conversation_id": cid, "text": "это удалим"}));
+    alice.sync();
+    bob.sync();
+    let doomed = bob.messages(&cid).last().unwrap()["id"].as_str().unwrap().to_string();
+    assert!(bob.try_call("delete_everywhere", json!({"message_id": doomed})).is_err());
+    bob.core.as_ref().unwrap().inner.enqueue_control(&cid, "delete", json!({"id": doomed})).unwrap();
+    bob.sync();
+    alice.sync();
+    assert!(alice.messages(&cid).iter().any(|m| m["id"] == doomed), "a peer cannot delete our messages");
+    // A full disk / failed outbox write must keep the original message intact.
+    alice.core.as_ref().unwrap().inner.db().conn.execute_batch(
+        "CREATE TEMP TRIGGER fail_delete_control BEFORE INSERT ON outbox WHEN NEW.visible=0 BEGIN SELECT RAISE(ABORT, 'test outbox failure'); END;"
+    ).unwrap();
+    assert!(alice.try_call("delete_everywhere", json!({"message_id": doomed})).is_err());
+    assert!(alice.messages(&cid).iter().any(|m| m["id"] == doomed));
+    alice.core.as_ref().unwrap().inner.db().conn.execute_batch("DROP TRIGGER fail_delete_control").unwrap();
+    alice.call("delete_everywhere", json!({"message_id": doomed}));
+    assert!(alice.messages(&cid).iter().all(|m| m["id"] != doomed));
+    alice.sync();
+    bob.sync();
+    assert!(bob.messages(&cid).iter().all(|m| m["id"] != doomed));
+    bob.core.as_ref().unwrap().inner.db().conn.execute("DELETE FROM kv WHERE k='cursor'", []).unwrap();
+    bob.sync();
+    assert!(bob.messages(&cid).iter().all(|m| m["id"] != doomed));
+
+    // A delayed original must not reappear if its delete arrived first.
+    let delayed = {
+        let inner = &alice.core.as_ref().unwrap().inner;
+        let _cycle = inner.cycle_lock.lock().unwrap();
+        let m = alice.call("send_text", json!({"conversation_id": cid, "text": "задержанное"}));
+        inner.db().conn.execute("UPDATE outbox SET next_at=?2 WHERE id=?1", rusqlite::params![m["id"].as_str().unwrap(), i64::MAX]).unwrap();
+        inner.enqueue_control(&cid, "delete", json!({"id": m["id"]})).unwrap();
+        m
+    };
+    alice.sync();
+    bob.sync();
+    alice.core.as_ref().unwrap().inner.db().conn.execute("UPDATE outbox SET next_at=0 WHERE id=?1", [delayed["id"].as_str().unwrap()]).unwrap();
+    alice.sync();
+    bob.sync();
+    assert!(bob.messages(&cid).iter().all(|m| m["id"] != delayed["id"]));
+    alice.call("delete_local_message", json!({"message_id": delayed["id"]}));
+
+    // Bob forwards Alice's text and file into a group where Carol is a member
+    // but the source chat is not. The copy keeps the author's name; the file is
+    // uploaded as a separate encrypted attachment so Carol can download it.
+    let cname = uname("carol");
+    let (carol, _) = register(&e, &cname);
+    let car = alice.call("resolve_contact", json!({"username": cname}));
+    let g = alice.call("create_group", json!({"title": "Цель", "member_ids": [contact["user_id"], car["user_id"]]}));
+    let gid = g["id"].as_str().unwrap().to_string();
+
+    alice.call("send_text", json!({"conversation_id": gid, "text": "тема группы"}));
+    alice.call("send_text", json!({"conversation_id": cid, "text": "перешли это"}));
+    let src = std::env::temp_dir().join(format!("nc-e2e-{}.bin", uuid::Uuid::new_v4()));
+    let data: Vec<u8> = (0..120_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+    let fm = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "application/octet-stream"}));
+    alice.sync();
+    bob.sync();
+    carol.sync();
+    // The file must be downloaded before it can be forwarded.
+    assert!(bob.try_call("forward_message", json!({"message_id": fm["id"], "conversation_id": gid})).is_err());
+    bob.call("download_file", json!({"message_id": fm["id"]}));
+
+    let texts = bob.messages(&cid);
+    let txt = texts.iter().find(|m| m["text"] == "перешли это").unwrap();
+    bob.call("forward_message", json!({"message_id": txt["id"], "conversation_id": gid}));
+    let fwd_file = bob.call("forward_message", json!({"message_id": fm["id"], "conversation_id": gid}));
+    // The forwarding device can open its own copy even before upload.
+    let local = bob.call("download_file", json!({"message_id": fwd_file["id"]}));
+    assert_eq!(std::fs::read(local["path"].as_str().unwrap()).unwrap(), data);
+    assert_ne!(fwd_file["id"], fm["id"]);
+    assert!(fwd_file["fwd"]["name"].as_str().unwrap().len() > 0, "{fwd_file:?}");
+    bob.sync();
+    carol.sync();
+
+    let gmsgs = carol.messages(&gid);
+    let fwd = gmsgs.iter().find(|m| m["id"] == fwd_file["id"]).unwrap_or_else(|| panic!("forwarded file missing: {gmsgs:?}"));
+    assert!(fwd["fwd"]["name"].as_str().unwrap().len() > 0);
+    let dl = carol.call("download_file", json!({"message_id": fwd["id"]}));
+    assert_eq!(std::fs::read(dl["path"].as_str().unwrap()).unwrap(), data);
+    assert!(gmsgs.iter().any(|m| m["text"] == "перешли это" && m["fwd"]["name"].is_string()));
+}
+
+#[test]
 fn linked_device_and_recovery() {
     let Some(e) = env() else { return };
     let aname = uname("alice");

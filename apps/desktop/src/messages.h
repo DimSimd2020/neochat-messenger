@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QPixmap>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QListView>
 #include <QSet>
@@ -22,6 +23,7 @@ struct MessageItem {
     bool groupStart = true;
     bool groupEnd = true;
     qint64 appearAt = -1; // ms on the shared clock; -1 = no entry animation
+    qint64 reactAt = -1;  // reactions changed at this time: chips pop in
 };
 
 class MessageModel : public QAbstractListModel {
@@ -35,7 +37,7 @@ public:
 
     void clear();
     // Merges a chronological page; returns ids that were appended after the newest known message.
-    QStringList merge(const QList<QJsonObject> &page, bool animateNew);
+    QStringList merge(const QList<QJsonObject> &page, bool animateNew, bool older = false);
     void setFlat(const QList<QJsonObject> &list); // search results: no grouping
     qint64 oldestLocalId() const;
     int messageCount() const { return int(m_messages.size()); }
@@ -46,12 +48,13 @@ private:
     void rebuild();
     QList<QJsonObject> m_messages; // chronological
     QHash<QString, qint64> m_appear;
+    QHash<QString, qint64> m_react;
     QList<MessageItem> m_items;
 };
 
 // Geometry of one message row, shared by painting and hit testing.
 struct MessageLayout {
-    QRectF bubble, name, avatar, text, meta, reply, file, download, retry, image, pollInfo;
+    QRectF bubble, name, avatar, text, meta, reply, fwd, file, download, retry, image, pollInfo;
     QList<QRectF> options; // poll answers
     QList<QRectF> reacts;  // reaction chips
     bool big = false;      // emoji-only message without a bubble
@@ -82,6 +85,9 @@ public:
     static MessageLayout layout(const MessageItem &it, qreal width, bool group);
     void paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &index) const override;
     QSize sizeHint(const QStyleOptionViewItem &opt, const QModelIndex &index) const override;
+    // Mouse selection inside one message's text (document positions).
+    QString selId;
+    int selA = 0, selB = 0;
 };
 
 class MessageView : public QListView {
@@ -95,14 +101,19 @@ public:
     void scrollToNewest();
     bool atBottom() const;
     void setCanReact(bool on) { m_canReact = on; }
+    // Check mode: several messages picked for a bulk action.
+    bool checkMode() const { return m_checkMode; }
+    bool isChecked(const QString &id) const { return m_checked.contains(id); }
 
 signals:
     void replyRequested(const QJsonObject &msg);
+    void forwardRequested(const QJsonArray &msgs);
     void toast(const QString &text);
     void readable(); // the newest messages are on screen
 
 protected:
     void resizeEvent(QResizeEvent *e) override;
+    void mousePressEvent(QMouseEvent *e) override;
     void mouseReleaseEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
     void contextMenuEvent(QContextMenuEvent *e) override;
@@ -126,6 +137,13 @@ private:
     QString linkAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const;
     void placeJump();
     QJsonObject messageAt(const QPoint &pos, MessageLayout *lay = nullptr) const;
+    int textHit(const QPoint &pos) const;
+    QString selectedText() const;
+    void clearSelection();
+    void enterCheckMode(const QString &id);
+    void exitCheckMode();
+    void toggleCheck(const QString &id);
+    void placeCheckBar();
 
     MessageModel *m_model;
     QString m_conv;
@@ -137,4 +155,13 @@ private:
     int m_newBelow = 0;
     QTimer m_anim;
     ui::IconButton *m_jump;
+    MessageDelegate *m_delegate;
+    QPersistentModelIndex m_selIndex;
+    QPoint m_selPress;
+    bool m_selDragging = false;
+    bool m_selMoved = false;
+    bool m_checkMode = false;
+    QSet<QString> m_checked;
+    QWidget *m_checkBar = nullptr;
+    class QLabel *m_checkCount = nullptr;
 };

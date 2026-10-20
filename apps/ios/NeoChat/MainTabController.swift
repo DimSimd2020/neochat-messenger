@@ -1,5 +1,18 @@
 import UIKit
 
+/// Navigation with a guarded swipe-back: the gesture may only start on a real
+/// stacked screen and never while another transition is still running.
+final class ChatNavController: UINavigationController, UIGestureRecognizerDelegate {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        interactivePopGestureRecognizer?.delegate = self
+    }
+
+    func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        g !== interactivePopGestureRecognizer || (viewControllers.count > 1 && transitionCoordinator == nil)
+    }
+}
+
 /// Chats, contacts and profile behind a floating glass tab bar, as on Android.
 final class MainTabController: UITabBarController {
     private let pill = UIView()
@@ -53,7 +66,7 @@ final class MainTabController: UITabBarController {
 
     private func nav(_ vc: UIViewController, _ title: String, _ icon: String) -> UINavigationController {
         vc.title = title
-        let n = UINavigationController(rootViewController: vc)
+        let n = ChatNavController(rootViewController: vc)
         n.navigationBar.prefersLargeTitles = true
         n.tabBarItem = UITabBarItem(title: title, image: UIImage(systemName: icon), tag: 0)
         let a = UINavigationBarAppearance()

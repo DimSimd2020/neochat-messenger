@@ -207,6 +207,52 @@ object Dialogs {
         s.show()
     }
 
+    /** Sheet that picks the chat to forward [msgs] into. */
+    fun forward(act: MainActivity, msgs: List<JSONObject>) {
+        val s = Sheet(act, "Переслать")
+        val ctx = s.ctx
+        val search = SearchBox(ctx, "Поиск чата")
+        s.add(search, 0)
+        val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        s.add(rows, 6)
+        val empty = ctx.label("Некуда пересылать: чатов пока нет.", 14f, 400, Theme.Role.MUTED)
+        s.add(empty, 6)
+        fun reload() {
+            CoreClient.call("list_conversations", JSONObject().put("query", search.edit.text.toString())) { v, e ->
+                if (e != null) return@call act.toast(e.message)
+                val list = (v as? JSONArray)?.objects()?.filter { it.optBoolean("can_send") } ?: emptyList()
+                rows.removeAllViews()
+                empty.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+                if (list.isEmpty() && search.edit.text.isNotEmpty()) empty.text = "Ничего не нашли"
+                for (c in list) {
+                    val cid = c.str("id")
+                    val row = ListRow(ctx, 44)
+                    bindChatRow(act, row, c)
+                    row.time.text = ""
+                    row.setBadge(0)
+                    row.setOnClickListener {
+                        s.dismiss()
+                        var left = msgs.size
+                        for (m in msgs) {
+                            CoreClient.call("forward_message", JSONObject().put("message_id", m.str("id")).put("conversation_id", cid)) { _, fe ->
+                                if (fe != null) act.toast(fe.message)
+                                if (--left == 0) act.openChat(cid)
+                            }
+                        }
+                    }
+                    rows.addView(row, lp())
+                }
+            }
+        }
+        search.edit.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(e: Editable?) = reload()
+            override fun beforeTextChanged(e: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(e: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        reload()
+        s.show()
+    }
+
     // ---- devices ----
 
     private fun platformName(p: String) = when (p) {

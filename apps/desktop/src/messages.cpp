@@ -125,7 +125,7 @@ QFont bigEmojiFont(int n)
 
 int bigEmojiCount(const QJsonObject &m)
 {
-    if (m.value("kind").toString() != "text" || m.value("reply_to").isObject() || !QSettings().value("chat/bigEmoji", true).toBool())
+    if (m.value("kind").toString() != "text" || m.value("reply_to").isObject())
         return 0;
     return m.value("emoji_only").toInt();
 }
@@ -206,6 +206,23 @@ QTextDocument *textDoc(const QJsonObject &m)
     cache.insert(key, d);
     return d;
 }
+
+// Floating pill with bulk actions while several messages are checked.
+class CheckBar : public QWidget {
+public:
+    using QWidget::QWidget;
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const Palette &c = Theme::p();
+        p.setPen(QPen(c.border, 1));
+        p.setBrush(c.raised);
+        p.drawRoundedRect(rect().adjusted(0.5, 0.5, -0.5, -0.5), 22, 22);
+    }
+};
 
 // Full-window photo viewer: click, Esc or Space closes; fades unless motion is reduced.
 class PhotoViewer : public QWidget {
@@ -351,6 +368,7 @@ void MessageModel::clear()
     m_messages.clear();
     m_items.clear();
     m_appear.clear();
+    m_react.clear();
     endResetModel();
 }
 
@@ -359,9 +377,18 @@ qint64 MessageModel::oldestLocalId() const
     return m_messages.isEmpty() ? std::numeric_limits<qint64>::max() : qint64(m_messages.first().value("local_id").toDouble());
 }
 
-QStringList MessageModel::merge(const QList<QJsonObject> &page, bool animateNew)
+QStringList MessageModel::merge(const QList<QJsonObject> &page, bool animateNew, bool older)
 {
     const qint64 newest = m_messages.isEmpty() ? -1 : qint64(m_messages.last().value("local_id").toDouble());
+    if (!older) {
+        QSet<QString> ids;
+        for (const auto &m : page)
+            ids.insert(m.value("id").toString());
+        const qint64 oldest = page.isEmpty() ? 0 : qint64(page.first().value("local_id").toDouble());
+        m_messages.removeIf([&](const QJsonObject &m) {
+            return qint64(m.value("local_id").toDouble()) >= oldest && !ids.contains(m.value("id").toString());
+        });
+    }
     QHash<QString, int> pos;
     for (int i = 0; i < m_messages.size(); ++i)
         pos.insert(m_messages[i].value("id").toString(), i);
@@ -370,6 +397,8 @@ QStringList MessageModel::merge(const QList<QJsonObject> &page, bool animateNew)
         const QString id = m.value("id").toString();
         auto it = pos.find(id);
         if (it != pos.end()) {
+            if (m_messages[*it].value("reactions") != m.value("reactions"))
+                m_react.insert(id, clockMs());
             m_messages[*it] = m;
             continue;
         }
@@ -413,6 +442,7 @@ void MessageModel::rebuild()
         MessageItem it;
         it.msg = m;
         it.appearAt = m_appear.value(m.value("id").toString(), -1);
+        it.reactAt = m_react.value(m.value("id").toString(), -1);
         if (!flat && !m_items.isEmpty() && !m_items.last().isDate) {
             const QJsonObject &prev = m_items.last().msg;
             const bool same = prev.value("sender_user_id") == m.value("sender_user_id") && prev.value("outgoing") == m.value("outgoing") &&
@@ -452,6 +482,12 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         y += 20;
     }
     qreal w = 0, h = kPadTop;
+    const QJsonValue fwd = m.value("fwd");
+    if (fwd.isObject()) {
+        L.fwd = QRectF(0, h, qMin(inner, 320.0), 20);
+        w = qMax(w, L.fwd.width());
+        h += 24;
+    }
     const QJsonValue reply = m.value("reply_to");
     if (reply.isObject()) {
         L.reply = QRectF(0, h, qMin(inner, 320.0), 40);
@@ -466,7 +502,7 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         if (iw <= 0 || ih <= 0)
             iw = 4, ih = 3;
         const qreal s = qMin(qMin(maxBubble - 8, 340.0) / iw, 360.0 / ih);
-        const qreal top = L.reply.isNull() ? 4 : h;
+        const qreal top = L.reply.isNull() && L.fwd.isNull() ? 4 : h;
         L.image = QRectF(0, top, qMax(140.0, iw * s), qMax(90.0, ih * s));
         w = qMax(w, L.image.width() + 8 - 2 * kPadH);
         h = top + L.image.height() + 6;
@@ -538,6 +574,7 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         const qreal x = alignRight ? L.bubble.right() - kPadH - r.width() : L.bubble.left() + kPadH;
         r.moveTo(x, y + r.top());
     };
+    place(L.fwd, false);
     place(L.reply, false);
     place(L.file, false);
     place(L.text, false);
@@ -597,6 +634,11 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     const QJsonObject &m = it->msg;
     const MessageLayout L = layout(*it, width, model->group && !model->flat);
     const bool out = m.value("outgoing").toBool();
+    const auto *view = qobject_cast<const MessageView *>(opt.widget ? opt.widget->parentWidget() : nullptr);
+    const bool checking = view && view->checkMode();
+    const bool checked = checking && view->isChecked(m.value("id").toString());
+    if (checked)
+        p->fillRect(QRectF(0, 0, width, opt.rect.height()), QColor(c.accent.red(), c.accent.green(), c.accent.blue(), 22));
 
     if (it->appearAt >= 0) {
         const qreal t = qBound(0.0, (clockMs() - it->appearAt) / kAppearMs, 1.0);
@@ -645,6 +687,16 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     const QColor fg = tinted ? c.onOutgoing : (undecryptable ? c.warning : c.text);
     const QColor meta = tinted ? c.outgoingMuted : c.muted;
 
+    if (!L.fwd.isNull()) {
+        const QColor fc = out ? c.onOutgoing : c.accent;
+        p->setPen(Qt::NoPen);
+        p->setBrush(fc);
+        p->drawRoundedRect(QRectF(L.fwd.left(), L.fwd.top() + 2, 3, L.fwd.height() - 4), 1.5, 1.5);
+        p->setFont(Theme::instance()->font(12.5, QFont::DemiBold));
+        p->setPen(fc);
+        p->drawText(L.fwd.adjusted(10, 0, -6, 0), Qt::AlignLeft | Qt::AlignVCenter,
+                    QFontMetricsF(p->font()).elidedText(QStringLiteral("Переслано: ") + m.value("fwd").toObject().value("name").toString(), Qt::ElideRight, L.fwd.width() - 16));
+    }
     if (!L.reply.isNull()) {
         const QJsonObject rep = m.value("reply_to").toObject();
         p->setPen(Qt::NoPen);
@@ -768,6 +820,17 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         QTextDocument *d = textDoc(m);
         QAbstractTextDocumentLayout::PaintContext ctx;
         ctx.palette.setColor(QPalette::Text, fg);
+        if (selA != selB && selId == m.value("id").toString()) {
+            QAbstractTextDocumentLayout::Selection sel;
+            sel.cursor = QTextCursor(d);
+            sel.cursor.setPosition(qMin(selA, selB));
+            sel.cursor.setPosition(qMax(selA, selB), QTextCursor::KeepAnchor);
+            QColor hl = c.accent;
+            hl.setAlphaF(0.4);
+            sel.format.setBackground(hl);
+            sel.format.setForeground(fg);
+            ctx.selections << sel;
+        }
         p->save();
         p->translate(L.text.topLeft());
         d->documentLayout()->draw(p, ctx);
@@ -775,6 +838,17 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     }
 
     const QJsonArray reacts = m.value("reactions").toArray();
+    // Chips pop in together when the reactions set changed just now.
+    const qreal rt = it->reactAt >= 0 && Theme::ms(180) > 0 ? qBound(0.0, (clockMs() - it->reactAt) / qreal(Theme::ms(180)), 1.0) : 1.0;
+    if (rt < 1 && !L.reacts.isEmpty()) {
+        p->save();
+        p->setOpacity(rt);
+        const qreal e = Theme::surfaceEasing().valueForProgress(rt);
+        const qreal s = 0.6 + 0.4 * e;
+        p->translate(L.reacts[0].center());
+        p->scale(s, s);
+        p->translate(-L.reacts[0].center());
+    }
     p->setFont(reactFont());
     for (int i = 0; i < L.reacts.size() && i < reacts.size(); ++i) {
         const QJsonObject r = reacts[i].toObject();
@@ -788,6 +862,8 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         p->setPen(fg);
         p->drawText(L.reacts[i], Qt::AlignCenter, r.value("emoji").toString() + " " + QString::number(r.value("count").toInt()));
     }
+    if (rt < 1 && !L.reacts.isEmpty())
+        p->restore();
 
     p->setFont(metaFont());
     p->setPen(meta);
@@ -817,6 +893,14 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         p->setPen(c.warning);
         p->drawText(L.retry, (out ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignVCenter, QStringLiteral("Не отправлено · Повторить"));
     }
+    if (checking) {
+        const QRectF cr(12, L.height / 2 - 11, 22, 22);
+        p->setPen(QPen(checked ? c.accent : c.muted, 1.8));
+        p->setBrush(checked ? c.accent : Qt::NoBrush);
+        p->drawEllipse(cr);
+        if (checked)
+            ui::paintIcon(p, cr.adjusted(5, 5, -5, -5), "tick", c.onAccent, 2.2);
+    }
     p->restore();
 }
 
@@ -826,7 +910,8 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
 {
     m_model = new MessageModel(this);
     setModel(m_model);
-    setItemDelegate(new MessageDelegate(this));
+    m_delegate = new MessageDelegate(this);
+    setItemDelegate(m_delegate);
     setFrameShape(QFrame::NoFrame);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -840,9 +925,10 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
     connect(&m_anim, &QTimer::timeout, this, [this] {
         viewport()->update();
         bool running = false;
-        for (int i = m_model->rowCount() - 1; i >= 0 && i >= m_model->rowCount() - 12; --i) {
+        const qint64 now = clockMs();
+        for (int i = 0; i < m_model->rowCount(); ++i) {
             const auto &it = m_model->item(i);
-            if (it.appearAt >= 0 && clockMs() - it.appearAt < kAppearMs)
+            if ((it.appearAt >= 0 && now - it.appearAt < kAppearMs) || (it.reactAt >= 0 && now - it.reactAt < 180))
                 running = true;
         }
         if (!running)
@@ -902,6 +988,7 @@ bool MessageView::atBottom() const
 
 void MessageView::setConversation(const QString &id, bool group)
 {
+    exitCheckMode();
     m_conv = id;
     m_hasMore = true;
     m_searching = false;
@@ -956,7 +1043,7 @@ void MessageView::applyPage(const QList<QJsonObject> &page, bool older)
     const bool first = m_model->messageCount() == 0;
     const bool wasBottom = first || atBottom();
     const int distance = verticalScrollBar()->maximum() - verticalScrollBar()->value();
-    const QStringList appended = m_model->merge(page, !older && !first);
+    const QStringList appended = m_model->merge(page, !older && !first, older);
     doItemsLayout();
     if (wasBottom && !older) {
         scrollToBottom();
@@ -980,7 +1067,14 @@ void MessageView::applyPage(const QList<QJsonObject> &page, bool older)
             viewport()->update();
         }
     }
-    if (!appended.isEmpty() && !older && !first)
+    bool fresh = !appended.isEmpty() && !older && !first;
+    if (!fresh)
+        for (int i = 0; i < m_model->rowCount(); ++i)
+            if (const auto &it = m_model->item(i); it.reactAt >= 0 && clockMs() - it.reactAt < 2000) {
+                fresh = true;
+                break;
+            }
+    if (fresh)
         m_anim.start();
     if (atBottom())
         emit readable();
@@ -1036,12 +1130,135 @@ void MessageView::resizeEvent(QResizeEvent *e)
     doItemsLayout();
     restoreBottomDistance(d);
     placeJump();
+    placeCheckBar();
 }
 
 void MessageView::placeJump()
 {
     m_jump->move(viewport()->width() - 64, viewport()->height() - 60);
     m_jump->raise();
+}
+
+void MessageView::placeCheckBar()
+{
+    if (!m_checkBar)
+        return;
+    m_checkBar->adjustSize();
+    m_checkBar->move((viewport()->width() - m_checkBar->width()) / 2, 10);
+    m_checkBar->raise();
+}
+
+// Checked messages in chat order for bulk actions.
+static QList<QJsonObject> checkedMessages(const MessageModel *model, const QSet<QString> &ids)
+{
+    QList<QJsonObject> out;
+    for (int i = 0; i < model->rowCount(); ++i) {
+        const MessageItem &it = model->item(i);
+        if (!it.isDate && ids.contains(it.msg.value("id").toString()))
+            out << it.msg;
+    }
+    return out;
+}
+
+void MessageView::enterCheckMode(const QString &id)
+{
+    if (id.isEmpty())
+        return;
+    if (!m_checkMode) {
+        m_checkMode = true;
+        clearSelection();
+        auto *bar = new CheckBar(this);
+        auto *l = new QHBoxLayout(bar);
+        l->setContentsMargins(18, 4, 8, 4);
+        l->setSpacing(8);
+        m_checkCount = new QLabel(bar);
+        l->addWidget(m_checkCount);
+        auto *fwd = new ui::Button(QStringLiteral("Переслать"), ui::Button::Flat, bar);
+        auto *copy = new ui::Button(QStringLiteral("Копировать"), ui::Button::Flat, bar);
+        auto *del = new ui::Button(QStringLiteral("Удалить…"), ui::Button::Danger, bar);
+        auto *x = new ui::IconButton("close", QStringLiteral("Отмена"), bar, 32);
+        l->addWidget(fwd);
+        l->addWidget(copy);
+        l->addWidget(del);
+        l->addWidget(x);
+        connect(fwd, &QAbstractButton::clicked, bar, [this] {
+            const QList<QJsonObject> sel = checkedMessages(m_model, m_checked);
+            QJsonArray arr;
+            for (const auto &m : sel)
+                if (const QString k = m.value("kind").toString(); (k == "text" || k == "file" || k == "poll") && m.value("status").toString() != "failed")
+                    arr << m;
+            exitCheckMode();
+            if (!arr.isEmpty())
+                emit forwardRequested(arr);
+        });
+        connect(copy, &QAbstractButton::clicked, bar, [this] {
+            QStringList text;
+            for (const auto &m : checkedMessages(m_model, m_checked)) {
+                const QString t = messageText(m);
+                if (!t.isEmpty())
+                    text << t;
+            }
+            if (!text.isEmpty())
+                QApplication::clipboard()->setText(text.join('\n'));
+            exitCheckMode();
+        });
+        connect(del, &QAbstractButton::clicked, bar, [this, del] {
+            QMenu menu(this);
+            bool allMine = true;
+            for (const auto &m : checkedMessages(m_model, m_checked))
+                allMine = allMine && m.value("outgoing").toBool();
+            menu.addAction(QStringLiteral("Удалить у себя"), this, [this] {
+                const QList<QJsonObject> sel = checkedMessages(m_model, m_checked);
+                exitCheckMode();
+                for (const auto &m : sel)
+                    Core::instance()->call("delete_local_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
+                        if (!e.ok())
+                            emit toast(e.message);
+                    });
+            });
+            QAction *all = menu.addAction(QStringLiteral("Удалить у всех"), this, [this] {
+                const QList<QJsonObject> sel = checkedMessages(m_model, m_checked);
+                exitCheckMode();
+                for (const auto &m : sel)
+                    Core::instance()->call("delete_everywhere", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
+                        if (!e.ok())
+                            emit toast(e.message);
+                    });
+            });
+            all->setEnabled(allMine);
+            menu.exec(del->mapToGlobal(del->rect().bottomLeft()));
+        });
+        connect(x, &QAbstractButton::clicked, bar, [this] { exitCheckMode(); });
+        m_checkBar = bar;
+        m_checkBar->show();
+        placeCheckBar();
+    }
+    toggleCheck(id);
+}
+
+void MessageView::exitCheckMode()
+{
+    if (!m_checkMode)
+        return;
+    m_checkMode = false;
+    m_checked.clear();
+    if (m_checkBar) {
+        m_checkBar->deleteLater();
+        m_checkBar = nullptr;
+        m_checkCount = nullptr;
+    }
+    viewport()->update();
+}
+
+void MessageView::toggleCheck(const QString &id)
+{
+    if (!m_checked.remove(id))
+        m_checked.insert(id);
+    if (m_checked.isEmpty())
+        return exitCheckMode();
+    if (m_checkCount)
+        m_checkCount->setText(QStringLiteral("Выбрано: %1").arg(m_checked.size()));
+    viewport()->update();
 }
 
 QJsonObject MessageView::messageAt(const QPoint &pos, MessageLayout *lay) const
@@ -1068,8 +1285,79 @@ QJsonObject MessageView::messageAt(const QPoint &pos, MessageLayout *lay) const
     return it.msg;
 }
 
+int MessageView::textHit(const QPoint &pos) const
+{
+    if (!m_selIndex.isValid())
+        return 0;
+    const MessageItem &it = m_model->item(m_selIndex.row());
+    const QRect vr = visualRect(m_selIndex);
+    MessageLayout L = MessageDelegate::layout(it, vr.width(), m_model->group && !m_model->flat);
+    L.text.translate(vr.topLeft());
+    QTextDocument *d = textDoc(it.msg);
+    const QPointF local = QPointF(pos) - L.text.topLeft();
+    if (local.y() < 0)
+        return 0;
+    if (local.y() > L.text.height())
+        return d->characterCount() - 1;
+    return qMax(0, d->documentLayout()->hitTest(local, Qt::FuzzyHit));
+}
+
+QString MessageView::selectedText() const
+{
+    if (m_delegate->selA == m_delegate->selB || !m_selIndex.isValid())
+        return {};
+    QTextCursor cur(textDoc(m_model->item(m_selIndex.row()).msg));
+    cur.setPosition(qMin(m_delegate->selA, m_delegate->selB));
+    cur.setPosition(qMax(m_delegate->selA, m_delegate->selB), QTextCursor::KeepAnchor);
+    return cur.selectedText().replace(QChar(0x2029), QChar(u'\n'));
+}
+
+void MessageView::clearSelection()
+{
+    if (m_delegate->selA == m_delegate->selB)
+        return;
+    m_delegate->selA = m_delegate->selB = 0;
+    viewport()->update();
+}
+
+void MessageView::mousePressEvent(QMouseEvent *e)
+{
+    if (m_checkMode) {
+        if (e->button() == Qt::LeftButton) {
+            const QJsonObject m = messageAt(e->pos());
+            if (!m.isEmpty())
+                toggleCheck(m.value("id").toString());
+        }
+        return;
+    }
+    clearSelection();
+    if (e->button() == Qt::LeftButton) {
+        MessageLayout L;
+        const QJsonObject m = messageAt(e->pos(), &L);
+        if (!m.isEmpty() && !L.big && L.options.isEmpty() && !L.text.isNull() && L.text.contains(e->pos()) && linkAt(m, L, e->pos()).isEmpty()) {
+            m_selIndex = QPersistentModelIndex(indexAt(e->pos()));
+            m_selPress = e->pos();
+            m_selDragging = true;
+            m_selMoved = false;
+            m_delegate->selId = m.value("id").toString();
+            m_delegate->selA = m_delegate->selB = textHit(e->pos());
+        }
+    }
+    QListView::mousePressEvent(e);
+}
+
 void MessageView::mouseMoveEvent(QMouseEvent *e)
 {
+    if (m_selDragging && (e->buttons() & Qt::LeftButton)) {
+        if ((e->pos() - m_selPress).manhattanLength() > 4)
+            m_selMoved = true;
+        if (m_selMoved) {
+            m_delegate->selB = textHit(e->pos());
+            viewport()->setCursor(Qt::IBeamCursor);
+            viewport()->update();
+            return;
+        }
+    }
     MessageLayout L;
     const QJsonObject m = messageAt(e->pos(), &L);
     bool hand = !m.isEmpty() && (L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) ||
@@ -1083,6 +1371,19 @@ void MessageView::mouseMoveEvent(QMouseEvent *e)
 
 void MessageView::mouseReleaseEvent(QMouseEvent *e)
 {
+    if (m_checkMode)
+        return;
+    if (m_selDragging) {
+        m_selDragging = false;
+        // A drag selected text: keep it for Ctrl+C instead of opening the menu.
+        if (m_selMoved && m_delegate->selA != m_delegate->selB) {
+            m_selMoved = false;
+            QListView::mouseReleaseEvent(e);
+            return;
+        }
+        m_selMoved = false;
+        clearSelection();
+    }
     MessageLayout L;
     const QJsonObject m = messageAt(e->pos(), &L);
     if (e->button() == Qt::LeftButton && !m.isEmpty()) {
@@ -1111,7 +1412,7 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
         else
             handled = false;
         // A click elsewhere on the message opens reactions and actions.
-        if (!handled && L.bubble.contains(e->pos())) {
+        if (!handled) {
             QListView::mouseReleaseEvent(e);
             setCurrentIndex(indexAt(e->pos()));
             showMenu(m, viewport()->mapToGlobal(e->pos()));
@@ -1197,11 +1498,29 @@ void MessageView::openImage(const QJsonObject &m)
 
 void MessageView::keyPressEvent(QKeyEvent *e)
 {
+    if (m_checkMode) {
+        if (e->key() == Qt::Key_Escape) {
+            exitCheckMode();
+            return;
+        }
+        if (e->matches(QKeySequence::Copy)) {
+            QStringList text;
+            for (const auto &m : checkedMessages(m_model, m_checked)) {
+                const QString t = messageText(m);
+                if (!t.isEmpty())
+                    text << t;
+            }
+            if (!text.isEmpty())
+                QApplication::clipboard()->setText(text.join('\n'));
+            return;
+        }
+    }
     const QModelIndex idx = currentIndex();
     if (idx.isValid() && !m_model->item(idx.row()).isDate) {
         const QJsonObject m = m_model->item(idx.row()).msg;
         if (e->matches(QKeySequence::Copy)) {
-            QApplication::clipboard()->setText(messageText(m));
+            const QString sel = selectedText();
+            QApplication::clipboard()->setText(sel.isEmpty() ? messageText(m) : sel);
             return;
         }
         if ((e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) && m.value("kind").toString() == "file") {
@@ -1214,6 +1533,8 @@ void MessageView::keyPressEvent(QKeyEvent *e)
 
 void MessageView::contextMenuEvent(QContextMenuEvent *e)
 {
+    if (m_checkMode)
+        return;
     const QPoint pos = e->reason() == QContextMenuEvent::Mouse ? e->pos() : visualRect(currentIndex()).center();
     const QJsonObject m = messageAt(pos);
     if (m.isEmpty())
@@ -1305,7 +1626,17 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
     }
     if (m.value("status").toString() == "failed")
         menu.addAction(QStringLiteral("Повторить отправку"), this, [this, m] { retry(m); });
+    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed")
+        menu.addAction(QStringLiteral("Переслать"), this, [this, m] { emit forwardRequested(QJsonArray{m}); });
+    menu.addAction(QStringLiteral("Выбрать"), this, [this, m] { enterCheckMode(m.value("id").toString()); });
     menu.addSeparator();
+    if (m.value("outgoing").toBool() && m.value("status").toString() != "failed")
+        menu.addAction(QStringLiteral("Удалить у всех"), this, [this, m] {
+            Core::instance()->call("delete_everywhere", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
+                if (!e.ok())
+                    emit toast(e.message);
+            });
+        });
     menu.addAction(QStringLiteral("Удалить у себя"), this, [this, m] {
         Core::instance()->call("delete_local_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
             if (!e.ok())

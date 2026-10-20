@@ -297,7 +297,7 @@ extension UIViewController {
 
     /// Bottom sheet with the platform's grabber and detents.
     func presentSheet(_ vc: UIViewController) {
-        let nav = UINavigationController(rootViewController: vc)
+        let nav = ChatNavController(rootViewController: vc)
         if let s = nav.sheetPresentationController {
             s.detents = [.medium(), .large()]
             s.prefersGrabberVisible = true

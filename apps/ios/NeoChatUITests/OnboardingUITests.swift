@@ -43,6 +43,32 @@ final class OnboardingUITests: XCTestCase {
         app.tabBars.buttons["Профиль"].tap()
         XCTAssertTrue(app.staticTexts["Устройства"].waitForExistence(timeout: 10) || app.buttons["Устройства"].waitForExistence(timeout: 1))
         shot("05-profile")
+        app.tabBars.buttons["Чаты"].tap()
+        app.buttons["Новый чат"].tap()
+        app.segmentedControls.buttons["Канал"].tap()
+        let channel = app.textFields["Название канала"]
+        XCTAssertTrue(channel.waitForExistence(timeout: 5))
+        channel.tap()
+        channel.typeText("Проверка свайпа 061")
+        app.buttons["Создать канал"].tap()
+        let input = app.textViews["Текст сообщения"]
+        XCTAssertTrue(input.waitForExistence(timeout: 20))
+        input.tap()
+        input.typeText("черновик")
+        // Exercise back navigation with the keyboard up, then repeat it after reopening.
+        for i in 0..<2 {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.45))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.45))
+            start.press(forDuration: 0.05, thenDragTo: end)
+            XCTAssertTrue(app.buttons["Новый чат"].waitForExistence(timeout: 5))
+            XCTAssertEqual(app.state, .runningForeground)
+            if i == 0 {
+                app.tables.cells.firstMatch.tap()
+                XCTAssertTrue(input.waitForExistence(timeout: 5))
+                XCTAssertEqual(input.value as? String, "черновик")
+            }
+        }
+        shot("06-swipe-back")
     }
 
     /// Writes a PNG next to the host checkout; the simulator shares the host file system.
