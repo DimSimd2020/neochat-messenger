@@ -24,8 +24,8 @@ xcodebuild -project NeoChat.xcodeproj -scheme NeoChat -configuration Release -sd
 
 ```bash
 git push
-gh workflow run ios.yml --ref codex/release-0.6.2
-gh run list --workflow ios.yml --branch codex/release-0.6.2
+gh workflow run ios.yml --ref calls-0.6.3
+gh run list --workflow ios.yml --branch calls-0.6.3
 gh run download RUN_ID --name NeoChat-unsigned-ipa --dir dist/ios-ci
 ```
 
@@ -42,4 +42,7 @@ UI-тест также проверяет свайп по отправленно
 IPA 0.6.2 (build 12, arm64, iOS 15+) собрана в [GitHub Actions](https://github.com/DimSimd2020/neochat-messenger/actions/runs/39474400837), коммит `837c059`, на macOS с Xcode 16.4 / iPhoneOS 18.5. Сборка IPA и UI-тест на симуляторе прошли; архив и версия артефакта проверены после загрузки. Проверка на физическом iPhone остаётся отдельным шагом; сценарии перечислены в [заметках 0.6.2](../../docs/12-release-0.6.2.md).
 
 - Мгновенных push-уведомлений нет: для APNs нужна подпись разработчика. Новые сообщения приходят, пока приложение открыто, или при фоновом обновлении (`BGAppRefreshTask`).
-- Звонков нет.
+- Звонки (0.6.3) один на один, WebRTC из пакета `stasel/WebRTC` 152.0.0 (SPM).
+  - Входящий звонок звонит только при открытом приложении: без PushKit/CallKit и подписи разработчика iOS не будит приложение ради звонка. Если приложение ушло в фон незадолго до звонка, приходит уведомление «Входящий звонок».
+  - Идущий звонок продолжается в фоне (`UIBackgroundModes: audio`).
+  - Устройства ввода и вывода выбирает система; переключатель «Динамик» направляет звук на громкоговоритель.
