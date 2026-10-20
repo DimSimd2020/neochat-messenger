@@ -5,6 +5,7 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.widget.GridLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -358,6 +359,9 @@ object Dialogs {
         "👍 👎 👌 🙏 👏 🙌 💪 🤝 👋 ✌️ ❤️ 🧡 💛 💚 💙 💜 🔥 ✨ 🎉 ☕").split(' ')
 
     fun emoji(act: MainActivity, pick: (String) -> Unit) {
+        act.currentFocus?.clearFocus()
+        (act.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(act.overlay.windowToken, 0)
         val s = Sheet(act, "Эмодзи")
         val grid = GridLayout(s.ctx).apply { columnCount = 8 }
         for (e in EMOJI) {

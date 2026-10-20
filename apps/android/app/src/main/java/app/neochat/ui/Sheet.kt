@@ -159,6 +159,8 @@ open class Sheet(protected val host: Host, title: String) {
 /**
  * Compact glass menu anchored to a view. The checked item is marked; the menu closes
  * on choice, back and a tap outside. Opens with 180 ms fade and a 0.975 -> 1 scale.
+ * Placement stays in the visible area above the IME / navigation bar: a composer
+ * menu never opens into the keyboard.
  */
 class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
     private data class Item(val text: String, val checked: Boolean, val danger: Boolean, val action: () -> Unit)
@@ -168,14 +170,18 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
     private val catcher = View(ctx)
     private val box = LinearLayout(ctx)
     private val back: () -> Boolean = { dismiss(); true }
+    private val insets: () -> Unit = { place() }
     private var closed = false
+    private var preferAbove = false
+    private var pivotSet = false
 
     fun add(text: String, checked: Boolean = false, danger: Boolean = false, action: () -> Unit): PopupMenu {
         items += Item(text, checked, danger, action)
         return this
     }
 
-    fun show() {
+    fun show(above: Boolean = false) {
+        preferAbove = above
         val ov = host.overlay
         catcher.setOnClickListener { dismiss() }
         catcher.contentDescription = "Закрыть меню"
@@ -205,21 +211,10 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
             box.addView(row, lp())
         }
         ov.addView(catcher, FrameLayout.LayoutParams(MATCH, MATCH))
-        val loc = IntArray(2)
-        val ovLoc = IntArray(2)
-        anchor.getLocationInWindow(loc)
-        ov.getLocationInWindow(ovLoc)
-        box.measure(View.MeasureSpec.makeMeasureSpec(ctx.dp(280), View.MeasureSpec.AT_MOST), View.MeasureSpec.UNSPECIFIED)
-        val w = maxOf(box.measuredWidth, ctx.dp(200))
-        val h = box.measuredHeight
-        var x = loc[0] - ovLoc[0] + anchor.width - w
-        var y = loc[1] - ovLoc[1] + anchor.height
-        x = x.coerceIn(ctx.dp(8), ov.width - w - ctx.dp(8))
-        if (y + h > ov.height - ctx.dp(8)) y = loc[1] - ovLoc[1] - h
-        ov.addView(box, FrameLayout.LayoutParams(w, WRAP).apply { leftMargin = x; topMargin = y.coerceAtLeast(ctx.dp(8)) })
+        ov.addView(box, FrameLayout.LayoutParams(ctx.dp(200), WRAP))
         host.pushBack(back)
-        box.pivotX = w.toFloat()
-        box.pivotY = 0f
+        host.addInsetListener(insets)
+        place()
         if (!Theme.reducedMotion) {
             box.alpha = 0f
             box.scaleX = 0.975f
@@ -230,9 +225,51 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
         box.post { box.getChildAt(0)?.requestFocus() }
     }
 
+    /** Keep the menu in the overlay's visible rect (window minus status / nav / IME). */
+    private fun place() {
+        if (closed) return
+        val ov = host.overlay
+        if (ov.width == 0 || ov.height == 0) {
+            ov.post { place() }
+            return
+        }
+        val loc = IntArray(2)
+        val ovLoc = IntArray(2)
+        anchor.getLocationInWindow(loc)
+        ov.getLocationInWindow(ovLoc)
+        box.measure(View.MeasureSpec.makeMeasureSpec(ctx.dp(280), View.MeasureSpec.AT_MOST), View.MeasureSpec.UNSPECIFIED)
+        val w = maxOf(box.measuredWidth, ctx.dp(200))
+        val h = box.measuredHeight
+        val pad = ctx.dp(8)
+        val visibleTop = maxOf(host.topInset, pad)
+        val visibleBottom = ov.height - host.bottomInset - pad
+        var x = loc[0] - ovLoc[0] + anchor.width - w
+        val maxX = (ov.width - w - pad).coerceAtLeast(pad)
+        x = x.coerceIn(pad, maxX)
+        val ay = loc[1] - ovLoc[1]
+        val below = ay + anchor.height
+        val above = ay - h
+        val placeAbove = preferAbove || below + h > visibleBottom
+        var y = if (placeAbove) above else below
+        val maxY = (visibleBottom - h).coerceAtLeast(visibleTop)
+        y = y.coerceIn(visibleTop, maxY)
+        val lp = box.layoutParams as FrameLayout.LayoutParams
+        lp.width = w
+        lp.height = WRAP
+        lp.leftMargin = x
+        lp.topMargin = y
+        box.layoutParams = lp
+        if (!pivotSet) {
+            box.pivotX = w.toFloat()
+            box.pivotY = if (placeAbove) h.toFloat() else 0f
+            pivotSet = true
+        }
+    }
+
     fun dismiss() {
         if (closed) return
         closed = true
+        host.removeInsetListener(insets)
         host.popBack(back)
         val ov = host.overlay
         ov.removeView(catcher)

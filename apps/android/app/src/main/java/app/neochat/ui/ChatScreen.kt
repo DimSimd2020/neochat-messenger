@@ -1062,10 +1062,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         capsule.setPadding(dp(4), dp(4), dp(4), dp(4))
         val attach = IconButton(ctx, R.drawable.ic_attach, "Прикрепить")
         // Ask what is attached first: photos open the gallery and arrive as photos.
+        // Hide the IME so the chooser sits above the composer instead of behind the keyboard.
         attach.setOnClickListener {
+            edit.clearFocus()
+            hideKeyboard()
             val pm = PopupMenu(act, attach).add("Фото") { pickPhotos() }.add("Файл") { pickFile() }
             if (conv.optBoolean("can_polls") && conv.str("kind") != "direct") pm.add("Опрос") { Dialogs.newPoll(act, conversationId) }
-            pm.show()
+            pm.show(above = true)
         }
         capsule.addView(attach)
         edit.hint = "Написать сообщение…"
@@ -1225,7 +1228,9 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     private fun hideKeyboard() {
-        (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(root.windowToken, 0)
+        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        val token = act.currentFocus?.windowToken ?: edit.windowToken ?: root.windowToken
+        imm.hideSoftInputFromWindow(token, 0)
     }
 
     private fun saveDraft() {

@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
+import android.view.WindowInsetsAnimation
 import android.view.WindowInsetsController
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -109,6 +110,17 @@ class MainActivity : Activity(), Sheet.Host {
             insetListeners.toList().forEach { it() }
             ins
         }
+        if (Build.VERSION.SDK_INT >= 30) {
+            root.setWindowInsetsAnimationCallback(object : WindowInsetsAnimation.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                override fun onProgress(insets: WindowInsets, running: MutableList<WindowInsetsAnimation>): WindowInsets {
+                    ime = insets.getInsets(WindowInsets.Type.ime()).bottom
+                    current?.applyInsets(top, bottom, ime)
+                    insetListeners.toList().forEach { it() }
+                    return insets
+                }
+            })
+        }
+        root.requestApplyInsets()
     }
 
     @Suppress("DEPRECATION")

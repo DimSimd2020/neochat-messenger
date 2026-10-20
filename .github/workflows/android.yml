@@ -9,7 +9,7 @@ on:
       tag:
         description: "Existing GitHub release tag to upload to"
         required: true
-        default: "v0.5.1"
+        default: "v0.5.2"
 
 permissions:
   contents: write
@@ -37,10 +37,14 @@ jobs:
           set -euo pipefail
           if [ -n "${INPUT_TAG:-}" ]; then TAG="$INPUT_TAG"
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then TAG="${GITHUB_REF_NAME}"
-          else TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          else
+            VER=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' apps/android/app/build.gradle.kts | head -n1)
+            TAG="v${VER}"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "uploading to $TAG"
+          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "NeoChat ${TAG#v}" --notes "NeoChat ${TAG#v}" --target "$GITHUB_SHA" --latest --repo "${GITHUB_REPOSITORY}"
 
       - uses: actions/setup-java@v4
         with:
