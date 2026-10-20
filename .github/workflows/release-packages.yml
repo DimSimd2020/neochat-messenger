@@ -3,6 +3,7 @@ name: Release packages
 on:
   push:
     tags: ["v*"]
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       tag:
@@ -26,6 +27,20 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - name: Release tag
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then TAG="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then TAG="${GITHUB_REF_NAME}"
+          else TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "uploading to $TAG"
 
       - uses: actions/setup-java@v4
         with:
@@ -71,7 +86,7 @@ jobs:
       - name: Upload APK to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
           APK="Neochat-${TAG}.apk"
@@ -84,6 +99,21 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - name: Release tag
+        id: rel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then TAG="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then TAG="${GITHUB_REF_NAME}"
+          else TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "uploading to $TAG"
 
       - uses: ilammy/msvc-dev-cmd@v1
 
@@ -139,7 +169,7 @@ jobs:
       - name: MSI
         shell: pwsh
         env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ steps.rel.outputs.tag }}
         run: |
           $ErrorActionPreference = "Stop"
           $ver = $env:TAG.TrimStart("v")
@@ -163,7 +193,7 @@ jobs:
       - name: Upload MSI to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ steps.rel.outputs.tag }}
         run: |
           $out = "Neochat-$env:TAG-setup.msi"
           gh release upload "$env:TAG" $out --clobber --repo ${{ github.repository }}
