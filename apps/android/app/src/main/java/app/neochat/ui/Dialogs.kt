@@ -141,7 +141,7 @@ object Dialogs {
                 for (c in list) {
                     val uid = c.str("user_id")
                     val row = ListRow(ctx, 44)
-                    row.avatar.set(c.str("display_name"), uid)
+                    row.avatar.set(c.str("display_name"), uid, c.str("avatar"))
                     row.title.text = c.str("display_name")
                     row.subtitle.text = "@" + c.str("username")
                     row.setChecked(if (group) uid in selected else null)
@@ -359,7 +359,7 @@ object Dialogs {
                 fun muted(t: String, top: Int = 8) = add(ctx.label(t, 13.5f, 400, Theme.Role.MUTED), top)
                 val head = ListRow(ctx, 56)
                 head.isClickable = false
-                head.avatar.set(c.str("title"), c.str("peer_user_id").ifEmpty { cid })
+                head.avatar.set(c.str("title"), c.str("peer_user_id").ifEmpty { cid }, c.str("avatar"))
                 head.title.text = c.str("title")
                 head.title.textSize = 18f
                 val members = c.optJSONArray("members")?.objects() ?: emptyList()
@@ -456,7 +456,7 @@ object Dialogs {
                 for (m in members) {
                     val uid = m.str("user_id")
                     val row = ListRow(ctx, 40)
-                    row.avatar.set(m.str("display_name"), uid)
+                    row.avatar.set(m.str("display_name"), uid, m.str("avatar"))
                     row.title.text = m.str("display_name")
                     if (m.optBoolean("key_changed")) {
                         row.subtitle.text = "Ключ изменился — сверьте код в личном чате"

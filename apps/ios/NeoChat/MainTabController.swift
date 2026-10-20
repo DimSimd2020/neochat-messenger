@@ -1,4 +1,6 @@
 import UIKit
+import PhotosUI
+import UniformTypeIdentifiers
 
 /// Navigation with a guarded swipe-back: the gesture may only start on a real
 /// stacked screen and never while another transition is still running.
@@ -167,7 +169,7 @@ class ListViewController: UITableViewController, UISearchResultsUpdating {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
-        tableView.backgroundColor = .clear
+        tableView.backgroundColor = Theme.canvas
         tableView.separatorStyle = .none
         tableView.register(RowCell.self, forCellReuseIdentifier: RowCell.id)
         search.searchResultsUpdater = self
@@ -233,11 +235,143 @@ class ListViewController: UITableViewController, UISearchResultsUpdating {
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows.count }
 }
 
-final class ChatsViewController: ListViewController {
+class ChatListViewController: ListViewController {
+    private var selectedChats: [String: JSON] = [:]
+    private var savedItems: [UIBarButtonItem]?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        tableView.allowsMultipleSelectionDuringEditing = true
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        if isMovingFromParent && isEditing { endSelection() }
+    }
+
+    func beginSelection(_ indexPath: IndexPath? = nil) {
+        if !isEditing {
+            savedItems = navigationItem.rightBarButtonItems
+            setEditing(true, animated: !Theme.reducedMotion)
+            search.searchBar.isUserInteractionEnabled = false
+            navigationItem.rightBarButtonItems = [UIBarButtonItem(title: "Готово", primaryAction: UIAction { [weak self] _ in self?.endSelection() })]
+            toolbarItems = [
+                selectionButton("archivebox", "Архивировать", "set_archived", "archived"),
+                UIBarButtonItem(systemItem: .flexibleSpace),
+                selectionButton("pin", "Закрепить", "set_pinned", "pinned"),
+                UIBarButtonItem(systemItem: .flexibleSpace),
+                selectionButton("trash.slash", "Очистить", "clear_conversation", "hide", false),
+                UIBarButtonItem(systemItem: .flexibleSpace),
+                selectionButton("trash", "Удалить чаты", "clear_conversation", "hide", true),
+            ]
+            navigationController?.setToolbarHidden(false, animated: !Theme.reducedMotion)
+        }
+        if let indexPath, !rows[indexPath.row].bool("_archive") {
+            tableView.selectRow(at: indexPath, animated: false, scrollPosition: .none)
+        }
+        selectionChanged()
+    }
+
+    private func selectionButton(_ icon: String, _ title: String, _ method: String, _ key: String, _ value: Bool? = nil) -> UIBarButtonItem {
+        let b = UIBarButtonItem(image: UIImage(systemName: icon), primaryAction: UIAction { [weak self] _ in
+            guard let self, !self.selectedChats.isEmpty else { return }
+            let on = value ?? !self.selectedChats.values.allSatisfy { $0.bool(method == "set_pinned" ? "pinned" : "in_archive") }
+            let chats = Array(self.selectedChats.values)
+            let run: () -> Void = { [weak self] in
+                guard let self else { return }
+                self.run(chats, method, key, on)
+            }
+            if method == "clear_conversation" {
+                confirmClearConversation(self, count: chats.count, hide: on) { run() }
+            } else { run() }
+        })
+        b.accessibilityLabel = title
+        return b
+    }
+
+    private func run(_ chats: [JSON], _ method: String, _ key: String, _ value: Bool) {
+        tableView.isUserInteractionEnabled = false
+        navigationItem.rightBarButtonItems?.forEach { $0.isEnabled = false }
+        toolbarItems?.forEach { $0.isEnabled = false }
+        func next(_ i: Int) {
+            if i == chats.count { endSelection(); return }
+            let id = chats[i].str("id")
+            Core.shared.call(method, ["conversation_id": id, key: value]) { [weak self] r in
+                guard let self else { return }
+                if case .failure(let e) = r {
+                    self.tableView.isUserInteractionEnabled = true
+                    self.toast(e.message)
+                    self.navigationItem.rightBarButtonItems?.forEach { $0.isEnabled = true }
+                    self.toolbarItems?.forEach { $0.isEnabled = true }
+                    return
+                }
+                self.selectedChats.removeValue(forKey: id)
+                next(i + 1)
+            }
+        }
+        next(0)
+    }
+
+    func selectionChanged() {
+        guard isEditing else { return }
+        selectedChats = Dictionary(uniqueKeysWithValues: (tableView.indexPathsForSelectedRows ?? []).compactMap { p in
+            let c = rows[p.row]
+            return c.bool("_archive") ? nil : (c.str("id"), c)
+        })
+        toolbarItems?.forEach { $0.isEnabled = !selectedChats.isEmpty }
+        let allArchived = !selectedChats.isEmpty && selectedChats.values.allSatisfy { $0.bool("in_archive") }
+        let allPinned = !selectedChats.isEmpty && selectedChats.values.allSatisfy { $0.bool("pinned") }
+        toolbarItems?.first?.accessibilityLabel = allArchived ? "Вернуть из архива" : "Архивировать"
+        toolbarItems?.first?.image = UIImage(systemName: allArchived ? "tray.and.arrow.up" : "archivebox")
+        if let pin = toolbarItems?[2] {
+            pin.accessibilityLabel = allPinned ? "Открепить" : "Закрепить"
+            pin.image = UIImage(systemName: allPinned ? "pin.slash" : "pin")
+        }
+        navigationItem.prompt = "Выбрано: \(selectedChats.count)"
+    }
+
+    func endSelection() {
+        tableView.isUserInteractionEnabled = true
+        selectedChats.removeAll()
+        setEditing(false, animated: !Theme.reducedMotion)
+        navigationItem.prompt = nil
+        navigationItem.rightBarButtonItems = savedItems
+        search.searchBar.isUserInteractionEnabled = true
+        navigationController?.setToolbarHidden(true, animated: !Theme.reducedMotion)
+    }
+
+    override func apply(_ new: [JSON], empty: String) {
+        let ids = Set(selectedChats.keys)
+        super.apply(new, empty: empty)
+        if isEditing {
+            for (i, c) in rows.enumerated() where ids.contains(c.str("id")) {
+                tableView.selectRow(at: IndexPath(row: i, section: 0), animated: false, scrollPosition: .none)
+            }
+            selectionChanged()
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, didDeselectRowAt indexPath: IndexPath) { selectionChanged() }
+
+    override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool { !rows[indexPath.row].bool("_archive") }
+
+    override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
+        guard !rows[indexPath.row].bool("_archive"), !isEditing else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            UIMenu(children: [UIAction(title: "Выбрать чаты", image: UIImage(systemName: "checkmark.circle")) { _ in self?.beginSelection(indexPath) }])
+        }
+    }
+}
+
+final class ChatsViewController: ChatListViewController {
     private var filter = 0
     private var all: [JSON] = []
     private var archived: [JSON] = []
     private var presenceTimer: Timer?
+    private var archiveShown = false
+    private let archiveButton = UIButton(type: .system)
+    private var logoItem: UIBarButtonItem?
+    private var archiveHeight: CGFloat { archiveShown && query.isEmpty && filter == 0 && !archived.isEmpty ? 56 : 0 }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -251,8 +385,26 @@ final class ChatsViewController: ListViewController {
         logo.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([logo.widthAnchor.constraint(equalToConstant: 28), logo.heightAnchor.constraint(equalToConstant: 28)])
         navigationItem.leftBarButtonItem = UIBarButtonItem(customView: logo)
+        logoItem = navigationItem.leftBarButtonItem
         navigationItem.title = "NeoChat"
         updateBarItems()
+        archiveButton.setImage(UIImage(systemName: "archivebox.fill"), for: .normal)
+        archiveButton.tintColor = Theme.accent
+        archiveButton.backgroundColor = Theme.glass
+        archiveButton.layer.cornerRadius = 18
+        archiveButton.contentHorizontalAlignment = .leading
+        archiveButton.contentEdgeInsets = UIEdgeInsets(top: 0, left: 18, bottom: 0, right: 18)
+        archiveButton.accessibilityLabel = "Архив"
+        archiveButton.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            AppLock.unlockArchive(from: self) { [weak self] in self?.navigationController?.pushViewController(ArchiveViewController(), animated: !Theme.reducedMotion) }
+        }, for: .touchUpInside)
+        tableView.addSubview(archiveButton)
+        tableView.alwaysBounceVertical = true
+        let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(hideArchiveBySwipe(_:)))
+        back.edges = .left
+        tableView.addGestureRecognizer(back)
+        tableView.accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Показать архив", target: self, selector: #selector(revealArchiveForAccessibility))]
     }
 
     private func updateBarItems() {
@@ -268,7 +420,9 @@ final class ChatsViewController: ListViewController {
         }
         let sort = UIBarButtonItem(image: UIImage(systemName: "arrow.up.arrow.down"), menu: UIMenu(title: "Сортировка чатов", children: sorts))
         sort.accessibilityLabel = "Сортировка чатов"
-        navigationItem.rightBarButtonItems = [compose, sort]
+        let select = UIBarButtonItem(image: UIImage(systemName: "checkmark.circle"), primaryAction: UIAction { [weak self] _ in self?.beginSelection() })
+        select.accessibilityLabel = "Выбрать чаты"
+        navigationItem.rightBarButtonItems = [compose, sort, select]
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -283,6 +437,45 @@ final class ChatsViewController: ListViewController {
         presenceTimer?.invalidate()
         presenceTimer = nil
     }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        if archiveShown { setArchiveShown(false) }
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        archiveButton.frame = CGRect(x: 12, y: -archiveHeight, width: tableView.bounds.width - 24, height: 48)
+        archiveButton.isHidden = archiveHeight == 0
+    }
+
+    override func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !isEditing && scrollView.contentOffset.y < -scrollView.adjustedContentInset.top - 64 { setArchiveShown(true) }
+    }
+
+    private func setArchiveShown(_ on: Bool) {
+        let oldHeight = tableView.contentInset.top
+        archiveShown = on && query.isEmpty && filter == 0 && !archived.isEmpty
+        let height = archiveHeight
+        guard oldHeight != height else { return }
+        archiveButton.setTitle("  Архив · \(archived.count)", for: .normal)
+        archiveButton.isHidden = height == 0
+        let offset = tableView.contentOffset.y - (height - oldHeight)
+        Theme.animate(0.22) {
+            self.tableView.contentInset.top = height
+            self.tableView.contentOffset.y = offset
+            self.view.setNeedsLayout()
+            self.view.layoutIfNeeded()
+        }
+        navigationItem.leftBarButtonItem = archiveShown ? UIBarButtonItem(image: UIImage(systemName: "chevron.left"), primaryAction: UIAction { [weak self] _ in self?.setArchiveShown(false) }) : logoItem
+        if archiveShown { navigationItem.leftBarButtonItem?.accessibilityLabel = "Скрыть архив" }
+    }
+
+    @objc private func hideArchiveBySwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        if !isEditing && archiveShown && gesture.state == .ended && gesture.translation(in: view).x > 44 { setArchiveShown(false) }
+    }
+
+    @objc private func revealArchiveForAccessibility() -> Bool { setArchiveShown(true); return !archived.isEmpty }
 
     /// Online dots for direct chats, once a minute while the list is visible.
     private func refreshPresence() {
@@ -315,43 +508,22 @@ final class ChatsViewController: ListViewController {
     }
 
     private func applyFilter() {
-        var rows = all.filter { filter == 0 || (filter == 1 ? $0.str("kind") == "direct" : ["group", "channel"].contains($0.str("kind"))) }
-        if query.isEmpty && filter == 0 && !archived.isEmpty {
-            let unread = archived.reduce(0) { $0 + $1.int("unread") }
-            let titles = archived.prefix(4).map { $0.str("title") }.joined(separator: ", ")
-            let summary: JSON = ["_archive": true, "count": archived.count, "unread": unread, "titles": titles]
-            rows.insert(summary, at: 0)
-        }
+        let rows = all.filter { filter == 0 || (filter == 1 ? $0.str("kind") == "direct" : ["group", "channel"].contains($0.str("kind"))) }
+        if !query.isEmpty || filter != 0 || archived.isEmpty { setArchiveShown(false) }
         apply(rows, empty: all.isEmpty && query.isEmpty ? "Чатов пока нет. Начните переписку с человеком по его имени пользователя." : "Ничего не нашли")
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: RowCell.id, for: indexPath) as! RowCell
         let c = rows[indexPath.row]
-        if c.bool("_archive") {
-            cell.avatar.setIcon("archivebox.fill")
-            cell.title.text = "Архив"
-            cell.time.text = ""
-            cell.badge.set(c.int("unread"))
-            cell.pin.isHidden = true
-            cell.subtitle.text = c.str("titles")
-            cell.subtitle.textColor = Theme.muted
-            cell.accessibilityLabel = "Архив, чатов: \(c.int("count"))" + (c.int("unread") > 0 ? ", непрочитанных: \(c.int("unread"))" : "")
-            return cell
-        }
         bindChatCell(cell, c)
         return cell
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        if isEditing { selectionChanged(); return }
         tableView.deselectRow(at: indexPath, animated: true)
         let c = rows[indexPath.row]
-        if c.bool("_archive") {
-            AppLock.unlockArchive(from: self) { [weak self] in
-                self?.navigationController?.pushViewController(ArchiveViewController(), animated: !Theme.reducedMotion)
-            }
-            return
-        }
         navigationController?.pushViewController(ChatViewController(conversationId: c.str("id")), animated: !Theme.reducedMotion)
     }
 
@@ -421,7 +593,7 @@ final class ContactsViewController: ListViewController {
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: RowCell.id, for: indexPath) as! RowCell
         let c = rows[indexPath.row]
-        cell.avatar.set(c.str("display_name"), seed: c.str("user_id"))
+        cell.avatar.set(c.str("display_name"), seed: c.str("user_id"), avatar: c.str("avatar"))
         cell.title.text = c.str("display_name")
         cell.time.text = ""
         cell.badge.set(0)
@@ -446,20 +618,27 @@ final class ContactsViewController: ListViewController {
     }
 }
 
-final class ProfileViewController: UIViewController {
+final class ProfileViewController: UIViewController, PHPickerViewControllerDelegate {
     private let avatar = AvatarView(size: 88)
     private let name = label("", 24, .bold)
     private let sub = label("", 15, color: Theme.muted)
     private let bio = label("", 15)
+    private var hasAvatar = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
+        avatar.isUserInteractionEnabled = true
+        avatar.isAccessibilityElement = true
+        avatar.accessibilityLabel = "Сменить фото профиля"
+        avatar.accessibilityTraits = .button
+        avatar.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(changeAvatar)))
         name.textAlignment = .center
         sub.textAlignment = .center
         bio.textAlignment = .center
         bio.isHidden = true
         let card = UIStackView(arrangedSubviews: [
+            row("camera", "Сменить фото профиля") { [weak self] in self?.changeAvatar() },
             row("pencil", "Имя и описание") { [weak self] in self?.presentSheet(EditProfileViewController()) },
             row("qrcode", "Мой QR-код") { [weak self] in self?.presentSheet(MyQrViewController()) },
             row("laptopcomputer.and.iphone", "Устройства") { [weak self] in self?.presentSheet(DevicesViewController()) },
@@ -475,11 +654,19 @@ final class ProfileViewController: UIViewController {
         stack.spacing = 10
         stack.setCustomSpacing(26, after: bio)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
+        let scroll = UIScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scroll)
+        scroll.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 20),
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
+            stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
             card.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         NotificationCenter.default.addObserver(forName: .prefsChanged, object: nil, queue: .main) { [weak self] _ in self?.reload() }
@@ -495,7 +682,8 @@ final class ProfileViewController: UIViewController {
         Core.shared.call("status") { [weak self] r in
             guard let self, case .success(let v) = r, let s = v as? JSON else { return }
             let display = s.str("display_name").isEmpty ? s.str("username") : s.str("display_name")
-            self.avatar.set(display, seed: s.str("user_id"))
+            self.avatar.set(display, seed: s.str("user_id"), avatar: s.str("avatar"))
+            self.hasAvatar = !s.str("avatar").isEmpty
             self.name.text = display
             self.sub.text = "@" + s.str("username") + (s.str("number").isEmpty ? "" : " · ID " + s.str("number"))
             self.bio.text = s.str("bio")
@@ -513,5 +701,56 @@ final class ProfileViewController: UIViewController {
         let b = UIButton(configuration: cfg, primaryAction: UIAction { _ in action() })
         b.contentHorizontalAlignment = .leading
         return b
+    }
+
+    @objc private func changeAvatar() {
+        let menu = UIAlertController(title: "Фото профиля", message: nil, preferredStyle: .actionSheet)
+        menu.addAction(UIAlertAction(title: "Выбрать фото", style: .default) { [weak self] _ in
+            var cfg = PHPickerConfiguration()
+            cfg.filter = .images
+            cfg.selectionLimit = 1
+            let picker = PHPickerViewController(configuration: cfg)
+            picker.delegate = self
+            self?.present(picker, animated: !Theme.reducedMotion)
+        })
+        if hasAvatar { menu.addAction(UIAlertAction(title: "Удалить фото", style: .destructive) { [weak self] _ in self?.saveAvatar("") }) }
+        menu.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        menu.popoverPresentationController?.sourceView = avatar
+        present(menu, animated: !Theme.reducedMotion)
+    }
+
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        picker.dismiss(animated: !Theme.reducedMotion)
+        guard let provider = results.first?.itemProvider else { return }
+        provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] url, _ in
+            guard let url, let image = Photos.decode(url, maxSide: 512) else {
+                DispatchQueue.main.async { self?.toast("Не удалось прочитать фото") }
+                return
+            }
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            format.opaque = true
+            let square = UIGraphicsImageRenderer(size: CGSize(width: 256, height: 256), format: format).image { ctx in
+                UIColor.white.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: 256, height: 256))
+                let scale = 256 / min(image.size.width, image.size.height)
+                let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+                image.draw(in: CGRect(x: (256 - size.width) / 2, y: (256 - size.height) / 2, width: size.width, height: size.height))
+            }
+            guard let data = square.jpegData(compressionQuality: 0.75), data.count <= 49152 else {
+                DispatchQueue.main.async { self?.toast("Не удалось подготовить фото") }
+                return
+            }
+            DispatchQueue.main.async { self?.saveAvatar(data.base64EncodedString()) }
+        }
+    }
+
+    private func saveAvatar(_ avatar: String) {
+        Core.shared.call("set_profile", ["avatar": avatar]) { [weak self] r in
+            switch r {
+            case .failure(let e): self?.toast(e.message)
+            case .success: self?.reload()
+            }
+        }
     }
 }

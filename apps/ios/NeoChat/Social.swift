@@ -37,6 +37,7 @@ var tzOffsetMinutes: Int { TimeZone.current.secondsFromGMT() / 60 }
 /// "печатает…" hints: shown for 6 s after the last one.
 enum Typing {
     private static var until: [String: (Date, [String: String])] = [:]
+    private static var timer: Timer?
 
     static func onEvent(_ ev: JSON) {
         let conv = ev.str("conversation_id")
@@ -44,7 +45,15 @@ enum Typing {
         names[ev.str("user_id")] = ev.str("name")
         until[conv] = (Date().addingTimeInterval(6), names)
         NotificationCenter.default.post(name: .typingChanged, object: conv)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.05) { NotificationCenter.default.post(name: .typingChanged, object: conv) }
+        if timer == nil {
+            timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
+                for id in Array(until.keys) {
+                    if until[id]!.0 <= Date() { until.removeValue(forKey: id) }
+                    NotificationCenter.default.post(name: .typingChanged, object: id)
+                }
+                if until.isEmpty { timer?.invalidate(); timer = nil }
+            }
+        }
     }
 
     /// A message from someone ends the hint at once.
@@ -54,15 +63,16 @@ enum Typing {
 
     static func text(_ conv: String, group: Bool) -> String? {
         guard let e = until[conv], e.0 > Date(), !e.1.isEmpty else { return nil }
-        if !group { return "печатает…" }
+        let dots = Theme.reducedMotion ? "…" : String(repeating: ".", count: Int(Date().timeIntervalSince1970 / 0.4) % 3 + 1).padding(toLength: 3, withPad: " ", startingAt: 0)
+        if !group { return "печатает" + dots }
         let names = e.1.values.map { n -> String in
             let f = n.split(separator: " ").first.map(String.init) ?? ""
             return f.isEmpty ? "Кто-то" : f
         }
         switch names.count {
-        case 1: return "\(names[0]) печатает…"
-        case 2: return "\(names[0]) и \(names[1]) печатают…"
-        default: return "Несколько человек печатают…"
+        case 1: return "\(names[0]) печатает" + dots
+        case 2: return "\(names[0]) и \(names[1]) печатают" + dots
+        default: return "Несколько человек печатают" + dots
         }
     }
 }
@@ -703,7 +713,14 @@ final class LockViewController: UIViewController, UITextFieldDelegate {
 
 // MARK: - Archive
 
-final class ArchiveViewController: ListViewController {
+func confirmClearConversation(_ host: UIViewController, count: Int = 1, hide: Bool = false, run: @escaping () -> Void) {
+    let a = UIAlertController(title: hide ? "Удалить чаты?" : "Очистить чат?", message: "Выбрано: \(count). История удалится только на этом устройстве. У собеседников сообщения останутся. Отправки из очереди продолжатся.", preferredStyle: .alert)
+    a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+    a.addAction(UIAlertAction(title: hide ? "Удалить" : "Очистить", style: .destructive) { _ in run() })
+    host.present(a, animated: !Theme.reducedMotion)
+}
+
+final class ArchiveViewController: ChatListViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Архив"
@@ -720,7 +737,8 @@ final class ArchiveViewController: ListViewController {
                 self?.reload()
             }
         }
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "arrow.up.arrow.down"), menu: UIMenu(title: "Сортировка", children: items))
+        let select = UIAction(title: "Выбрать чаты", image: UIImage(systemName: "checkmark.circle")) { [weak self] _ in self?.beginSelection() }
+        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "arrow.up.arrow.down"), menu: UIMenu(title: "Сортировка", children: items + [select]))
         navigationItem.rightBarButtonItem?.accessibilityLabel = "Сортировка архива"
     }
 
@@ -742,6 +760,7 @@ final class ArchiveViewController: ListViewController {
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        if isEditing { selectionChanged(); return }
         tableView.deselectRow(at: indexPath, animated: true)
         navigationController?.pushViewController(ChatViewController(conversationId: rows[indexPath.row].str("id")), animated: !Theme.reducedMotion)
     }
@@ -843,7 +862,7 @@ func pinSwipe(_ host: UIViewController, _ c: JSON) -> UISwipeActionsConfiguratio
 
 func bindChatCell(_ cell: RowCell, _ c: JSON) {
     let kind = c.str("kind")
-    cell.avatar.set(c.str("title"), seed: c.str("peer_user_id").isEmpty ? c.str("id") : c.str("peer_user_id"))
+    cell.avatar.set(c.str("title"), seed: c.str("peer_user_id").isEmpty ? c.str("id") : c.str("peer_user_id"), avatar: c.str("avatar"))
     cell.avatar.online = kind == "direct" && (c.obj("presence")?.bool("online") ?? false)
     cell.title.text = c.str("title")
     cell.time.text = formatListTime(c.int64("last_activity"))

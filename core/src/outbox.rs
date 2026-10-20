@@ -146,7 +146,7 @@ impl Inner {
                 ],
             )?;
             tx.execute(
-                "UPDATE conversations SET last_activity=?2, last_preview=?3, draft='' WHERE id=?1",
+                "UPDATE conversations SET hidden=0, last_activity=?2, last_preview=?3, draft='' WHERE id=?1",
                 params![p.cid, p.ts, preview],
             )?;
         }

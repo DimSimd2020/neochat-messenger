@@ -13,6 +13,7 @@ enum Theme {
     }
 
     static let text = dyn(0xF2F7FF, 0x182C46)
+    static let canvas = dyn(0x12213B, 0xE9F0FC)
     static let muted = dyn(0xBBCBE3, 0x4A607C)
     static let accent = dyn(0x98B9FF, 0x2456B8)
     static let action = dyn(0x4169CF, 0x315DCF)
@@ -68,6 +69,8 @@ final class BackgroundView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        backgroundColor = Theme.canvas
+        isOpaque = true
         autoresizingMask = [.flexibleWidth, .flexibleHeight]
         isUserInteractionEnabled = false
         for l in [grad, top, bottom] { layer.addSublayer(l) }
@@ -82,6 +85,8 @@ final class BackgroundView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         grad.frame = bounds
         let s = max(bounds.width, bounds.height) * 1.4
         top.frame = CGRect(x: bounds.width - s / 2, y: -s / 2, width: s, height: s)
@@ -91,6 +96,7 @@ final class BackgroundView: UIView {
         bottom.startPoint = CGPoint(x: 0.5, y: 0.5)
         bottom.endPoint = CGPoint(x: 1, y: 1)
         updateColors()
+        CATransaction.commit()
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -99,6 +105,8 @@ final class BackgroundView: UIView {
     }
 
     private func updateColors() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         let dark = traitCollection.userInterfaceStyle == .dark
         let c = { (v: UInt32) in Theme.rgb(v).cgColor }
         grad.colors = dark ? [c(0x12213B), c(0x101A2E), c(0x132C42)] : [c(0xE9F0FC), c(0xDEE8F5), c(0xD7E8F0)]
@@ -106,6 +114,7 @@ final class BackgroundView: UIView {
         let b = dark ? Theme.rgb(0x215868) : Theme.rgb(0xB6E1DD)
         top.colors = [t.cgColor, t.withAlphaComponent(0).cgColor]
         bottom.colors = [b.cgColor, b.withAlphaComponent(0).cgColor]
+        CATransaction.commit()
     }
 }
 
@@ -207,6 +216,8 @@ final class Field: UITextField {
 final class AvatarView: UIView {
     private let initials = UILabel()
     private let icon = UIImageView()
+    private let photo = UIImageView()
+    private static let images = NSCache<NSString, UIImage>()
     private let dot = UIView()
     /// Green dot for a person who is online now.
     var online = false { didSet { dot.isHidden = !online } }
@@ -222,6 +233,11 @@ final class AvatarView: UIView {
         initials.textAlignment = .center
         initials.frame = CGRect(x: 0, y: 0, width: size, height: size)
         addSubview(initials)
+        photo.frame = initials.frame
+        photo.contentMode = .scaleAspectFill
+        photo.clipsToBounds = true
+        photo.layer.cornerRadius = layer.cornerRadius
+        addSubview(photo)
         icon.frame = CGRect(x: size * 0.25, y: size * 0.25, width: size * 0.5, height: size * 0.5)
         icon.contentMode = .scaleAspectFit
         icon.isHidden = true
@@ -244,6 +260,7 @@ final class AvatarView: UIView {
 
     /// A symbol instead of initials, e.g. for the archive row.
     func setIcon(_ name: String) {
+        photo.image = nil
         initials.text = ""
         icon.image = UIImage(systemName: name, withConfiguration: UIImage.SymbolConfiguration(weight: .semibold))
         icon.tintColor = .white
@@ -254,8 +271,17 @@ final class AvatarView: UIView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func set(_ name: String, seed: String) {
+    func set(_ name: String, seed: String, avatar: String = "") {
         icon.isHidden = true
+        photo.image = nil
+        if !avatar.isEmpty && avatar.utf8.count <= 65536 {
+            if let cached = Self.images.object(forKey: avatar as NSString) { photo.image = cached }
+            else if let data = Data(base64Encoded: avatar), let image = UIImage(data: data), image.size.width <= 512, image.size.height <= 512 {
+                Self.images.countLimit = 48
+                Self.images.setObject(image, forKey: avatar as NSString)
+                photo.image = image
+            }
+        }
         var out = ""
         for part in name.split(separator: " ") {
             if let ch = part.first(where: { $0.isLetter || $0.isNumber }) { out.append(ch.uppercased()) }

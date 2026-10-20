@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::engine::{Inner, display_name, s};
 use crate::error::{Error, Result};
 use crate::keys::{self, GroupState, b64, unb64};
-use crate::store::{kv_get, now_ms};
+use crate::store::{kv_get, kv_get_str, now_ms};
 
 pub const MAX_GROUP: usize = 50;
 pub const MAX_CHANNEL: usize = 200;
@@ -162,6 +162,7 @@ impl Inner {
         self.ensure_user(user)?;
         let c = self.authed("POST", "/v1/conversations/direct", Some(&json!({"user_id": user})))?;
         self.apply_conversation(&c)?;
+        self.db().conn.execute("UPDATE conversations SET hidden=0 WHERE id=?1", [s(&c, "id")?])?;
         self.emit(json!({"type": "conversations_changed"}));
         self.conversation_json(s(&c, "id")?)
     }
@@ -348,21 +349,21 @@ impl Inner {
         let mut peer_verified = false;
         for m in &member_ids {
             if *m == me {
-                members_out.push(json!({"user_id": m, "display_name": "Вы", "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true,
+                members_out.push(json!({"user_id": m, "display_name": "Вы", "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true, "avatar": kv_get_str(&db.conn, "avatar")?.unwrap_or_default(),
                     "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
                 continue;
             }
             let c = db
                 .conn
-                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed, c.bio FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?))
+                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed, c.bio, c.avatar FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?))
                 })
                 .optional()?;
-            if let Some((u, f, l, v, k, bio)) = c {
+            if let Some((u, f, l, v, k, bio, avatar)) = c {
                 if Some(m) == peer.as_ref() {
                     peer_verified = v == 1;
                 }
-                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio,
+                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio, "avatar": avatar,
                     "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
             }
         }
@@ -392,6 +393,7 @@ impl Inner {
             "kind": kind,
             "title": display,
             "peer_user_id": peer,
+            "avatar": members_out.iter().find(|m| Some(m["user_id"].as_str().unwrap_or("")) == peer.as_deref()).map(|m| m["avatar"].clone()).unwrap_or(json!("")),
             "owner_id": owner,
             "is_owner": owner.as_deref() == Some(me.as_str()),
             "members": members_out,
@@ -439,7 +441,7 @@ impl Inner {
         let pins = if archive || !q.is_empty() { "" } else { "pinned DESC, " };
         let ids: Vec<String> = {
             let db = self.db();
-            let mut st = db.conn.prepare(&format!("SELECT id FROM conversations WHERE {filter} ORDER BY {pins}{order}"))?;
+            let mut st = db.conn.prepare(&format!("SELECT id FROM conversations WHERE hidden=0 AND ({filter}) ORDER BY {pins}{order}"))?;
             st.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?
         };
         let mut out = Vec::new();

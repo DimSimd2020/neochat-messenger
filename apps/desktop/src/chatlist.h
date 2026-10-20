@@ -5,11 +5,13 @@
 #include <QMap>
 #include <QJsonObject>
 #include <QListView>
+#include <QSet>
 #include <QStyledItemDelegate>
 #include <QVariantAnimation>
 #include <QWidget>
 
 class QButtonGroup;
+class QTimer;
 namespace ui {
 class SearchField;
 class Label;
@@ -38,6 +40,7 @@ private:
         QMap<QString, QString> names;
     };
     QHash<QString, Entry> m_entries;
+    QTimer *m_timer = nullptr;
 };
 
 class ChatListModel : public QAbstractListModel {
@@ -90,6 +93,8 @@ private:
     void apply(const QList<QJsonObject> &all, bool animate);
     void showSortMenu();
     void showRowMenu(const QPoint &pos);
+    void updateSelection();
+    void runAction(const QString &method, const QString &key, bool value);
     QString sortKey() const;
 
     ui::SearchField *m_search;
@@ -109,4 +114,8 @@ private:
     QList<QJsonObject> m_all;
     QString m_selected;
     int m_generation = 0;
+    bool m_selecting = false;
+    QSet<QString> m_checked;
+    QWidget *m_selectBar;
+    ui::Label *m_selectCount;
 };

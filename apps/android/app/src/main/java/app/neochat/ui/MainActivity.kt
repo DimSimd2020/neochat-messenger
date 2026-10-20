@@ -195,6 +195,7 @@ class MainActivity : Activity(), Sheet.Host {
         val h = home ?: return
         if (archive == null) return
         archive = null
+        h.hideArchiveEntry()
         show(h, -dp(22).toFloat())
     }
 

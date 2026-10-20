@@ -305,6 +305,7 @@ impl Inner {
             "react" => self.react(p),
             "set_archived" => self.set_archived(p),
             "set_pinned" => self.set_pinned(p),
+            "clear_conversation" => self.clear_conversation(p),
             "presence" => self.presence(p),
             "send_typing" => self.send_typing(p),
             "set_last_seen_visible" => self.set_last_seen_visible(p),
@@ -330,6 +331,7 @@ impl Inner {
             "logged_in": kv_get(c, "refresh_token")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "display_name": kv_get_str(c, "display_name")?,
             "bio": kv_get_str(c, "bio")?.unwrap_or_default(),
+            "avatar": kv_get_str(c, "avatar")?.unwrap_or_default(),
             "number": kv_get_str(c, "number")?,
             "has_device_keys": kv_get(c, "device_identity")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "user_id": kv_get_str(c, "user_id")?,
@@ -808,8 +810,8 @@ impl Inner {
             }
         }
         tx.execute(
-            "UPDATE contacts SET username=?2, profile_name=?3, number=?4, bio=?5 WHERE user_id=?1",
-            params![user_id, s(u, "username")?, u["display_name"].as_str().unwrap_or("").trim(), u["number"].as_str().unwrap_or(""), u["bio"].as_str().unwrap_or("").chars().take(100).collect::<String>()],
+            "UPDATE contacts SET username=?2, profile_name=?3, number=?4, bio=?5, avatar=?6 WHERE user_id=?1",
+            params![user_id, s(u, "username")?, u["display_name"].as_str().unwrap_or("").trim(), u["number"].as_str().unwrap_or(""), u["bio"].as_str().unwrap_or("").chars().take(100).collect::<String>(), u["avatar"].as_str().filter(|v| v.len() <= 65536).unwrap_or("")],
         )?;
         if let Some((first, last)) = as_contact {
             tx.execute(
@@ -843,6 +845,7 @@ impl Inner {
         kv_set(&db.conn, "display_name", u["display_name"].as_str().unwrap_or("").as_bytes())?;
         kv_set(&db.conn, "number", u["number"].as_str().unwrap_or("").as_bytes())?;
         kv_set(&db.conn, "bio", u["bio"].as_str().unwrap_or("").as_bytes())?;
+        kv_set(&db.conn, "avatar", u["avatar"].as_str().filter(|v| v.len() <= 65536).unwrap_or("").as_bytes())?;
         drop(db);
         self.emit(json!({"type": "account_changed"}));
         Ok(())
@@ -864,6 +867,12 @@ impl Inner {
                 return Err(Error::Invalid("О себе: до 100 символов".into()));
             }
             body["bio"] = json!(bio);
+        }
+        if let Some(avatar) = p["avatar"].as_str() {
+            if avatar.len() > 65536 || (!avatar.is_empty() && (unb64(avatar)?.len() > 49152 || !unb64(avatar)?.starts_with(&[0xff, 0xd8, 0xff]))) {
+                return Err(Error::Invalid("Аватар: JPEG до 48 КБ".into()));
+            }
+            body["avatar"] = json!(avatar);
         }
         self.authed("PUT", "/v1/accounts/current/profile", Some(&body))?;
         self.refresh_profile()?;
@@ -903,7 +912,7 @@ impl Inner {
         let db = self.db();
         db.conn
             .query_row(
-                "SELECT user_id, username, first_name, last_name, verified, key_changed, is_contact, added_at, profile_name, number, bio FROM contacts WHERE user_id=?1",
+                "SELECT user_id, username, first_name, last_name, verified, key_changed, is_contact, added_at, profile_name, number, bio, avatar FROM contacts WHERE user_id=?1",
                 [user_id],
                 |r| {
                     Ok(json!({
@@ -915,6 +924,7 @@ impl Inner {
                         "profile_name": r.get::<_, String>(8)?,
                         "number": r.get::<_, String>(9)?,
                         "bio": r.get::<_, String>(10)?,
+                        "avatar": r.get::<_, String>(11)?,
                         "verified": r.get::<_, i64>(4)? == 1,
                         "key_changed": r.get::<_, i64>(5)? == 1,
                         "is_contact": r.get::<_, i64>(6)? == 1,

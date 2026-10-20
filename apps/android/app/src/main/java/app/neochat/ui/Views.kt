@@ -400,6 +400,8 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
         typeface = Typeface.create(Typeface.DEFAULT, 600, false)
     }
     private val r = RectF()
+    private var photo: android.graphics.Bitmap? = null
+    private var icon: Drawable? = null
 
     init {
         layoutParams = ViewGroup.LayoutParams(dp(sizeDp), dp(sizeDp))
@@ -415,9 +417,20 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
             }
         }
 
-    fun set(name: String, seed: String) {
+    fun set(name: String, seed: String, avatar: String = "") {
         this.name = name
         this.seed = seed
+        icon = null
+        photo = if (avatar.isEmpty() || avatar.length > 65536) null else images.get(avatar) ?: runCatching {
+            val bytes = android.util.Base64.decode(avatar, android.util.Base64.DEFAULT)
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.takeIf { it.width <= 512 && it.height <= 512 }?.also { images.put(avatar, it) }
+        }.getOrNull()
+        invalidate()
+    }
+
+    fun setIcon(resource: Int) {
+        set("", "archive")
+        icon = context.getDrawable(resource)?.mutate()?.apply { setTint(android.graphics.Color.WHITE) }
         invalidate()
     }
 
@@ -432,7 +445,19 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
         textPaint.color = if (dark) 0xFFF2F5FB.toInt() else 0xFF1C2638.toInt()
         textPaint.textSize = height * 0.36f
         val y = height / 2f - (textPaint.descent() + textPaint.ascent()) / 2
-        c.drawText(initials(name), width / 2f, y, textPaint)
+        if (photo != null) {
+            val image = photo!!
+            val shader = android.graphics.BitmapShader(image, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            val scale = maxOf(width.toFloat() / image.width, height.toFloat() / image.height)
+            shader.setLocalMatrix(android.graphics.Matrix().apply { setScale(scale, scale); postTranslate((width - image.width * scale) / 2, (height - image.height * scale) / 2) })
+            paint.shader = shader
+            c.drawRoundRect(r, rad, rad, paint)
+            paint.shader = null
+        } else if (icon != null) {
+            val inset = width / 4
+            icon!!.setBounds(inset, inset, width - inset, height - inset)
+            icon!!.draw(c)
+        } else c.drawText(initials(name), width / 2f, y, textPaint)
         if (online) {
             val d = width * 0.30f
             paint.color = Theme.p.bg0
@@ -445,6 +470,7 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
     override fun applyTheme() = invalidate()
 
     companion object {
+        private val images = android.util.LruCache<String, android.graphics.Bitmap>(48)
         fun initials(name: String): String {
             val out = StringBuilder()
             for (part in name.split(' ')) {
@@ -734,7 +760,6 @@ class QrView(ctx: Context) : View(ctx) {
 class SwipeToReplyLayout(
     ctx: Context,
     private val canReply: () -> Boolean,
-    private val onBubble: (MotionEvent) -> Boolean,
     private val onReply: () -> Unit,
 ) : FrameLayout(ctx), Themed {
     private val icon = ImageView(ctx).apply {
@@ -800,7 +825,7 @@ class SwipeToReplyLayout(
                 downX = e.rawX
                 downY = e.rawY
                 dragging = false
-                tracking = onBubble(e) && canReply()
+                tracking = canReply()
                 if (tracking) {
                     val running = anim
                     anim = null

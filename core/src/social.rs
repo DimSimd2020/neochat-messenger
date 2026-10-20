@@ -111,6 +111,31 @@ impl Inner {
 
     // ---- archive and pins (this device only) ----
 
+    /// Clear local history without losing sessions or an already encrypted retry.
+    /// `hide` also removes the conversation from the list until the next message.
+    pub fn clear_conversation(&self, p: &Value) -> Result<Value> {
+        let id = s(p, "conversation_id")?;
+        let mut db = self.db();
+        let tx = db.conn.transaction()?;
+        clear_history(&tx, id, p["hide"].as_bool().unwrap_or(false))?;
+        // Stream attachment IDs instead of loading the history into memory.
+        {
+            let mut st = tx.prepare("SELECT id FROM messages WHERE conversation_id=?1 AND file IS NOT NULL")?;
+            for row in st.query_map([id], |r| r.get::<_, String>(0))? {
+                let mid = row?;
+                if uuid::Uuid::parse_str(&mid).is_ok() {
+                    let _ = std::fs::remove_file(self.data_dir.join("files").join(format!("{mid}.enc")));
+                }
+            }
+        }
+        tx.execute("DELETE FROM messages WHERE conversation_id=?1", [id])?;
+        tx.commit()?;
+        drop(db);
+        self.emit(json!({"type": "history_cleared", "conversation_id": id, "hidden": p["hide"] == true}));
+        self.emit(json!({"type": "conversations_changed"}));
+        Ok(Value::Null)
+    }
+
     pub fn set_archived(&self, p: &Value) -> Result<Value> {
         let id = s(p, "conversation_id")?;
         let on = p["archived"].as_bool().unwrap_or(true);
@@ -314,6 +339,23 @@ impl Inner {
     }
 }
 
+fn clear_history(conn: &rusqlite::Connection, id: &str, hide: bool) -> Result<()> {
+    // The outbox stays intact: clearing history is not cancellation, and a
+    // concurrent sender may already be preparing its atomic ciphertext commit.
+    if conn.execute("UPDATE conversations SET last_preview='', unread=0, draft='', hidden=?2, pinned=CASE WHEN ?2=1 THEN 0 ELSE pinned END WHERE id=?1", params![id, hide])? == 0 {
+        return Err(Error::Invalid("Беседа не найдена".into()));
+    }
+    conn.execute("INSERT OR IGNORE INTO deleted_messages SELECT id, conversation_id, sender_user_id FROM messages WHERE conversation_id=?1", [id])?;
+    for sql in [
+        "DELETE FROM receipts WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+        "DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+        "DELETE FROM poll_votes WHERE poll_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+    ] {
+        conn.execute(sql, [id])?;
+    }
+    Ok(())
+}
+
 fn fingerprint(account_key: &[u8]) -> String {
     let h = keys::sha256(account_key);
     b64(&h[..16]).replace('+', "-").replace('/', "_").trim_end_matches('=').to_string()
@@ -421,6 +463,43 @@ fn civil(days: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_history_preserves_ciphertext_sessions_and_other_chats() {
+        let dir = std::env::temp_dir().join(format!("neochat-clear-{}", uuid::Uuid::new_v4()));
+        let core = crate::Core::open(&json!({"data_dir": dir, "db_key": "00".repeat(32), "foreground": false}), Box::new(|_| {})).unwrap();
+        {
+            let db = core.inner.db();
+            db.conn.execute_batch("INSERT INTO conversations(id,kind,unread,draft,pinned) VALUES ('a','direct',2,'draft',1), ('b','direct',1,'other',0);
+                INSERT INTO messages(id,conversation_id,sender_user_id,outgoing,kind,status,sent_at) VALUES ('one','a','peer',0,'text','received',1), ('two','b','peer',0,'text','received',1);
+                INSERT INTO sessions VALUES ('peer', X'0102');
+                INSERT INTO reactions VALUES ('one','peer','👍',1);
+                INSERT INTO poll_votes VALUES ('one','peer','[0]',1);
+                INSERT INTO receipts VALUES ('one','peer','delivered',1);
+                INSERT INTO outbox(id,conversation_id,payload,request,visible,created_at) VALUES ('ready','a',X'01',X'0203',1,1),('unsent','a',X'01',NULL,1,1);").unwrap();
+        }
+        core.call("clear_conversation", &json!({"conversation_id": "a", "hide": true})).unwrap();
+        {
+            let db = core.inner.db();
+            let n = |sql: &str| db.conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+            assert_eq!(n("SELECT count(*) FROM messages WHERE conversation_id='a'"), 0);
+            assert_eq!(n("SELECT count(*) FROM messages WHERE conversation_id='b'"), 1);
+            assert_eq!(n("SELECT hidden FROM conversations WHERE id='a'"), 1);
+            assert_eq!(n("SELECT unread+pinned+length(draft)+length(last_preview) FROM conversations WHERE id='a'"), 0);
+            assert_eq!(n("SELECT count(*) FROM outbox"), 2);
+            let request: Vec<u8> = db.conn.query_row("SELECT request FROM outbox WHERE id='ready'", [], |r| r.get(0)).unwrap();
+            assert_eq!(request, [2, 3]);
+            assert_eq!(n("SELECT count(*) FROM sessions"), 1);
+            assert_eq!(n("SELECT count(*) FROM reactions"), 0);
+            assert_eq!(n("SELECT count(*) FROM poll_votes"), 0);
+            assert_eq!(n("SELECT count(*) FROM receipts"), 0);
+            assert_eq!(n("SELECT count(*) FROM deleted_messages WHERE message_id='one'"), 1);
+        }
+        core.call("clear_conversation", &json!({"conversation_id": "a"})).unwrap();
+        assert!(core.call("clear_conversation", &json!({"conversation_id": "missing"})).is_err());
+        drop(core);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn emoji_only() {

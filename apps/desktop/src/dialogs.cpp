@@ -12,6 +12,10 @@
 #include <memory>
 #include <QDateTime>
 #include <QGuiApplication>
+#include <QFileDialog>
+#include <QImageReader>
+#include <QBuffer>
+#include <QThreadPool>
 #include <QLinearGradient>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -39,6 +43,7 @@ public:
     }
     bool multi = false;
     QString warning;
+    QString avatar;
     QSize sizeHint() const override { return {300, 58}; }
 
 protected:
@@ -54,7 +59,7 @@ protected:
             p.setBrush(bg);
             p.drawRoundedRect(rect(), 12, 12);
         }
-        ui::paintAvatar(&p, QRectF(8, (height() - 40) / 2.0, 40, 40), m_name, m_seed);
+        ui::paintAvatar(&p, QRectF(8, (height() - 40) / 2.0, 40, 40), m_name, m_seed, avatar);
         const qreal right = multi ? width() - 44 : width() - 10;
         p.setFont(Theme::instance()->font(15, QFont::DemiBold));
         p.setPen(c.text);
@@ -284,6 +289,7 @@ void contacts(const DialogHost &h)
             for (const auto &x : arr) {
                 const QJsonObject c = x.toObject();
                 auto *row = new PersonRow(c.value("display_name").toString(), "@" + c.value("username").toString(), c.value("user_id").toString());
+                row->avatar = c.value("avatar").toString();
                 if (c.value("key_changed").toBool())
                     row->warning = QStringLiteral("Ключ изменился — сверьте код");
                 const QString uid = c.value("user_id").toString();
@@ -442,6 +448,7 @@ void newChat(const DialogHost &h)
                 const QJsonObject c = x.toObject();
                 const QString uid = c.value("user_id").toString();
                 auto *row = new PersonRow(c.value("display_name").toString(), "@" + c.value("username").toString(), uid);
+                row->avatar = c.value("avatar").toString();
                 row->multi = *isGroup;
                 row->setCheckable(*isGroup);
                 row->setChecked(selected->contains(uid));
@@ -706,6 +713,49 @@ void settings(const DialogHost &h)
 void profile(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Профиль"), 420);
+    auto *photo = new PersonRow(QStringLiteral("Фото профиля"), QStringLiteral("Нажмите, чтобы изменить"), "profile");
+    sheet->body()->addWidget(photo);
+    auto *removePhoto = new ui::Button(QStringLiteral("Удалить фото"), ui::Button::Flat);
+    sheet->body()->addWidget(removePhoto);
+    auto updatePhoto = [h, sheet, photo, removePhoto](const QString &avatar) {
+        photo->setEnabled(false);
+        removePhoto->setEnabled(false);
+        Core::instance()->call("set_profile", {{"avatar", avatar}}, sheet, [h, photo, removePhoto, avatar](const QJsonValue &, const CoreError &e) {
+            photo->setEnabled(true);
+            removePhoto->setEnabled(true);
+            if (!e.ok()) return h.toast(e.message);
+            photo->avatar = avatar;
+            photo->update();
+            removePhoto->setVisible(!avatar.isEmpty());
+        });
+    };
+    QObject::connect(removePhoto, &QAbstractButton::clicked, sheet, [updatePhoto] { updatePhoto({}); });
+    QObject::connect(photo, &QAbstractButton::clicked, sheet, [h, sheet, updatePhoto] {
+        const QString path = QFileDialog::getOpenFileName(sheet, QStringLiteral("Фото профиля"), {}, QStringLiteral("Изображения (*.jpg *.jpeg *.png *.webp *.bmp *.heic)"));
+        if (path.isEmpty()) return;
+        const QPointer<Sheet> guard(sheet);
+        QThreadPool::globalInstance()->start([guard, path, h, updatePhoto] {
+            QImageReader reader(path);
+            reader.setAutoTransform(true);
+            const QSize size = reader.size();
+            if (size.isValid()) reader.setScaledSize(size.scaled(512, 512, Qt::KeepAspectRatio));
+            const QImage image = reader.read();
+            QString avatar;
+            if (!image.isNull()) {
+                const int side = qMin(image.width(), image.height());
+                const QImage square = image.copy((image.width() - side) / 2, (image.height() - side) / 2, side, side).scaled(256, 256, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                QByteArray bytes;
+                QBuffer buffer(&bytes);
+                buffer.open(QIODevice::WriteOnly);
+                if (square.save(&buffer, "JPEG", 75) && bytes.size() <= 49152) avatar = QString::fromLatin1(bytes.toBase64());
+            }
+            if (guard) QMetaObject::invokeMethod(guard, [guard, avatar, h, updatePhoto] {
+                if (!guard) return;
+                if (avatar.isEmpty()) return h.toast(QStringLiteral("Не удалось прочитать фото"));
+                updatePhoto(avatar);
+            }, Qt::QueuedConnection);
+        });
+    });
     auto *name = new ui::Label({}, 20, QFont::Bold);
     auto *sub = new CopyLabel({}, {}, [h] { h.toast(QStringLiteral("Имя пользователя скопировано")); });
     sheet->body()->addWidget(name);
@@ -732,6 +782,9 @@ void profile(const DialogHost &h)
     });
     Core::instance()->call("status", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
         const QJsonObject s = v.toObject();
+        photo->avatar = s.value("avatar").toString();
+        photo->update();
+        removePhoto->setVisible(!photo->avatar.isEmpty());
         const QString nick = "@" + s.value("username").toString();
         const QString display = s.value("display_name").toString();
         name->setText(display.isEmpty() ? nick : display);
@@ -972,6 +1025,7 @@ void conversationInfo(const DialogHost &h, const QString &cid)
                 if (!m.value("tag").toString().isEmpty())
                     sub += QStringLiteral(" · ") + m.value("tag").toString();
                 auto *row = new PersonRow(m.value("display_name").toString(), sub, uid);
+                row->avatar = m.value("avatar").toString();
                 if (m.value("key_changed").toBool())
                     row->warning = QStringLiteral("Ключ изменился — сверьте код в личном чате");
                 list->add(row);

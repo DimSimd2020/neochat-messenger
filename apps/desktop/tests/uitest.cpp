@@ -7,6 +7,7 @@
 #include "core.h"
 #include "mainwindow.h"
 #include "messages.h"
+#include "popupmenu.h"
 #include "sheet.h"
 #include "style.h"
 #include "theme.h"
@@ -21,6 +22,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMenu>
+#include <QContextMenuEvent>
+#include <QMimeData>
 #include <QClipboard>
 #include <QMouseEvent>
 #include <QScrollBar>
@@ -104,6 +107,7 @@ private slots:
     void socialFeatures();
     void themeSettingsAndSidebar();
     void keyChangeBlocksSending();
+    void chatSelectionAndClear();
     void cleanupTestCase();
 
 private:
@@ -292,6 +296,31 @@ void UiTest::composeSendAndFile()
     QVERIFY(g.open(QIODevice::ReadOnly));
     QCOMPARE(g.readAll(), data);
     shot("09-file-sent");
+    // Several photos from Ctrl+V enter the real queue in the chosen order.
+    QStringList photos;
+    QList<QUrl> urls;
+    for (int i = 0; i < 3; ++i) {
+        const QString photo = m_dir.path() + QString("/batch-%1.png").arg(i);
+        QImage image(80, 60, QImage::Format_RGB32);
+        image.fill(QColor(40 + i * 40, 100, 180));
+        QVERIFY(image.save(photo));
+        photos << photo;
+        urls << QUrl::fromLocalFile(photo);
+    }
+    const int beforePhotos = messageCount(view);
+    auto *mime = new QMimeData;
+    mime->setUrls(urls);
+    QApplication::clipboard()->setMimeData(mime);
+    QTest::keyClick(edit, Qt::Key_V, Qt::ControlModifier);
+    QTRY_VERIFY_WITH_TIMEOUT(messageCount(view) == beforePhotos + 3 && lastMessage(view).value("status") == "sent", 30000);
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(m_alice->call("list_messages", {{"conversation_id", m_conv}}).toArray().size() == beforePhotos + 3, 15000);
+    const auto page = m_alice->call("list_messages", {{"conversation_id", m_conv}}).toArray();
+    for (int i = 0; i < 3; ++i) {
+        const auto file = page[page.size() - 3 + i].toObject().value("file").toObject();
+        QVERIFY(file.value("image").toBool());
+        QCOMPARE(file.value("name").toString(), QString("batch-%1.png").arg(i));
+    }
 }
 
 void UiTest::receiptsAndGroup()
@@ -377,7 +406,7 @@ void UiTest::socialFeatures()
     QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("emoji_only").toInt() == 2, 20000);
     QTRY_VERIFY_WITH_TIMEOUT(!headerHas(QStringLiteral("печатает")), 10000);
 
-    // A click on the message opens the menu; the first quick reaction is set.
+    // Only a right click opens the menu; the first quick reaction is set.
     QTest::qWait(300);
     const QModelIndex last = view->model()->index(view->model()->rowCount() - 1, 0);
     view->scrollTo(last);
@@ -387,11 +416,12 @@ void UiTest::socialFeatures()
     const QPoint at = vr.topLeft() + L.text.center().toPoint();
     bool menuShown = false;
     QTimer::singleShot(600, this, [this, &menuShown] {
-        auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+        auto *menu = dynamic_cast<PopupMenu *>(QApplication::activePopupWidget());
         if (!menu)
             return;
         menuShown = true;
         m_window->grab().save(m_shots + "/11d-message-menu.png");
+        menu->grab().save(m_shots + "/062-message-menu.png");
         for (auto *b : menu->findChildren<QToolButton *>())
             if (b->text() == QStringLiteral("👍")) {
                 b->click();
@@ -400,6 +430,9 @@ void UiTest::socialFeatures()
         menu->close();
     });
     QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, at);
+    QVERIFY(QApplication::activePopupWidget() == nullptr);
+    QContextMenuEvent menuEvent(QContextMenuEvent::Mouse, at, view->viewport()->mapToGlobal(at));
+    QApplication::sendEvent(view->viewport(), &menuEvent);
     QTRY_VERIFY_WITH_TIMEOUT(menuShown, 5000);
     QTRY_VERIFY_WITH_TIMEOUT(!lastMessage(view).value("reactions").toArray().isEmpty(), 10000);
     QCOMPARE(lastMessage(view).value("reactions").toArray().first().toObject().value("emoji").toString(), QStringLiteral("👍"));
@@ -448,7 +481,7 @@ void UiTest::socialFeatures()
         // Check mode: pick the last two messages from the menu and copy them together.
         bool menuShown = false;
         QTimer::singleShot(600, this, [this, &menuShown] {
-            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            auto *menu = dynamic_cast<PopupMenu *>(QApplication::activePopupWidget());
             if (!menu)
                 return;
             menuShown = true;
@@ -462,7 +495,9 @@ void UiTest::socialFeatures()
         });
         const QRect lastRow = view->visualRect(view->model()->index(view->model()->rowCount() - 1, 0));
         // Empty space beside the bubble belongs to the same message's hitbox.
-        QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, QPoint(view->viewport()->width() - 8, lastRow.center().y()));
+        const QPoint pos(view->viewport()->width() - 8, lastRow.center().y());
+        QContextMenuEvent event(QContextMenuEvent::Mouse, pos, view->viewport()->mapToGlobal(pos));
+        QApplication::sendEvent(view->viewport(), &event);
         QTRY_VERIFY_WITH_TIMEOUT(menuShown, 5000);
         QTRY_VERIFY(view->checkMode());
         auto *mm = static_cast<MessageModel *>(view->model());
@@ -568,6 +603,62 @@ void UiTest::keyChangeBlocksSending()
     button("Сверить код")->click();
     QTRY_VERIFY(button("Код сверен, принять новый ключ"));
     shot("17-safety-number");
+}
+
+void UiTest::chatSelectionAndClear()
+{
+    QTest::keyClick(QApplication::focusWidget() ? QApplication::focusWidget() : m_window, Qt::Key_Escape);
+    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+    auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
+    auto *list = panel->findChild<QListView *>();
+    auto *view = find<MessageView>([](MessageView *) { return true; });
+    auto choose = [&] {
+        list->clearSelection();
+        int picked = 0;
+        for (int i = 0; i < list->model()->rowCount() && picked < 2; ++i) {
+            const auto idx = list->model()->index(i, 0);
+            const auto c = idx.data(ChatListModel::ObjectRole).toJsonObject();
+            if (c.value("kind") != "direct" && c.value("kind") != "group") continue;
+            list->scrollTo(idx);
+            QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::ControlModifier, list->visualRect(idx).center());
+            ++picked;
+        }
+        return picked;
+    };
+    QCOMPARE(choose(), 2);
+    QTRY_VERIFY(find<ui::Label>([](ui::Label *l) { return l->isVisible() && l->text() == QStringLiteral("Выбрано: 2"); }));
+    auto *archive = find<QAbstractButton>([](QAbstractButton *b) { return b->isVisible() && b->accessibleName() == QStringLiteral("В архив"); });
+    QVERIFY(archive);
+    archive->click();
+    QTRY_VERIFY_WITH_TIMEOUT(list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("_archive").toBool(), 10000);
+    panel->setArchiveMode(true);
+    QTRY_COMPARE(list->model()->rowCount(), 2);
+    QCOMPARE(choose(), 2);
+    const auto idx = list->selectionModel()->selectedRows().first();
+    const QPoint at = list->visualRect(idx).center();
+    auto open = [&] {
+        QContextMenuEvent e(QContextMenuEvent::Mouse, at, list->viewport()->mapToGlobal(at));
+        QApplication::sendEvent(list->viewport(), &e);
+        return dynamic_cast<PopupMenu *>(QApplication::activePopupWidget());
+    };
+    auto *menu = open();
+    QVERIFY(menu);
+    for (auto *a : menu->actions()) if (a->text() == QStringLiteral("Очистить…")) { a->trigger(); break; }
+    menu->close();
+    QTRY_VERIFY(button(QStringLiteral("Очистить")));
+    const int beforeClear = messageCount(view);
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
+    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+    QCOMPARE(messageCount(view), beforeClear);
+    menu = open();
+    QVERIFY(menu);
+    for (auto *a : menu->actions()) if (a->text() == QStringLiteral("Очистить…")) { a->trigger(); break; }
+    menu->close();
+    QTRY_VERIFY(button(QStringLiteral("Очистить")));
+    button(QStringLiteral("Очистить"))->click();
+    QTRY_COMPARE(messageCount(view), 0);
+    QVERIFY(!m_alice->call("list_messages", {{"conversation_id", m_conv}}).toArray().isEmpty());
+    shot("062-cleared-chats");
 }
 
 void UiTest::cleanupTestCase()

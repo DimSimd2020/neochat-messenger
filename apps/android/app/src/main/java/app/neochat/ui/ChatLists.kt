@@ -24,6 +24,16 @@ object Typing {
     private val until = HashMap<String, Pair<Long, LinkedHashMap<String, String>>>()
     private val main = Handler(Looper.getMainLooper())
     val listeners = ArrayList<(String) -> Unit>()
+    private val tick = object : Runnable {
+        override fun run() {
+            val now = System.currentTimeMillis()
+            for (id in until.keys.toList()) {
+                if (until[id]!!.first <= now) until.remove(id)
+                listeners.toList().forEach { it(id) }
+            }
+            if (until.isNotEmpty()) main.postDelayed(this, 400)
+        }
+    }
 
     fun onEvent(ev: JSONObject) {
         val conv = ev.str("conversation_id")
@@ -33,7 +43,8 @@ object Typing {
         entry.second[user] = ev.str("name")
         until[conv] = (now + SHOW_MS) to entry.second
         listeners.toList().forEach { it(conv) }
-        main.postDelayed({ listeners.toList().forEach { it(conv) } }, SHOW_MS + 50)
+        main.removeCallbacks(tick)
+        main.postDelayed(tick, 400)
     }
 
     /** A message from someone ends their typing at once. */
@@ -45,12 +56,13 @@ object Typing {
     fun text(conv: String, group: Boolean): String? {
         val e = until[conv] ?: return null
         if (e.first < System.currentTimeMillis()) return null
-        if (!group) return "печатает…"
+        val dots = if (Theme.reducedMotion) "…" else ".".repeat((System.currentTimeMillis() / 400 % 3).toInt() + 1).padEnd(3)
+        if (!group) return "печатает$dots"
         val names = e.second.values.map { it.substringBefore(' ').ifEmpty { "Кто-то" } }
         return when (names.size) {
             0 -> null
-            1 -> "${names[0]} печатает…"
-            else -> "${names[0]} и ещё ${names.size - 1} печатают…"
+            1 -> "${names[0]} печатает$dots"
+            else -> "${names[0]} и ещё ${names.size - 1} печатают$dots"
         }
     }
 }
@@ -58,7 +70,7 @@ object Typing {
 /** Fills a chat list row: title, preview or typing, pin, online dot, unread. */
 fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
     val title = c.str("title")
-    row.avatar.set(title, c.str("peer_user_id").ifEmpty { c.str("id") })
+    row.avatar.set(title, c.str("peer_user_id").ifEmpty { c.str("id") }, c.str("avatar"))
     row.avatar.online = c.optJSONObject("presence")?.optBoolean("online") == true
     row.title.text = title
     row.time.text = formatListTime(c.optLong("last_activity"))
@@ -98,7 +110,7 @@ fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
 
 /** The "Архив" entry at the top of the main list. */
 fun bindArchiveRow(act: MainActivity, row: ListRow, a: JSONObject) {
-    row.avatar.set("📦", "archive")
+    row.avatar.setIcon(R.drawable.ic_archive)
     row.avatar.online = false
     row.title.text = "Архив"
     row.time.text = ""
@@ -106,6 +118,8 @@ fun bindArchiveRow(act: MainActivity, row: ListRow, a: JSONObject) {
     row.subtitle.text = a.str("titles")
     row.subtitle.role(Theme.Role.MUTED)
     row.setBadge(a.optInt("unread"))
+    row.setChecked(null)
+    row.setOnLongClickListener(null)
     row.contentDescription = "Архив, чатов: ${a.optInt("count")}" + if (a.optInt("unread") > 0) ", непрочитанных: ${a.optInt("unread")}" else ""
     row.setOnClickListener {
         if (AppLock.archiveLock(act)) AppLock.prompt(act, "Вход в архив", cancellable = true) { act.openArchive() }
@@ -131,6 +145,7 @@ class ChatSwipe(
     private val act: MainActivity,
     private val archive: Boolean,
     private val rowAt: (Int) -> JSONObject?,
+    private val selectionActive: () -> Boolean = { false },
     private val done: () -> Unit,
 ) : ItemTouchHelper.SimpleCallback(0, ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -140,6 +155,7 @@ class ChatSwipe(
     }
 
     override fun getSwipeDirs(rv: RecyclerView, vh: RecyclerView.ViewHolder): Int {
+        if (selectionActive()) return 0
         val c = rowAt(vh.bindingAdapterPosition) ?: return 0
         if (c.optBoolean("_archive") || c.str("kind") == "system") return 0
         return if (archive) ItemTouchHelper.LEFT else ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT
@@ -212,7 +228,8 @@ class ArchiveScreen(private val act: MainActivity) : Screen {
     private val list = RecyclerView(ctx)
     private val empty = ctx.label("В архиве пусто. Смахните чат влево, чтобы убрать его сюда.", 14.5f, 400, Theme.Role.MUTED)
     private var rows: List<JSONObject> = emptyList()
-    private val adapter = RowAdapter { row, c -> bindChatRow(act, row, c) }
+    private val selection = ChatSelection(act) { adapter.notifyDataSetChanged() }
+    private val adapter: RowAdapter = RowAdapter { row, c -> bindChatRow(act, row, c); selection.bind(row, c) }
     private var gen = 0
     private val refresh = Runnable { reload() }
     private val typing: (String) -> Unit = { conv -> if (rows.any { it.str("id") == conv }) adapter.notifyDataSetChanged() }
@@ -239,11 +256,12 @@ class ArchiveScreen(private val act: MainActivity) : Screen {
         }
         h.addView(sort)
         column.addView(h, lp())
+        column.addView(selection.bar, lp())
         list.layoutManager = LinearLayoutManager(ctx)
         list.adapter = adapter
         list.itemAnimator = null
         list.clipToPadding = false
-        ItemTouchHelper(ChatSwipe(act, true, { rows.getOrNull(it) }) { reload() }).attachToRecyclerView(list)
+        ItemTouchHelper(ChatSwipe(act, true, { rows.getOrNull(it) }, { selection.active }) { reload() }).attachToRecyclerView(list)
         val holder = FrameLayout(ctx)
         holder.addView(list, FrameLayout.LayoutParams(MATCH, MATCH))
         empty.gravity = Gravity.CENTER
@@ -269,6 +287,7 @@ class ArchiveScreen(private val act: MainActivity) : Screen {
     }
 
     override fun onBack(): Boolean {
+        if (selection.clear()) return true
         act.closeArchive()
         return true
     }

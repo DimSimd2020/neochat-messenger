@@ -15,7 +15,7 @@ namespace ui {
 // Draws an icon from the design sketch (docs/design/preview.html symbols).
 void paintIcon(QPainter *p, const QRectF &r, const QString &name, const QColor &color, qreal strokeWidth = 1.8);
 // Initials on a rounded tile; the hue comes from `seed` so the same person keeps one color.
-void paintAvatar(QPainter *p, const QRectF &r, const QString &name, const QString &seed);
+void paintAvatar(QPainter *p, const QRectF &r, const QString &name, const QString &seed, const QString &avatar = {});
 QString initials(const QString &name);
 // Rounded path with an individual radius per corner (tl, tr, br, bl).
 QPainterPath roundedPath(const QRectF &r, qreal tl, qreal tr, qreal br, qreal bl);

@@ -74,7 +74,7 @@ void ComposerEdit::keyPressEvent(QKeyEvent *e)
 
 bool ComposerEdit::canInsertFromMimeData(const QMimeData *source) const
 {
-    return source->hasUrls() || QPlainTextEdit::canInsertFromMimeData(source);
+    return source->hasUrls() || source->hasImage() || QPlainTextEdit::canInsertFromMimeData(source);
 }
 
 void ComposerEdit::insertFromMimeData(const QMimeData *source)
@@ -86,6 +86,13 @@ void ComposerEdit::insertFromMimeData(const QMimeData *source)
                 files << u.toLocalFile();
         if (!files.isEmpty()) {
             emit filesDropped(files);
+            return;
+        }
+    }
+    if (source->hasImage()) {
+        const QImage image = qvariant_cast<QImage>(source->imageData());
+        if (!image.isNull()) {
+            emit imagePasted(image);
             return;
         }
     }
@@ -145,6 +152,7 @@ Composer::Composer(QWidget *parent) : QWidget(parent)
     connect(m_edit, &QPlainTextEdit::textChanged, this, &Composer::onTextChanged);
     connect(m_edit, &ComposerEdit::submit, this, &Composer::submit);
     connect(m_edit, &ComposerEdit::filesDropped, this, &Composer::filesDropped);
+    connect(m_edit, &ComposerEdit::imagePasted, this, &Composer::imagePasted);
     connect(m_send, &QAbstractButton::clicked, this, &Composer::submit);
     connect(m_attach, &QAbstractButton::clicked, this, &Composer::attach);
     connect(m_emoji, &QAbstractButton::clicked, this, &Composer::openEmoji);

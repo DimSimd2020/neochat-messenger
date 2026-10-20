@@ -138,6 +138,8 @@ impl Db {
             "ALTER TABLE conversations ADD COLUMN in_archive INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE contacts ADD COLUMN bio TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE contacts ADD COLUMN avatar TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
             // Forwarded messages keep a small header: who originally sent it and when.
             "ALTER TABLE messages ADD COLUMN fwd TEXT",
         ] {

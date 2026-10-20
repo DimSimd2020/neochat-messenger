@@ -1,4 +1,5 @@
 #include "messages.h"
+#include "popupmenu.h"
 
 #include "core.h"
 #include "emoji.h"
@@ -667,7 +668,7 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         }
     }
     if (!L.avatar.isNull())
-        ui::paintAvatar(p, L.avatar, m.value("sender_name").toString(), m.value("sender_user_id").toString());
+        ui::paintAvatar(p, L.avatar, m.value("sender_name").toString(), m.value("sender_user_id").toString(), m.value("sender_avatar").toString());
 
     const qreal R = 18, r = 6;
     const QPainterPath bubble = out ? ui::roundedPath(L.bubble, R, it->groupStart ? R : r, r, R)
@@ -1387,7 +1388,6 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
     MessageLayout L;
     const QJsonObject m = messageAt(e->pos(), &L);
     if (e->button() == Qt::LeftButton && !m.isEmpty()) {
-        bool handled = true;
         const QString link = linkAt(m, L, e->pos());
         const QJsonArray reacts = m.value("reactions").toArray();
         int option = -1, chip = -1;
@@ -1409,15 +1409,7 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
             vote(m, option);
         else if (chip >= 0 && chip < reacts.size())
             react(m, reacts[chip].toObject().value("emoji").toString());
-        else
-            handled = false;
-        // A click elsewhere on the message opens reactions and actions.
-        if (!handled) {
-            QListView::mouseReleaseEvent(e);
-            setCurrentIndex(indexAt(e->pos()));
-            showMenu(m, viewport()->mapToGlobal(e->pos()));
-            return;
-        }
+
     }
     QListView::mouseReleaseEvent(e);
 }
@@ -1559,7 +1551,7 @@ void MessageView::react(const QJsonObject &m, const QString &emoji)
 
 void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
 {
-    QMenu menu(this);
+    auto *menu = new PopupMenu(this);
     const QString kind = m.value("kind").toString();
     const bool reactable = m_canReact && !m_searching && (kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed";
     if (reactable) {
@@ -1567,7 +1559,7 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
         for (const auto &v : m.value("reactions").toArray())
             if (v.toObject().value("mine").toBool())
                 mine = v.toObject().value("emoji").toString();
-        auto *row = new QWidget(&menu);
+        auto *row = new QWidget(menu);
         auto *rl = new QHBoxLayout(row);
         rl->setContentsMargins(8, 4, 8, 4);
         rl->setSpacing(2);
@@ -1583,8 +1575,8 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
             b->setCheckable(true);
             b->setChecked(e == mine);
             b->setAccessibleName(e == mine ? QStringLiteral("Убрать реакцию ") + e : QStringLiteral("Реакция ") + e);
-            connect(b, &QToolButton::clicked, &menu, [this, &menu, m, e] {
-                menu.close();
+            connect(b, &QToolButton::clicked, menu, [this, menu, m, e] {
+                menu->dismiss();
                 react(m, e);
             });
             rl->addWidget(b);
@@ -1596,54 +1588,52 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
         more->setFont(Theme::instance()->font(20, QFont::DemiBold));
         more->setCursor(Qt::PointingHandCursor);
         more->setAccessibleName(QStringLiteral("Все эмодзи"));
-        connect(more, &QToolButton::clicked, &menu, [this, &menu, m, globalPos] {
-            menu.close();
+        connect(more, &QToolButton::clicked, menu, [this, menu, m, globalPos] {
+            menu->dismiss();
             auto *popup = new EmojiPopup(this, [this, m](const QString &e) { react(m, e); });
             popup->popup(globalPos + QPoint(196, 408));
         });
         rl->addWidget(more);
-        auto *wa = new QWidgetAction(&menu);
-        wa->setDefaultWidget(row);
-        menu.addAction(wa);
-        menu.addSeparator();
+        menu->addWidget(row);
+        menu->addSeparator();
     }
     if (kind != "undecryptable" && !m_searching)
-        menu.addAction(QStringLiteral("Ответить"), this, [this, m] { emit replyRequested(m); });
+        menu->addAction(QStringLiteral("Ответить"), this, [this, m] { emit replyRequested(m); });
     if (!messageText(m).isEmpty())
-        menu.addAction(QStringLiteral("Копировать текст"), this, [m] { QApplication::clipboard()->setText(messageText(m)); });
+        menu->addAction(QStringLiteral("Копировать текст"), this, [m] { QApplication::clipboard()->setText(messageText(m)); });
     if (isImage(m))
-        menu.addAction(QStringLiteral("Открыть фото"), this, [this, m] { openImage(m); });
+        menu->addAction(QStringLiteral("Открыть фото"), this, [this, m] { openImage(m); });
     if (kind == "poll" && m.value("outgoing").toBool() && !m.value("poll").toObject().value("closed").toBool())
-        menu.addAction(QStringLiteral("Завершить опрос"), this, [this, m] {
+        menu->addAction(QStringLiteral("Завершить опрос"), this, [this, m] {
             Core::instance()->call("close_poll", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
                 if (!e.ok())
                     emit toast(e.message);
             });
         });
     if (kind == "file") {
-        menu.addAction(QStringLiteral("Открыть файл"), this, [this, m] { openFile(m); });
-        menu.addAction(QStringLiteral("Сохранить как…"), this, [this, m] { saveFile(m); });
+        menu->addAction(QStringLiteral("Открыть файл"), this, [this, m] { openFile(m); });
+        menu->addAction(QStringLiteral("Сохранить как…"), this, [this, m] { saveFile(m); });
     }
     if (m.value("status").toString() == "failed")
-        menu.addAction(QStringLiteral("Повторить отправку"), this, [this, m] { retry(m); });
+        menu->addAction(QStringLiteral("Повторить отправку"), this, [this, m] { retry(m); });
     if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed")
-        menu.addAction(QStringLiteral("Переслать"), this, [this, m] { emit forwardRequested(QJsonArray{m}); });
-    menu.addAction(QStringLiteral("Выбрать"), this, [this, m] { enterCheckMode(m.value("id").toString()); });
-    menu.addSeparator();
+        menu->addAction(QStringLiteral("Переслать"), this, [this, m] { emit forwardRequested(QJsonArray{m}); });
+    menu->addAction(QStringLiteral("Выбрать"), this, [this, m] { enterCheckMode(m.value("id").toString()); });
+    menu->addSeparator();
     if (m.value("outgoing").toBool() && m.value("status").toString() != "failed")
-        menu.addAction(QStringLiteral("Удалить у всех"), this, [this, m] {
+        menu->addAction(QStringLiteral("Удалить у всех"), this, [this, m] {
             Core::instance()->call("delete_everywhere", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
                 if (!e.ok())
                     emit toast(e.message);
             });
         });
-    menu.addAction(QStringLiteral("Удалить у себя"), this, [this, m] {
+    menu->addAction(QStringLiteral("Удалить у себя"), this, [this, m] {
         Core::instance()->call("delete_local_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
             if (!e.ok())
                 emit toast(e.message);
         });
     });
-    menu.exec(globalPos);
+    menu->popup(globalPos);
 }
 
 void MessageView::openFile(const QJsonObject &m)

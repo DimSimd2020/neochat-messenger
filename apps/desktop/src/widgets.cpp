@@ -7,6 +7,7 @@
 #include <QKeyEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmapCache>
 #include <QSvgRenderer>
 #include <QTimer>
 
@@ -109,8 +110,27 @@ QString initials(const QString &name)
     return out.isEmpty() ? QStringLiteral("?") : out;
 }
 
-void paintAvatar(QPainter *p, const QRectF &r, const QString &name, const QString &seed)
+void paintAvatar(QPainter *p, const QRectF &r, const QString &name, const QString &seed, const QString &avatar)
 {
+    if (!avatar.isEmpty() && avatar.size() <= 65536) {
+        QPixmap photo;
+        const QString key = "avatar:" + avatar;
+        if (!QPixmapCache::find(key, &photo)) {
+            photo.loadFromData(QByteArray::fromBase64(avatar.toLatin1()), "JPEG");
+            if (!photo.isNull() && photo.width() <= 512 && photo.height() <= 512) QPixmapCache::insert(key, photo);
+            else photo = {};
+        }
+        if (!photo.isNull()) {
+            p->save();
+            QPainterPath clip;
+            clip.addRoundedRect(r, r.width() * 18 / 48, r.width() * 18 / 48);
+            p->setClipPath(clip, Qt::IntersectClip);
+            const int side = qMin(photo.width(), photo.height());
+            p->drawPixmap(r, photo, QRectF((photo.width() - side) / 2, (photo.height() - side) / 2, side, side));
+            p->restore();
+            return;
+        }
+    }
     const bool dark = Theme::instance()->isDark();
     p->save();
     p->setRenderHint(QPainter::Antialiasing);

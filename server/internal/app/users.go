@@ -1,8 +1,11 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"image/jpeg"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,14 +16,15 @@ import (
 )
 
 type userOut struct {
-	UserID             string           `json:"user_id"`
-	Username           string           `json:"username"`
-	DisplayName        string           `json:"display_name"`
-	Bio                string           `json:"bio"`
-	Number             string           `json:"number"`
-	AccountIdentityKey []byte           `json:"account_identity_key"`
-	IdentityEpoch      string           `json:"identity_epoch"`
-	Roster             rosterIn         `json:"roster"`
+	UserID             string            `json:"user_id"`
+	Username           string            `json:"username"`
+	DisplayName        string            `json:"display_name"`
+	Bio                string            `json:"bio"`
+	Avatar             string            `json:"avatar"`
+	Number             string            `json:"number"`
+	AccountIdentityKey []byte            `json:"account_identity_key"`
+	IdentityEpoch      string            `json:"identity_epoch"`
+	Roster             rosterIn          `json:"roster"`
 	ActiveDevices      []activeDeviceOut `json:"active_devices"`
 }
 
@@ -35,8 +39,8 @@ func (s *Server) loadUser(ctx context.Context, q interface {
 }, where string, arg any) (*userOut, error) {
 	u := &userOut{}
 	var epoch, rev, number int64
-	err := q.QueryRow(ctx, `SELECT id, `+nicknameSQL+`, display_name, bio, number, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig FROM users WHERE `+where, arg).
-		Scan(&u.UserID, &u.Username, &u.DisplayName, &u.Bio, &number, &u.AccountIdentityKey, &epoch, &rev, &u.Roster.Blob, &u.Roster.Signature)
+	err := q.QueryRow(ctx, `SELECT id, `+nicknameSQL+`, display_name, bio, number, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, avatar FROM users WHERE `+where, arg).
+		Scan(&u.UserID, &u.Username, &u.DisplayName, &u.Bio, &number, &u.AccountIdentityKey, &epoch, &rev, &u.Roster.Blob, &u.Roster.Signature, &u.Avatar)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -70,14 +74,36 @@ func validateDisplayName(name string) (string, error) {
 
 const maxBio = 100
 
+func validateAvatar(avatar string) error {
+	if avatar == "" {
+		return nil
+	}
+	if len(avatar) > 65536 {
+		return errf(400, "bad_avatar", "Аватар: JPEG до 48 КБ и 512×512")
+	}
+	data, err := base64.StdEncoding.Strict().DecodeString(avatar)
+	if err != nil || len(data) > 49152 {
+		return errf(400, "bad_avatar", "Аватар: JPEG до 48 КБ и 512×512")
+	}
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width < 1 || cfg.Height < 1 || cfg.Width > 512 || cfg.Height > 512 {
+		return errf(400, "bad_avatar", "Аватар: JPEG до 48 КБ и 512×512")
+	}
+	if _, err := jpeg.Decode(bytes.NewReader(data)); err != nil {
+		return errf(400, "bad_avatar", "Не удалось прочитать аватар")
+	}
+	return nil
+}
+
 // handlePutProfile changes the display name and/or the about text; related users
 // refresh it on the "profile" event.
 func (s *Server) handlePutProfile(w http.ResponseWriter, r *http.Request, a *authCtx) {
 	var req struct {
 		DisplayName *string `json:"display_name"`
 		Bio         *string `json:"bio"`
+		Avatar      *string `json:"avatar"`
 	}
-	if err := readJSON(w, r, 4<<10, &req); err != nil {
+	if err := readJSON(w, r, 72<<10, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -97,6 +123,12 @@ func (s *Server) handlePutProfile(w http.ResponseWriter, r *http.Request, a *aut
 			return
 		}
 	}
+	if req.Avatar != nil {
+		if err := validateAvatar(*req.Avatar); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
 	var notify []string
 	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
 		if req.DisplayName != nil {
@@ -106,6 +138,11 @@ func (s *Server) handlePutProfile(w http.ResponseWriter, r *http.Request, a *aut
 		}
 		if req.Bio != nil {
 			if _, err := tx.Exec(r.Context(), `UPDATE users SET bio=$2 WHERE id=$1`, a.UserID, bio); err != nil {
+				return err
+			}
+		}
+		if req.Avatar != nil {
+			if _, err := tx.Exec(r.Context(), `UPDATE users SET avatar=$2 WHERE id=$1`, a.UserID, *req.Avatar); err != nil {
 				return err
 			}
 		}

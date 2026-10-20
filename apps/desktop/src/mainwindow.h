@@ -2,6 +2,7 @@
 
 #include <QJsonObject>
 #include <QMainWindow>
+#include <QQueue>
 #include <QVariantAnimation>
 
 class QStackedWidget;
@@ -45,6 +46,7 @@ private:
     void updateLayoutMode();
     void sendText(const QString &text, const QString &replyTo);
     void sendFiles(const QStringList &paths, bool photos);
+    void sendNextFile();
     void markRead();
     void toast(const QString &text);
     void notify(const QJsonObject &ev);
@@ -81,4 +83,6 @@ private:
     bool m_onePane = false;
     bool m_listMode = true; // one-pane: list shown instead of the conversation
     bool m_readPending = false;
+    QQueue<QJsonObject> m_files;
+    bool m_preparingFile = false;
 };

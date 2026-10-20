@@ -19,6 +19,7 @@ public:
 signals:
     void submit();
     void filesDropped(const QStringList &paths);
+    void imagePasted(const QImage &image);
 
 protected:
     void keyPressEvent(QKeyEvent *e) override;
@@ -47,6 +48,7 @@ signals:
     void send(const QString &text, const QString &replyTo);
     void attach();
     void filesDropped(const QStringList &paths);
+    void imagePasted(const QImage &image);
     void draftChanged(const QString &text);
     void typing();
 

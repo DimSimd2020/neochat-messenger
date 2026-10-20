@@ -1,6 +1,8 @@
 #include "chatlist.h"
 
 #include "core.h"
+#include "popupmenu.h"
+#include "sheet.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -46,8 +48,23 @@ void Typing::onEvent(const QJsonObject &ev)
         e.names.clear();
     e.names[ev.value("user_id").toString()] = ev.value("name").toString();
     e.until = now + 6000;
+    if (!m_timer) {
+        m_timer = new QTimer(this);
+        m_timer->setInterval(400);
+        connect(m_timer, &QTimer::timeout, this, [this] {
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            const auto keys = m_entries.keys();
+            for (const auto &id : keys) {
+                if (m_entries[id].until <= now)
+                    m_entries.remove(id);
+                emit changed(id);
+            }
+            if (m_entries.isEmpty())
+                m_timer->stop();
+        });
+    }
+    m_timer->start();
     emit changed(conv);
-    QTimer::singleShot(6050, this, [this, conv] { emit changed(conv); });
 }
 
 void Typing::clear(const QString &conv)
@@ -61,18 +78,19 @@ QString Typing::text(const QString &conv, bool group) const
     const auto it = m_entries.constFind(conv);
     if (it == m_entries.constEnd() || it->until < QDateTime::currentMSecsSinceEpoch() || it->names.isEmpty())
         return {};
+    const QString dots = Theme::ms(1) == 0 ? QStringLiteral("…") : QString(int(QDateTime::currentMSecsSinceEpoch() / 400 % 3) + 1, '.').leftJustified(3, ' ');
     if (!group)
-        return QStringLiteral("печатает…");
+        return QStringLiteral("печатает") + dots;
     QStringList names;
     for (const QString &n : it->names) {
         const QString first = n.section(' ', 0, 0);
         names << (first.isEmpty() ? QStringLiteral("Кто-то") : first);
     }
     if (names.size() == 1)
-        return names[0] + QStringLiteral(" печатает…");
+        return names[0] + QStringLiteral(" печатает") + dots;
     if (names.size() == 2)
-        return names[0] + QStringLiteral(" и ") + names[1] + QStringLiteral(" печатают…");
-    return QStringLiteral("Несколько человек печатают…");
+        return names[0] + QStringLiteral(" и ") + names[1] + QStringLiteral(" печатают") + dots;
+    return QStringLiteral("Несколько человек печатают") + dots;
 }
 
 QString formatListTime(qint64 ms)
@@ -185,7 +203,7 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
         ui::paintIcon(p, avatar.adjusted(12, 12, -12, -12), "archive", QColor(Qt::white), 2.0);
     } else {
         const QString kind = o.value("kind").toString();
-        ui::paintAvatar(p, avatar, o.value("title").toString(), kind == "direct" && !o.value("peer_user_id").toString().isEmpty() ? o.value("peer_user_id").toString() : o.value("id").toString());
+        ui::paintAvatar(p, avatar, o.value("title").toString(), kind == "direct" && !o.value("peer_user_id").toString().isEmpty() ? o.value("peer_user_id").toString() : o.value("id").toString(), o.value("avatar").toString());
         if (kind == "direct" && o.value("presence").toObject().value("online").toBool()) {
             const QRectF dot(avatar.right() - 12, avatar.bottom() - 12, 14, 14);
             p->setPen(QPen(selected ? c.selected : c.surface, 2.5));
@@ -364,7 +382,7 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
     m_view->setMouseTracking(true);
     m_view->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_view->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_view->setUniformItemSizes(true);
     m_view->setAccessibleName(QStringLiteral("Чаты"));
     m_view->viewport()->setAutoFillBackground(false);
@@ -372,6 +390,24 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
     m_view->verticalScrollBar()->setSingleStep(24);
     m_view->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_view, &QWidget::customContextMenuRequested, this, &ChatPanel::showRowMenu);
+    m_selectBar = new QWidget(this);
+    auto *actions = new QHBoxLayout(m_selectBar);
+    actions->setContentsMargins(4, 4, 4, 4);
+    actions->setSpacing(0);
+    m_selectCount = new ui::Label({}, 13, QFont::DemiBold);
+    actions->addWidget(m_selectCount, 1);
+    for (const auto &item : QList<QPair<QString, QString>>{{"archive", QStringLiteral("В архив")}, {"pin", QStringLiteral("Закрепить")}, {"trash", QStringLiteral("Удалить чаты")}, {"close", QStringLiteral("Отменить выбор")}}) {
+        auto *button = new ui::IconButton(item.first, item.second, m_selectBar, 36);
+        actions->addWidget(button);
+        connect(button, &QAbstractButton::clicked, this, [this, icon = item.first] {
+            if (icon == "archive") runAction("set_archived", "archived", !m_archive);
+            else if (icon == "pin") runAction("set_pinned", "pinned", true);
+            else if (icon == "trash") runAction("clear_conversation", "hide", true);
+            else { m_selecting = false; m_view->clearSelection(); updateSelection(); }
+        });
+    }
+    lay->addWidget(m_selectBar);
+    m_selectBar->hide();
     lay->addWidget(m_view, 1);
 
     m_empty = new QWidget;
@@ -402,6 +438,8 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
     connect(&m_refresh, &QVariantAnimation::valueChanged, m_view->viewport(), qOverload<>(&QWidget::update));
 
     connect(m_view->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex &cur) {
+        if (QApplication::keyboardModifiers() & (Qt::ControlModifier | Qt::ShiftModifier)) m_selecting = true;
+        if (m_selecting) return;
         if (!cur.isValid())
             return;
         const QJsonObject row = m_model->at(cur.row());
@@ -413,6 +451,7 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
         m_selected = id;
         emit activated(id);
     });
+    connect(m_view->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] { updateSelection(); });
     connect(m_search->edit(), &QLineEdit::textChanged, this, [this] { reload(); });
     connect(m_filters, &QButtonGroup::idClicked, this, [this] { apply(m_all, true); });
     connect(Theme::instance(), &Theme::changed, this, [this] {
@@ -459,21 +498,62 @@ void ChatPanel::showRowMenu(const QPoint &pos)
     const QJsonObject c = m_model->at(idx.row());
     if (c.value("_archive").toBool())
         return;
-    const QString id = c.value("id").toString();
-    auto done = [this](const QJsonValue &, const CoreError &e) {
-        if (!e.ok())
-            m_status->setText(e.message);
-    };
-    QMenu menu(this);
+    if (!m_view->selectionModel()->isSelected(idx)) {
+        QSignalBlocker block(m_view->selectionModel());
+        m_view->selectionModel()->select(idx, QItemSelectionModel::ClearAndSelect);
+    }
+    updateSelection();
+    auto *menu = new PopupMenu(this);
     const bool pinned = c.value("pinned").toBool();
-    menu.addAction(pinned ? QStringLiteral("Открепить") : QStringLiteral("Закрепить"), this, [this, id, pinned, done] {
-        Core::instance()->call("set_pinned", {{"conversation_id", id}, {"pinned", !pinned}}, this, done);
+    menu->addAction(pinned ? QStringLiteral("Открепить") : QStringLiteral("Закрепить"), this, [this, pinned] {
+        runAction("set_pinned", "pinned", !pinned);
     });
     const bool archived = c.value("in_archive").toBool();
-    menu.addAction(archived ? QStringLiteral("Вернуть из архива") : QStringLiteral("В архив"), this, [this, id, archived, done] {
-        Core::instance()->call("set_archived", {{"conversation_id", id}, {"archived", !archived}}, this, done);
+    menu->addAction(archived ? QStringLiteral("Вернуть из архива") : QStringLiteral("В архив"), this, [this, archived] {
+        runAction("set_archived", "archived", !archived);
     });
-    menu.exec(m_view->viewport()->mapToGlobal(pos));
+    menu->addAction(QStringLiteral("Выбрать чаты"), this, [this] { m_selecting = true; m_view->setSelectionMode(QAbstractItemView::MultiSelection); updateSelection(); });
+    menu->addSeparator();
+    menu->addAction(QStringLiteral("Очистить…"), this, [this] { runAction("clear_conversation", "hide", false); });
+    menu->addAction(QStringLiteral("Удалить чаты…"), this, [this] { runAction("clear_conversation", "hide", true); });
+    menu->popup(m_view->viewport()->mapToGlobal(pos));
+}
+
+void ChatPanel::updateSelection()
+{
+    m_checked.clear();
+    for (const auto &idx : m_view->selectionModel()->selectedRows()) {
+        const auto c = m_model->at(idx.row());
+        if (c.value("_archive").toBool()) continue;
+        const QString id = c.value("id").toString();
+        if (!id.isEmpty()) m_checked.insert(id);
+    }
+    if (m_checked.size() > 1) m_selecting = true;
+    m_selectBar->setVisible(m_selecting);
+    m_selectCount->setText(QStringLiteral("Выбрано: %1").arg(m_checked.size()));
+    if (!m_selecting) m_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
+}
+
+void ChatPanel::runAction(const QString &method, const QString &key, bool value)
+{
+    const auto ids = m_checked;
+    if (ids.isEmpty()) return;
+    auto run = [this, ids, method, key, value] {
+        for (const auto &id : ids)
+            Core::instance()->call(method, {{"conversation_id", id}, {key, value}}, this, [this](const QJsonValue &, const CoreError &e) { if (!e.ok()) m_status->setText(e.message); });
+        m_selecting = false;
+        m_view->clearSelection();
+        updateSelection();
+    };
+    if (method != "clear_conversation") return run();
+    auto *sheet = new Sheet(window(), value ? QStringLiteral("Удалить выбранные чаты?") : QStringLiteral("Очистить выбранные чаты?"), 420);
+    auto *text = new ui::Label(QStringLiteral("Выбрано: %1. История удалится только на этом устройстве. У собеседников сообщения останутся. Отправки из очереди продолжатся.").arg(ids.size()), 14);
+    text->setWordWrap(true);
+    sheet->body()->addWidget(text);
+    auto *confirm = new ui::Button(value ? QStringLiteral("Удалить") : QStringLiteral("Очистить"), ui::Button::Danger);
+    sheet->body()->addWidget(confirm);
+    connect(confirm, &QAbstractButton::clicked, sheet, [sheet, run] { run(); sheet->close(); });
+    sheet->open();
 }
 
 void ChatPanel::setArchiveMode(bool on)
@@ -557,15 +637,21 @@ void ChatPanel::apply(const QList<QJsonObject> &all, bool animate)
         }
         rows.prepend(QJsonObject{{"_archive", true}, {"id", "_archive"}, {"count", int(m_archived.size())}, {"unread", unread}, {"titles", titles.join(", ")}});
     }
+    const auto checked = m_checked;
+    QSignalBlocker selectionBlock(m_view->selectionModel());
     m_model->setRows(rows);
     const int idx = m_model->indexOf(m_selected);
     {
         QSignalBlocker block(m_view->selectionModel());
-        if (idx >= 0)
+        if (m_selecting) {
+            for (int i = 0; i < rows.size(); ++i)
+                if (checked.contains(rows[i].value("id").toString())) m_view->selectionModel()->select(m_model->index(i), QItemSelectionModel::Select);
+        } else if (idx >= 0)
             m_view->selectionModel()->setCurrentIndex(m_model->index(idx), QItemSelectionModel::ClearAndSelect);
         else
             m_view->selectionModel()->clearSelection();
     }
+    updateSelection();
     const bool none = rows.isEmpty() && m_search->edit()->text().isEmpty() && !m_archive;
     m_view->setVisible(!none);
     m_empty->setVisible(none);

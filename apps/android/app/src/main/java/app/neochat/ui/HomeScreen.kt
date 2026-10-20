@@ -10,6 +10,7 @@ import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -151,8 +152,13 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private val chatEmpty = ctx.label("Чатов пока нет. Начните переписку с человеком по его имени пользователя.", 14.5f, 400, Theme.Role.MUTED)
     private var allChats: List<JSONObject> = emptyList()
     private var archiveRow: JSONObject? = null
+    private var archiveShown = false
+    private val archiveEntry = ListRow(ctx, 32)
+    private val archiveWrap = FrameLayout(ctx)
+    private var archiveAnim: ValueAnimator? = null
     private var chatGen = 0
-    private val chatAdapter = RowAdapter { row, c -> if (c.optBoolean("_archive")) bindArchiveRow(act, row, c) else bindChatRow(act, row, c) }
+    private val selection = ChatSelection(act) { chatAdapter.notifyDataSetChanged() }
+    private val chatAdapter: RowAdapter = RowAdapter { row, c -> bindChatRow(act, row, c); selection.bind(row, c) }
     private var presenceAt = 0L
     private val typing: (String) -> Unit = { conv -> if (allChats.any { it.str("id") == conv }) chatAdapter.notifyDataSetChanged() }
 
@@ -208,6 +214,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
         val more = IconButton(ctx, R.drawable.ic_more, "Меню")
         more.setOnClickListener {
             PopupMenu(act, more)
+                .add("Выбрать чаты") { allChats.firstOrNull()?.let { selection.begin(it) } }
                 .add("Настройки") { nav.select(2); selectTab(2) }
                 .add("Мой QR-код") { Qr.showMine(act) }
                 .add("Устройства") { Dialogs.devices(act) }
@@ -265,7 +272,33 @@ class HomeScreen(private val act: MainActivity) : Screen {
         chips.addView(sortBtn, lp(dp(44), dp(44)))
         chatsPage.addView(chips, lp().apply { setMargins(dp(12), dp(10), dp(12), dp(4)) })
         list(chatList, chatAdapter)
-        androidx.recyclerview.widget.ItemTouchHelper(ChatSwipe(act, false, { chatAdapter.rows.getOrNull(it) }) { reloadChats(false) }).attachToRecyclerView(chatList)
+        androidx.core.view.ViewCompat.addAccessibilityAction(chatList, "Показать архив") { _, _ ->
+            showArchiveEntry(true)
+            archiveRow != null
+        }
+        chatsPage.addView(selection.bar, lp())
+        archiveWrap.clipChildren = true
+        archiveWrap.addView(archiveEntry, FrameLayout.LayoutParams(MATCH, dp(56)))
+        archiveEntry.subtitle.visibility = View.GONE
+        archiveWrap.visibility = View.GONE
+        chatsPage.addView(archiveWrap, lp(MATCH, 0).apply { setMargins(dp(8), 0, dp(8), 0) })
+        chatList.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
+            private var x = 0f
+            private var y = 0f
+            private var fromTop = false
+            override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+                    x = e.x; y = e.y; fromTop = !rv.canScrollVertically(-1)
+                }
+                if (e.actionMasked == MotionEvent.ACTION_MOVE && fromTop && !selection.active && e.y - y > dp(64) && e.y - y > kotlin.math.abs(e.x - x) * 1.5f) {
+                    fromTop = false
+                    showArchiveEntry(true)
+                    return true
+                }
+                return false
+            }
+        })
+        androidx.recyclerview.widget.ItemTouchHelper(ChatSwipe(act, false, { chatAdapter.rows.getOrNull(it) }, { selection.active }) { reloadChats(false) }).attachToRecyclerView(chatList)
         val holder = FrameLayout(ctx)
         holder.addView(chatList, FrameLayout.LayoutParams(MATCH, MATCH))
         chatEmpty.gravity = Gravity.CENTER
@@ -312,13 +345,36 @@ class HomeScreen(private val act: MainActivity) : Screen {
                 else -> true
             }
         }
-        chatAdapter.rows = listOfNotNull(archiveRow.takeIf { filter == 0 }) + shown
+        chatAdapter.rows = shown
+        archiveRow?.let { bindArchiveRow(act, archiveEntry, it) }
+        if (filter != 0 || archiveRow == null || chatSearch.edit.text.isNotEmpty()) showArchiveEntry(false)
         val none = allChats.isEmpty() && archiveRow == null && chatSearch.edit.text.isEmpty()
         chatEmpty.visibility = if (none) View.VISIBLE else View.GONE
         if (animate) fadeIn(chatList)
     }
 
     // ---- contacts ----
+
+    private fun showArchiveEntry(on: Boolean) {
+        val visible = on && archiveRow != null && filter == 0 && chatSearch.edit.text.isEmpty()
+        if (archiveShown == visible) return
+        archiveShown = visible
+        archiveAnim?.cancel()
+        if (visible) archiveWrap.visibility = View.VISIBLE
+        val from = archiveWrap.layoutParams.height
+        archiveAnim = ValueAnimator.ofInt(from, if (visible) dp(56) else 0).apply {
+            duration = if (Theme.reducedMotion) 0 else 220
+            interpolator = Theme.surfaceCurve
+            addUpdateListener {
+                archiveWrap.layoutParams = archiveWrap.layoutParams.apply { height = it.animatedValue as Int }
+                archiveEntry.alpha = (it.animatedValue as Int).toFloat() / dp(56)
+                if (!archiveShown && it.animatedValue as Int == 0) archiveWrap.visibility = View.GONE
+            }
+            start()
+        }
+    }
+
+    fun hideArchiveEntry() = showArchiveEntry(false)
 
     private fun buildContacts() {
         contactsPage.orientation = LinearLayout.VERTICAL
@@ -388,7 +444,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     private fun bindContact(row: ListRow, c: JSONObject) {
         val name = c.str("display_name")
-        row.avatar.set(name, c.str("user_id"))
+        row.avatar.set(name, c.str("user_id"), c.str("avatar"))
         row.title.text = name
         if (c.optBoolean("key_changed")) {
             row.subtitle.text = "Ключ изменился — сверьте код"
@@ -477,6 +533,8 @@ class HomeScreen(private val act: MainActivity) : Screen {
     }
 
     override fun onBack(): Boolean {
+        if (selection.clear()) return true
+        if (archiveShown) { showArchiveEntry(false); return true }
         if (tab != 0) {
             nav.select(0)
             selectTab(0)
@@ -486,6 +544,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
     }
 
     override fun onShown() {
+        showArchiveEntry(false)
         root.removeCallbacks(refresh)
         root.post(refresh)
     }

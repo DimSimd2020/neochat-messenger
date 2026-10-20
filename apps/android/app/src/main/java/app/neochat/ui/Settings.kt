@@ -44,6 +44,10 @@ class SettingsPage(private val act: MainActivity) {
 
     private fun build() {
         col.addView(avatar, lp(dp(88), dp(88)).apply { topMargin = dp(16) })
+        avatar.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        avatar.contentDescription = "Сменить фото профиля"
+        avatar.isFocusable = true
+        avatar.setOnClickListener { editAvatar() }
         name.gravity = Gravity.CENTER
         col.addView(name, lp(WRAP, WRAP).apply { topMargin = dp(12) })
         sub.gravity = Gravity.CENTER
@@ -53,6 +57,7 @@ class SettingsPage(private val act: MainActivity) {
         col.addView(bio, lp(WRAP, WRAP).apply { setMargins(dp(24), dp(8), dp(24), 0) })
 
         section("Аккаунт").apply {
+            addView(nav(R.drawable.ic_profile, "Сменить фото профиля") { editAvatar() })
             addView(nav(R.drawable.ic_profile, "Изменить профиль") { editProfile() })
             addView(nav(R.drawable.ic_qr, "Мой QR-код") { Qr.showMine(act) })
             addView(nav(R.drawable.ic_person_add, "Добавить по QR-коду") { Qr.scanContact(act) })
@@ -204,7 +209,7 @@ class SettingsPage(private val act: MainActivity) {
             status = s
             val user = s.str("username")
             val display = s.str("display_name").ifEmpty { user }
-            avatar.set(display, s.str("user_id"))
+            avatar.set(display, s.str("user_id"), s.str("avatar"))
             name.text = display
             sub.text = "@$user" + s.str("number").takeIf { it.isNotEmpty() }?.let { " · ID $it" }.orEmpty()
             bio.text = s.str("bio")
@@ -253,6 +258,14 @@ class SettingsPage(private val act: MainActivity) {
             }
         }
         s.show()
+    }
+
+    private fun editAvatar() {
+        val menu = PopupMenu(act, avatar).add("Выбрать фото") { pickProfilePhoto(act) { load() } }
+        if (status.str("avatar").isNotEmpty()) menu.add("Удалить фото", danger = true) {
+            CoreClient.call("set_profile", JSONObject().put("avatar", "")) { _, e -> if (e != null) act.toast(e.message) else load() }
+        }
+        menu.show()
     }
 
     private fun chooseLastSeen() {

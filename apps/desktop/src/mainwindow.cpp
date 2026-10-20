@@ -6,6 +6,7 @@
 #include "dialogs.h"
 #include "messages.h"
 #include "onboarding.h"
+#include "popupmenu.h"
 #include "sheet.h"
 #include "theme.h"
 #include "widgets.h"
@@ -32,6 +33,8 @@
 #include <QStackedWidget>
 #include <QSystemTrayIcon>
 #include <QTimer>
+#include <QTemporaryFile>
+#include <QThreadPool>
 #include <QVBoxLayout>
 
 namespace {
@@ -150,12 +153,13 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     }
-    void set(const QString &title, const QString &count, const QString &names, const QString &seed, bool accent = false)
+    void set(const QString &title, const QString &count, const QString &names, const QString &seed, bool accent = false, const QString &avatar = {})
     {
         m_title = title;
         m_count = count;
         m_names = names;
         m_seed = seed;
+        m_avatar = avatar;
         m_accent = accent;
         setAccessibleName(title + (count.isEmpty() ? QString() : ", " + count) + (names.isEmpty() ? QString() : ", " + names) + QStringLiteral(". Сведения"));
         update();
@@ -168,7 +172,7 @@ protected:
         const Palette &c = Theme::p();
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        ui::paintAvatar(&p, QRectF(0, (height() - 36) / 2.0, 36, 36), m_title, m_seed);
+        ui::paintAvatar(&p, QRectF(0, (height() - 36) / 2.0, 36, 36), m_title, m_seed, m_avatar);
         const qreal x = 48;
         p.setFont(Theme::instance()->font(17, QFont::DemiBold));
         p.setPen(c.text);
@@ -185,7 +189,7 @@ protected:
     }
 
 private:
-    QString m_title, m_count, m_names, m_seed;
+    QString m_title, m_count, m_names, m_seed, m_avatar;
     bool m_accent = false;
 };
 
@@ -430,10 +434,27 @@ MainWindow::MainWindow()
     connect(m_header->more, &QAbstractButton::clicked, this, [this] {
         if (m_current.isEmpty())
             return;
-        QMenu menu(this);
-        menu.addAction(QStringLiteral("Сведения"), this, [this] { dialogs::conversationInfo(host(), m_current.value("id").toString()); });
-        menu.addAction(QStringLiteral("Поиск в переписке"), this, [this] { m_header->search->click(); });
-        menu.exec(m_header->more->mapToGlobal(QPoint(m_header->more->width() - 220, m_header->more->height())));
+        auto *menu = new PopupMenu(this);
+        menu->addAction(QStringLiteral("Сведения"), this, [this] { dialogs::conversationInfo(host(), m_current.value("id").toString()); });
+        menu->addAction(QStringLiteral("Поиск в переписке"), this, [this] { m_header->search->click(); });
+        const QString cid = m_current.value("id").toString();
+        menu->addAction(QStringLiteral("Очистить чат…"), this, [this, cid] {
+            auto *sheet = new Sheet(host().host, QStringLiteral("Очистить чат?"), 420);
+            auto *text = new ui::Label(QStringLiteral("История удалится только на этом устройстве. У собеседника сообщения останутся. Отправки из очереди продолжатся."), 14);
+            text->setWordWrap(true);
+            sheet->body()->addWidget(text);
+            auto *clear = new ui::Button(QStringLiteral("Очистить"), ui::Button::Danger);
+            sheet->body()->addWidget(clear);
+            connect(clear, &QAbstractButton::clicked, sheet, [this, sheet, cid, clear] {
+                clear->setEnabled(false);
+                Core::instance()->call("clear_conversation", {{"conversation_id", cid}}, sheet, [this, sheet, clear](const QJsonValue &, const CoreError &e) {
+                    if (!e.ok()) { clear->setEnabled(true); toast(e.message); return; }
+                    sheet->close();
+                });
+            });
+            sheet->open();
+        });
+        menu->popup(m_header->more->mapToGlobal(QPoint(m_header->more->width() - 220, m_header->more->height())));
     });
     connect(m_header->search, &QAbstractButton::clicked, this, [this] {
         const bool open = m_searchAnim.endValue().toReal() != 1.0;
@@ -453,6 +474,28 @@ MainWindow::MainWindow()
     });
     connect(m_composer, &Composer::send, this, &MainWindow::sendText);
     connect(m_composer, &Composer::filesDropped, this, [this](const QStringList &paths) { sendFiles(paths, true); });
+    connect(m_composer, &Composer::imagePasted, this, [this](const QImage &image) {
+        if (m_current.isEmpty() || !m_current.value("can_media").toBool()) return;
+        const QString cid = m_current.value("id").toString();
+        const QPointer<MainWindow> guard(this);
+        QThreadPool::globalInstance()->start([guard, image, cid] {
+            auto tmp = std::make_shared<QTemporaryFile>(QDir::tempPath() + "/neochat-paste-XXXXXX.png");
+            const bool ok = tmp->open() && image.save(tmp.get(), "PNG");
+            tmp->close();
+            if (!guard) return;
+            QSize size;
+            const QString thumb = ok ? photoThumb(tmp->fileName(), &size) : QString();
+            QMetaObject::invokeMethod(guard, [guard, tmp, cid, thumb, size, ok] {
+                if (!guard) return;
+                if (!ok) return guard->toast(QStringLiteral("Не удалось вставить изображение"));
+                QJsonObject p{{"conversation_id", cid}, {"path", tmp->fileName()}, {"name", QStringLiteral("Изображение.png")}, {"mime", "image/png"}};
+                if (!thumb.isEmpty()) { p["thumb"] = thumb; p["width"] = size.width(); p["height"] = size.height(); }
+                Core::instance()->call("send_file", p, guard, [guard, tmp](const QJsonValue &, const CoreError &e) {
+                    if (guard && !e.ok()) guard->toast(e.message);
+                });
+            }, Qt::QueuedConnection);
+        });
+    });
     connect(m_composer, &Composer::attach, this, [this] {
         // Ask what is attached first: photos go to the gallery-like picker and arrive as photos.
         QMenu menu(this);
@@ -632,6 +675,21 @@ void MainWindow::onEvent(const QJsonObject &ev)
         updateNotice();
     } else if (type == "conversations_changed" || type == "contacts_changed" || type == "identity_changed") {
         m_listTimer->start();
+    } else if (type == "history_cleared") {
+        if (ev.value("conversation_id") == m_current.value("id")) {
+            m_messagesTimer->stop();
+            m_composer->setDraft({});
+            m_composer->clearReply();
+            m_search->edit()->clear();
+            m_view->setConversation(ev.value("hidden").toBool() ? QString() : m_current.value("id").toString(), m_current.value("kind") == "group");
+            if (ev.value("hidden").toBool()) {
+                m_current = {};
+                QSettings().remove("window/lastConversation");
+                m_listMode = true;
+                updateLayoutMode();
+            }
+        }
+        m_listTimer->start();
     } else if (type == "messages_changed") {
         if (!m_current.isEmpty() && ev.value("conversation_id").toString() == m_current.value("id").toString())
             m_messagesTimer->start();
@@ -752,7 +810,7 @@ void MainWindow::applyConversation(const QJsonObject &c)
         accent = true;
     }
     const QString seed = c.value("kind").toString() == "direct" && !c.value("peer_user_id").toString().isEmpty() ? c.value("peer_user_id").toString() : c.value("id").toString();
-    m_header->title->set(c.value("title").toString(), count, names, seed, accent);
+    m_header->title->set(c.value("title").toString(), count, names, seed, accent, c.value("avatar").toString());
     const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
     m_composer->setVisible(!gone && c.value("can_post").toBool(true));
     m_composer->setBlocked(!c.value("key_changed_users").toArray().isEmpty());
@@ -864,22 +922,39 @@ void MainWindow::sendFiles(const QStringList &paths, bool photos)
 {
     if (m_current.isEmpty())
         return;
-    QMimeDatabase mime;
-    for (const QString &path : paths) {
-        const QString type = mime.mimeTypeForFile(path).name();
-        QJsonObject p{{"conversation_id", m_current.value("id")}, {"path", path}, {"mime", type}};
+    if (m_files.size() + paths.size() > 100)
+        return toast(QStringLiteral("Можно прикрепить до 100 файлов за раз. Дождитесь подготовки текущих вложений"));
+    for (const auto &path : paths)
+        m_files.enqueue({{"conversation_id", m_current.value("id")}, {"path", path}, {"photo", photos}});
+    if (!m_preparingFile) sendNextFile();
+}
+
+void MainWindow::sendNextFile()
+{
+    if (m_files.isEmpty()) { m_preparingFile = false; return; }
+    m_preparingFile = true;
+    const auto file = m_files.dequeue();
+    const QPointer<MainWindow> guard(this);
+    QThreadPool::globalInstance()->start([guard, file] {
+        const QString path = file.value("path").toString();
+        const QString type = QMimeDatabase().mimeTypeForFile(path).name();
+        QJsonObject p{{"conversation_id", file.value("conversation_id")}, {"path", path}, {"mime", type}};
         QSize size;
-        const QString thumb = photos && type.startsWith("image/") ? photoThumb(path, &size) : QString();
+        const QString thumb = file.value("photo").toBool() && type.startsWith("image/") ? photoThumb(path, &size) : QString();
         if (!thumb.isEmpty()) {
             p["thumb"] = thumb;
             p["width"] = size.width();
             p["height"] = size.height();
         }
-        Core::instance()->call("send_file", p, this, [this](const QJsonValue &, const CoreError &e) {
-            if (!e.ok())
-                toast(e.message);
-        });
-    }
+        if (guard) QMetaObject::invokeMethod(guard, [guard, p] {
+            if (!guard) return;
+            Core::instance()->call("send_file", p, guard, [guard](const QJsonValue &, const CoreError &e) {
+                if (!guard) return;
+                if (!e.ok()) guard->toast(e.message);
+                guard->sendNextFile();
+            });
+        }, Qt::QueuedConnection);
+    });
 }
 
 void MainWindow::markRead()

@@ -389,6 +389,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             PopupMenu(act, more)
                 .add("Сведения") { Dialogs.conversationInfo(act, conversationId) }
                 .add("Поиск в переписке") { if (!searchOpen) toggleSearch() }
+                .add("Очистить чат…") { confirmClearChat(act, conversationId) }
                 .show()
         }
         header.addView(more)
@@ -456,7 +457,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (e != null) return@call act.toast(e.message)
             conv = v as JSONObject
             title.text = conv.str("title")
-            avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId })
+            avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId }, conv.str("avatar"))
             val members = conv.optJSONArray("members") ?: JSONArray()
             val channel = conv.str("kind") == "channel"
             baseSubtitle = when (conv.str("kind")) {
@@ -698,7 +699,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 val swipe = SwipeToReplyLayout(
                     ctx,
                     canReply = { canSwipeReply(row.message) },
-                    onBubble = { e -> row.touchesBubble(e) },
                     onReply = { startSwipeReply(row.message) },
                 )
                 swipe.attach(row)
@@ -757,12 +757,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private inner class BubbleRow(ctx: Context) : LinearLayout(ctx) {
         val message: JSONObject get() = m
 
-        fun touchesBubble(e: MotionEvent): Boolean {
-            val loc = IntArray(2)
-            bubble.getLocationOnScreen(loc)
-            return e.rawX >= loc[0] && e.rawX < loc[0] + bubble.width &&
-                e.rawY >= loc[1] && e.rawY < loc[1] + bubble.height
-        }
         private val av = AvatarView(ctx, 30)
         private val col = LinearLayout(ctx)
         private val sender = ctx.label("", 12.5f, 600, Theme.Role.MUTED)
@@ -891,7 +885,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             gravity = (if (out) Gravity.END else Gravity.START) or Gravity.BOTTOM
             setPadding(if (out) dp(48) else dp(4), if (item.firstInRun) dp(8) else dp(3), if (out) dp(4) else dp(32), 0)
             av.visibility = if (group && !out) (if (item.lastInRun) VISIBLE else INVISIBLE) else GONE
-            av.set(m.str("sender_name"), m.str("sender_user_id"))
+            av.set(m.str("sender_name"), m.str("sender_user_id"), m.str("sender_avatar"))
             sender.visibility = if (group && !out && item.firstInRun) VISIBLE else GONE
             sender.text = m.str("sender_name") + m.str("sender_tag").let { if (it.isEmpty()) "" else " · $it" }
             (col.layoutParams as LayoutParams).gravity = if (out) Gravity.END else Gravity.START
@@ -1536,6 +1530,20 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     override fun onEvent(ev: JSONObject) {
         when (ev.str("type")) {
+            "history_cleared" -> if (ev.str("conversation_id") == conversationId) {
+                gen++
+                messages = emptyList()
+                known.clear()
+                loading = false
+                hasMore = true
+                searching = false
+                searchBar.edit.setText("")
+                adapter.setItems(emptyList())
+                edit.setText("")
+                setReply(null)
+                showJump(false)
+                if (ev.optBoolean("hidden")) act.closeChat() else load(false)
+            }
             "messages_changed" -> if (ev.str("conversation_id") == conversationId) {
                 root.removeCallbacks(reload)
                 root.postDelayed(reload, 60)

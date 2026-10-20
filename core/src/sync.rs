@@ -216,7 +216,7 @@ impl Inner {
         )?;
         if n > 0 {
             tx.execute(
-                "UPDATE conversations SET last_activity=?2, last_preview=?3, unread=unread+1 WHERE id=?1",
+                "UPDATE conversations SET hidden=0, last_activity=?2, last_preview=?3, unread=unread+1 WHERE id=?1",
                 params![SYSTEM_CHAT, now, preview(text)],
             )?;
         }
@@ -369,7 +369,7 @@ impl Inner {
                             None => preview(p.text.as_deref().unwrap_or("")),
                         };
                         tx.execute(
-                            "UPDATE conversations SET last_activity=?2, last_preview=?3, unread=unread+?4 WHERE id=?1",
+                            "UPDATE conversations SET hidden=0, last_activity=?2, last_preview=?3, unread=unread+?4 WHERE id=?1",
                             params![conv, now, pv, (!outgoing) as i64],
                         )?;
                         if !outgoing {

@@ -554,7 +554,9 @@ fn reactions_bio_presence_typing_qr_archive_pins_lock() {
     let bad = qr["link"].as_str().unwrap().replace("?k=", "?k=x");
     assert!(alice.try_call("add_contact_qr", json!({"link": bad})).is_err());
 
-    bob.call("set_profile", json!({"bio": "Люблю чай"}));
+    let avatar = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, include_bytes!("fixtures/avatar.jpg"));
+    bob.call("set_profile", json!({"bio": "Люблю чай", "avatar": avatar}));
+    assert_eq!(bob.call("status", json!({}))["avatar"], avatar);
     assert!(bob.try_call("set_profile", json!({"bio": "я".repeat(101)})).is_err());
     let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
     alice.call("send_text", json!({"conversation_id": cid, "text": "👍"}));
@@ -575,6 +577,11 @@ fn reactions_bio_presence_typing_qr_archive_pins_lock() {
     alice.sync();
     let info = alice.call("contact_info", json!({"user_id": b["user_id"]}));
     assert_eq!(info["bio"], "Люблю чай");
+    assert_eq!(info["avatar"], avatar);
+    assert_eq!(alice.call("get_conversation", json!({"conversation_id": cid}))["avatar"], avatar);
+    bob.call("set_profile", json!({"avatar": ""}));
+    alice.sync();
+    assert_eq!(alice.call("contact_info", json!({"user_id": b["user_id"]}))["avatar"], "");
     let p = alice.call("presence", json!({"user_ids": [b["user_id"]], "tz_offset": 180}));
     let st = p[b["user_id"].as_str().unwrap()]["status"].as_str().unwrap().to_string();
     assert!(st == "online" || st == "exact", "{st}");
@@ -596,6 +603,18 @@ fn reactions_bio_presence_typing_qr_archive_pins_lock() {
     alice.call("set_archived", json!({"conversation_id": cid, "archived": true}));
     assert!(alice.call("list_conversations", json!({})).as_array().unwrap().iter().all(|c| c["id"] != cid.as_str()));
     assert_eq!(alice.call("list_conversations", json!({"archived": true}))[0]["pinned"], false);
+
+    // Clear is local; hide survives a sync and a new message returns the chat.
+    alice.call("clear_conversation", json!({"conversation_id": cid}));
+    assert!(alice.messages(&cid).is_empty());
+    assert!(!bob.messages(&cid).is_empty());
+    alice.sync();
+    assert!(alice.messages(&cid).is_empty());
+    alice.call("clear_conversation", json!({"conversation_id": cid, "hide": true}));
+    assert!(!alice.call("list_conversations", json!({"archived": true})).as_array().unwrap().iter().any(|c| c["id"] == cid));
+    bob.call("send_text", json!({"conversation_id": cid, "text": "После очистки"}));
+    wait(&alice, &|c| !c.messages(&cid).is_empty());
+    assert!(alice.call("list_conversations", json!({"archived": true})).as_array().unwrap().iter().any(|c| c["id"] == cid));
 
     alice.call("lock_set", json!({"passcode": "1234"}));
     assert_eq!(alice.call("lock_check", json!({"passcode": "1234"}))["ok"], true);

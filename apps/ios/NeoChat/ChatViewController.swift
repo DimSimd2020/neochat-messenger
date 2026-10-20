@@ -182,6 +182,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private var animateIds = Set<String>()
     private var loading = false
     private var hasMore = true
+    private var historyGeneration = 0
     private var group: Bool { conv.str("kind") == "group" }
 
     private let table = UITableView(frame: .zero, style: .plain)
@@ -224,7 +225,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .clear
+        view.backgroundColor = Theme.canvas
+        view.insertSubview(BackgroundView(frame: view.bounds), at: 0)
         navigationItem.largeTitleDisplayMode = .never
 
         table.backgroundColor = .clear
@@ -293,6 +295,17 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.presentSheet(ConversationInfoViewController(conversationId: self.conversationId))
         }, for: .touchUpInside)
         navigationItem.rightBarButtonItem = UIBarButtonItem(customView: info)
+        navigationItem.rightBarButtonItems = [navigationItem.rightBarButtonItem!, UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: UIMenu(children: [
+            UIAction(title: "Очистить чат…", image: UIImage(systemName: "trash.slash"), attributes: .destructive) { [weak self] _ in
+                guard let self else { return }
+                confirmClearConversation(self) { [weak self] in
+                    guard let self else { return }
+                    Core.shared.call("clear_conversation", ["conversation_id": self.conversationId]) { [weak self] r in
+                        if case .failure(let e) = r { self?.toast(e.message) }
+                    }
+                }
+            },
+        ]))]
 
         let stack = UIStackView(arrangedSubviews: [notice, table, composer, goneLabel])
         stack.axis = .vertical
@@ -308,6 +321,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { [weak self] n in
             guard let self, let ev = n.userInfo as? JSON else { return }
             switch ev.str("type") {
+            case "history_cleared" where ev.str("conversation_id") == self.conversationId:
+                self.historyGeneration += 1
+                self.messages = []; self.items = []; self.known.removeAll(); self.heights.removeAll()
+                self.loading = false; self.hasMore = true
+                self.table.reloadData()
+                self.input.text = ""; self.textViewDidChange(self.input); self.setReply(nil)
+                if ev.bool("hidden") { self.navigationController?.popViewController(animated: !Theme.reducedMotion) }
             case "messages_changed" where ev.str("conversation_id") == self.conversationId: self.scheduleReload()
             case "sync_reset": self.scheduleReload(); self.refreshConversation(first: false)
             case "conversations_changed", "contacts_changed", "identity_changed", "connection": self.refreshConversation(first: false)
@@ -712,6 +732,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private func load(older: Bool) {
         if older && (loading || !hasMore) { return }
         loading = true
+        let generation = historyGeneration
         var p: JSON = ["conversation_id": conversationId]
         if older {
             p["before"] = messages.first?.int64("local_id") ?? 0
@@ -720,7 +741,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             p["limit"] = min(200, max(50, messages.count + 20))
         }
         Core.shared.call("list_messages", p) { [weak self] r in
-            guard let self else { return }
+            guard let self, generation == self.historyGeneration else { return }
             self.loading = false
             switch r {
             case .failure(let e): self.toast(e.message)
@@ -1207,7 +1228,7 @@ final class BubbleCell: UITableViewCell {
         trail.isActive = true
         topGap.constant = first ? 8 : 3
         avatar.isHidden = !(group && !out && last)
-        avatar.set(m.str("sender_name"), seed: m.str("sender_user_id"))
+        avatar.set(m.str("sender_name"), seed: m.str("sender_user_id"), avatar: m.str("sender_avatar"))
         sender.isHidden = !(group && !out && first)
         sender.text = m.str("sender_name") + (m.str("sender_tag").isEmpty ? "" : " · " + m.str("sender_tag"))
         // One to three emoji without text are shown large, without a bubble.

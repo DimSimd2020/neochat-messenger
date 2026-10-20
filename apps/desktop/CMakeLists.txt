@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NeoChat VERSION 0.6.1 LANGUAGES CXX)
+project(NeoChat VERSION 0.6.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,7 @@ add_library(neochat_ui STATIC
     src/theme.cpp src/theme.h
     src/widgets.cpp src/widgets.h
     src/sheet.cpp src/sheet.h
+    src/popupmenu.cpp src/popupmenu.h
     src/onboarding.cpp src/onboarding.h
     src/chatlist.cpp src/chatlist.h
     src/messages.cpp src/messages.h
@@ -56,6 +57,8 @@ find_package(Qt6 COMPONENTS Test)
 if(Qt6Test_FOUND)
     add_executable(neochat_uitest tests/uitest.cpp)
     target_link_libraries(neochat_uitest PRIVATE neochat_ui Qt6::Test)
+    add_executable(neochat_interactiontest tests/interactiontest.cpp)
+    target_link_libraries(neochat_interactiontest PRIVATE neochat_ui Qt6::Test)
 endif()
 
 install(TARGETS neochat RUNTIME DESTINATION .)
