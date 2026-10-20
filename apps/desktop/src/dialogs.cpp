@@ -404,6 +404,7 @@ void devices(const DialogHost &h)
     sheet->body()->addWidget(list);
     sheet->body()->addWidget(mutedText(QStringLiteral("Отзыв устройства прекращает доставку новых сообщений на него. "
                                                       "Уже скачанные на нём копии удалённо не стираются.")));
+    sheet->body()->addWidget(mutedText(QStringLiteral("На аккаунте может быть до 10 устройств.")));
     sheet->body()->addWidget(mutedText(QStringLiteral("Новое устройство входит по паролю или по QR-коду, который телефон сканирует с экрана входа.")));
 
     auto reload = std::make_shared<std::function<void()>>();

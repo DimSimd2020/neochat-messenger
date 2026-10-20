@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NeoChat v1 send request",
-  "description": "Proposed body of POST /v1/conversations/{id}/messages. UUID uniqueness by target_device_id, decoded ciphertext size, authentication, membership, roster signatures and E2EE validity require server/client checks beyond JSON Schema.",
+  "description": "Proposed body of POST /v1/conversations/{id}/messages. maxItems is maxChannelMembers×maxDevices−1 (200×10−1). UUID uniqueness by target_device_id, decoded ciphertext size, authentication, membership, roster signatures and E2EE validity require server/client checks beyond JSON Schema.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "client_message_id", "conversation_revision", "recipient_set_revision", "recipients", "attachment_ids"],
@@ -13,7 +13,7 @@
     "recipients": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 47,
+      "maxItems": 1999,
       "uniqueItems": true,
       "items": {
         "type": "object",

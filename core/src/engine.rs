@@ -462,8 +462,8 @@ impl Inner {
         let blob = unb64(st["roster"]["blob"].as_str().unwrap_or_default())?;
         let sig = unb64(st["roster"]["signature"].as_str().unwrap_or_default())?;
         let mut r = keys::verify_roster(&account_key, &blob, &sig)?;
-        if r.devices.len() >= 3 {
-            return Err(Error::Invalid("У аккаунта уже 3 устройства. Отзовите одно из них".into()));
+        if r.devices.len() >= keys::MAX_DEVICES {
+            return Err(Error::Invalid(format!("У аккаунта уже {} устройств. Отзовите одно из них", keys::MAX_DEVICES)));
         }
         let device = keys::new_device()?;
         r.devices.push(device.roster_entry());
@@ -670,8 +670,8 @@ impl Inner {
         }
         let new_dev = keys::RosterDevice { device_id: pending["device_id"].as_str().unwrap_or_default().to_string(), identity_key: identity, auth_key: auth };
         let (blob, sig, rev) = self.next_own_roster(&account, |devs| {
-            if devs.len() >= 3 {
-                return Err(Error::Invalid("У аккаунта уже 3 устройства. Отзовите одно из них".into()));
+            if devs.len() >= keys::MAX_DEVICES {
+                return Err(Error::Invalid(format!("У аккаунта уже {} устройств. Отзовите одно из них", keys::MAX_DEVICES)));
             }
             devs.push(new_dev.clone());
             Ok(())

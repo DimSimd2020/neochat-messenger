@@ -21,6 +21,8 @@ use crate::error::{Error, Result, crypto};
 use crate::store::{kv_get, kv_get_str, kv_set, now_ms, save_last_resort_kyber};
 
 pub const PREKEY_BATCH: u32 = 100;
+/// Active devices per account. Keep in sync with server maxDevices.
+pub const MAX_DEVICES: usize = 10;
 
 const ROSTER_DOMAIN: &[u8] = b"NeoChat-roster-v1\0";
 const GROUP_DOMAIN: &[u8] = b"NeoChat-group-v1\0";
@@ -271,6 +273,9 @@ impl Roster {
         out.extend_from_slice(&self.revision.to_be_bytes());
         out.extend_from_slice(&self.prev_hash);
         out.extend_from_slice(&self.account_key);
+        if devices.len() > MAX_DEVICES {
+            return Err(Error::Invalid(format!("У аккаунта уже {MAX_DEVICES} устройств. Отзовите одно из них")));
+        }
         out.extend_from_slice(&(devices.len() as u16).to_be_bytes());
         for d in &devices {
             if d.identity_key.len() != 33 || d.auth_key.len() != 32 {
@@ -296,6 +301,9 @@ impl Roster {
         let prev_hash: [u8; 32] = r.take(32).ok_or_else(bad)?.try_into().unwrap();
         let account_key = r.take(33).ok_or_else(bad)?.to_vec();
         let n = r.u16().ok_or_else(bad)? as usize;
+        if n > MAX_DEVICES {
+            return Err(bad());
+        }
         let mut devices = Vec::with_capacity(n);
         for _ in 0..n {
             devices.push(RosterDevice {
@@ -525,6 +533,27 @@ mod tests {
         assert!(verify_roster(&account.identity_key().serialize(), &bad, &sig).is_err());
         let other = IdentityKeyPair::generate(&mut rand::rng());
         assert!(verify_roster(&other.identity_key().serialize(), &blob, &sig).is_err());
+    }
+
+    #[test]
+    fn roster_holds_max_devices() {
+        let account = IdentityKeyPair::generate(&mut rand::rng());
+        let devices: Vec<_> = (0..MAX_DEVICES).map(|_| new_device().unwrap().roster_entry()).collect();
+        let r = Roster {
+            username: "alice".into(),
+            epoch: 1,
+            revision: 1,
+            prev_hash: [0; 32],
+            account_key: account.identity_key().serialize().to_vec(),
+            devices,
+        };
+        let blob = r.encode().unwrap();
+        assert!(blob.len() < 4096, "signed roster of {MAX_DEVICES} devices is {} bytes", blob.len());
+        assert_eq!(Roster::decode(&blob).unwrap().devices.len(), MAX_DEVICES);
+
+        let mut over = r;
+        over.devices.push(new_device().unwrap().roster_entry());
+        assert!(over.encode().is_err());
     }
 
     #[test]

@@ -14,9 +14,12 @@ import (
 )
 
 const (
-	maxSendBody = 16 << 20
+	// Fits a MAX_GROUP×maxDevices fan-out at maxEnvelopeSize (base64 JSON),
+	// under nginx client_max_body_size 27m. Typical text is far smaller.
+	maxSendBody = 24 << 20
 	// A long Cyrillic text or a photo thumbnail with padding fits comfortably.
 	maxEnvelopeSize = 32 << 10
+	maxRecipients   = maxChannelMembers*maxDevices - 1
 )
 
 // sendReq matches docs/protocol/send.schema.json.
@@ -89,7 +92,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, a *authCtx) 
 	}
 	rev, err := strconv.ParseInt(req.ConversationRevision, 10, 64)
 	if req.Version != 1 || !isUUID(req.ClientMessageID) || err != nil ||
-		len(req.Recipients) > maxChannelMembers*maxDevices-1 || len(req.AttachmentIDs) > 1 {
+		len(req.Recipients) > maxRecipients || len(req.AttachmentIDs) > 1 {
 		s.fail(w, r, errBadRequest)
 		return
 	}
