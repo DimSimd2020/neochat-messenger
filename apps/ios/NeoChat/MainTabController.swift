@@ -200,9 +200,18 @@ class ListViewController: UITableViewController, UISearchResultsUpdating {
             UIView.transition(with: tableView, duration: Theme.ms(0.14), options: [.transitionCrossDissolve, .allowUserInteraction]) { self.tableView.reloadData() }
         }
         if rows.isEmpty {
+            // Wrapped inside side margins: a bare label ran off both edges.
             let l = label(empty, 15, color: Theme.muted)
             l.textAlignment = .center
-            tableView.backgroundView = l
+            l.translatesAutoresizingMaskIntoConstraints = false
+            let box = UIView()
+            box.addSubview(l)
+            NSLayoutConstraint.activate([
+                l.leadingAnchor.constraint(equalTo: box.layoutMarginsGuide.leadingAnchor, constant: 24),
+                l.trailingAnchor.constraint(equalTo: box.layoutMarginsGuide.trailingAnchor, constant: -24),
+                l.centerYAnchor.constraint(equalTo: box.centerYAnchor, constant: -40),
+            ])
+            tableView.backgroundView = box
         } else {
             tableView.backgroundView = nil
         }
@@ -229,7 +238,7 @@ final class ChatsViewController: ListViewController {
         logo.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([logo.widthAnchor.constraint(equalToConstant: 28), logo.heightAnchor.constraint(equalToConstant: 28)])
         navigationItem.leftBarButtonItem = UIBarButtonItem(customView: logo)
-        title = "NeoChat"
+        navigationItem.title = "NeoChat"
         updateBarItems()
     }
 
