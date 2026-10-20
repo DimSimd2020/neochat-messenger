@@ -33,7 +33,12 @@ final class OnboardingUITests: XCTestCase {
         shot("03-recovery")
         app.switches.firstMatch.tap()
         app.buttons["Продолжить"].tap()
-        XCTAssertTrue(app.tabBars.buttons["Чаты"].waitForExistence(timeout: 20))
+        if !app.tabBars.buttons["Чаты"].waitForExistence(timeout: 20) {
+            shot("04-chats-failed")
+            print("APP STATE:", app.state.rawValue)
+            print(app.debugDescription)
+            XCTFail("chat list did not appear")
+        }
         shot("04-chats")
         app.tabBars.buttons["Профиль"].tap()
         XCTAssertTrue(app.staticTexts["Устройства"].waitForExistence(timeout: 10) || app.buttons["Устройства"].waitForExistence(timeout: 1))

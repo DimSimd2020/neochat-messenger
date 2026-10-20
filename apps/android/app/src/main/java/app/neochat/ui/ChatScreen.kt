@@ -40,6 +40,7 @@ import android.view.ViewOutlineProvider
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import androidx.recyclerview.widget.DiffUtil
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -267,7 +268,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private var hasMore = true
     private var searching = false
     private var gen = 0
-    private val jump = IconButton(ctx, R.drawable.ic_down, "К новым сообщениям", glass = true)
+    private val jump = IconButton(ctx, R.drawable.ic_down, "В самый низ", glass = true, iconRole = Theme.Role.ACCENT)
+    private var jumpShown = false
     private var conv = JSONObject()
 
     // composer
@@ -326,14 +328,17 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 if (!searching && layout.findFirstVisibleItemPosition() <= 3 && dy < 0) load(true)
                 if (atBottom()) {
-                    jump.visibility = View.GONE
+                    showJump(false)
                     markRead()
+                } else if (!searching && farFromBottom()) {
+                    showJump(true)
                 }
             }
         })
         val listHolder = FrameLayout(ctx)
         listHolder.addView(list, FrameLayout.LayoutParams(MATCH, MATCH))
         jump.visibility = View.GONE
+        jump.elevation = ctx.dpf(4)
         jump.setOnClickListener { scrollToBottom(true) }
         listHolder.addView(jump, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, dp(16), dp(12)) })
         column.addView(listHolder, lp(MATCH, 0, 1f))
@@ -512,11 +517,43 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun atBottom() = !list.canScrollVertically(1)
 
+    /** More than one screen of history below the viewport. */
+    private fun farFromBottom() =
+        list.computeVerticalScrollRange() - list.computeVerticalScrollOffset() - list.computeVerticalScrollExtent() > list.height
+
+    private fun showJump(on: Boolean) {
+        if (on == jumpShown) return
+        jumpShown = on
+        jump.animate().cancel()
+        if (Theme.reducedMotion) {
+            jump.alpha = 1f
+            jump.scaleX = 1f
+            jump.scaleY = 1f
+            jump.visibility = if (on) View.VISIBLE else View.GONE
+            return
+        }
+        if (on) {
+            jump.visibility = View.VISIBLE
+            jump.alpha = 0f
+            jump.scaleX = 0.7f
+            jump.scaleY = 0.7f
+            jump.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180).setInterpolator(Theme.surfaceCurve).start()
+        } else {
+            jump.animate().alpha(0f).scaleX(0.7f).scaleY(0.7f).setDuration(150).withEndAction { jump.visibility = View.GONE }.start()
+        }
+    }
+
     private fun scrollToBottom(smooth: Boolean) {
-        jump.visibility = View.GONE
+        showJump(false)
         if (adapter.itemCount == 0) return
-        if (smooth && !Theme.reducedMotion) list.smoothScrollToPosition(adapter.itemCount - 1)
-        else list.scrollToPosition(adapter.itemCount - 1)
+        val last = adapter.itemCount - 1
+        if (smooth && !Theme.reducedMotion) {
+            // A long way off: jump close first so the smooth part stays short.
+            if (last - layout.findLastVisibleItemPosition() > 12) list.scrollToPosition(last - 12)
+            list.smoothScrollToPosition(last)
+        } else {
+            list.scrollToPosition(last)
+        }
     }
 
     private fun load(older: Boolean) {
@@ -571,7 +608,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         if (wasBottom || own) {
             list.post { scrollToBottom(!first) }
         } else if (newMsgs.any { !it.optBoolean("outgoing") }) {
-            jump.visibility = View.VISIBLE
+            showJump(true)
         }
         list.post { if (atBottom()) markRead() }
     }
@@ -632,11 +669,24 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private var items: List<Any> = emptyList()
         var animate: Set<String> = emptySet()
 
+        // Diffed updates keep the scroll anchor: a full rebind made the list jump while sending.
         fun setItems(v: List<Any>) {
+            val old = items
             items = v
-            @Suppress("NotifyDataSetChanged")
-            notifyDataSetChanged()
+            DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+                override fun getOldListSize() = old.size
+                override fun getNewListSize() = v.size
+                override fun areItemsTheSame(o: Int, n: Int) = key(old[o]) == key(v[n])
+                override fun areContentsTheSame(o: Int, n: Int): Boolean {
+                    val a = old[o]
+                    val b = v[n]
+                    if (a is Item && b is Item) return a.firstInRun == b.firstInRun && a.lastInRun == b.lastInRun && a.m.toString() == b.m.toString()
+                    return a == b
+                }
+            }, false).dispatchUpdatesTo(this)
         }
+
+        private fun key(x: Any) = if (x is Item) "m:" + x.m.str("id") else "d:$x"
 
         override fun getItemViewType(position: Int) = if (items[position] is String) 0 else 1
         override fun getItemCount() = items.size

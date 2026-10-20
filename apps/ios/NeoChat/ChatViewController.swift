@@ -173,6 +173,11 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private let goneLabel = label("", 15, color: Theme.muted)
     private var previewURL: URL?
     private var reloadPending = false
+    private let jump = UIButton(type: .system)
+    private var jumpShown = false
+    // Measured row heights: estimates made the table jump while sending and left the first screen half drawn.
+    private var heights: [String: CGFloat] = [:]
+    private var pendingBottom = false
 
     init(conversationId: String) {
         self.conversationId = conversationId
@@ -186,11 +191,6 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         super.viewDidLoad()
         view.backgroundColor = .clear
         navigationItem.largeTitleDisplayMode = .never
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "info.circle"), primaryAction: UIAction { [weak self] _ in
-            guard let self else { return }
-            self.presentSheet(ConversationInfoViewController(conversationId: self.conversationId))
-        })
-        navigationItem.rightBarButtonItem?.accessibilityLabel = "Сведения"
 
         table.backgroundColor = .clear
         table.separatorStyle = .none
@@ -229,7 +229,35 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         titleBox.alignment = .center
         titleBox.isAccessibilityElement = true
         titleBox.accessibilityTraits = .header
-        navigationItem.titleView = titleBox
+        // Glass capsule header over a clear bar, like the Android chat header.
+        let cap = UIView()
+        cap.glass(21)
+        titleBox.translatesAutoresizingMaskIntoConstraints = false
+        cap.addSubview(titleBox)
+        NSLayoutConstraint.activate([
+            titleBox.topAnchor.constraint(equalTo: cap.topAnchor, constant: 4),
+            titleBox.bottomAnchor.constraint(equalTo: cap.bottomAnchor, constant: -4),
+            titleBox.leadingAnchor.constraint(equalTo: cap.leadingAnchor, constant: 18),
+            titleBox.trailingAnchor.constraint(equalTo: cap.trailingAnchor, constant: -18),
+            cap.widthAnchor.constraint(lessThanOrEqualToConstant: 260),
+        ])
+        navigationItem.titleView = cap
+        let clear = UINavigationBarAppearance()
+        clear.configureWithTransparentBackground()
+        navigationItem.standardAppearance = clear
+        navigationItem.scrollEdgeAppearance = clear
+        let info = UIButton(type: .system)
+        info.glass(20)
+        info.setImage(UIImage(systemName: "info", withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)), for: .normal)
+        info.tintColor = Theme.accent
+        info.accessibilityLabel = "Сведения"
+        info.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([info.widthAnchor.constraint(equalToConstant: 40), info.heightAnchor.constraint(equalToConstant: 40)])
+        info.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.presentSheet(ConversationInfoViewController(conversationId: self.conversationId))
+        }, for: .touchUpInside)
+        navigationItem.rightBarButtonItem = UIBarButtonItem(customView: info)
 
         let stack = UIStackView(arrangedSubviews: [notice, table, composer, goneLabel])
         stack.axis = .vertical
@@ -256,9 +284,71 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             guard let self, n.object as? String == self.conversationId else { return }
             self.updateSubtitle()
         }
-        NotificationCenter.default.addObserver(forName: .prefsChanged, object: nil, queue: .main) { [weak self] _ in self?.table.reloadData() }
+        NotificationCenter.default.addObserver(forName: .prefsChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.heights.removeAll()
+            self?.table.reloadData()
+        }
+        buildJump()
         refreshConversation(first: true)
         load(older: false)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if pendingBottom && table.bounds.height > 0 && !items.isEmpty {
+            pendingBottom = false
+            snapToBottom()
+        }
+    }
+
+    private func buildJump() {
+        jump.glass(22)
+        jump.setImage(UIImage(systemName: "arrow.down", withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)), for: .normal)
+        jump.tintColor = Theme.accent
+        jump.accessibilityLabel = "В самый низ"
+        jump.alpha = 0
+        jump.isHidden = true
+        jump.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(jump)
+        NSLayoutConstraint.activate([
+            jump.widthAnchor.constraint(equalToConstant: 44),
+            jump.heightAnchor.constraint(equalToConstant: 44),
+            jump.trailingAnchor.constraint(equalTo: table.trailingAnchor, constant: -8),
+            jump.bottomAnchor.constraint(equalTo: table.bottomAnchor, constant: -10),
+        ])
+        jump.addAction(UIAction { [weak self] _ in self?.scrollToBottom(animated: true) }, for: .touchUpInside)
+    }
+
+    private func showJump(_ on: Bool) {
+        guard on != jumpShown else { return }
+        jumpShown = on
+        if on { jump.isHidden = false; jump.transform = CGAffineTransform(scaleX: 0.7, y: 0.7) }
+        Theme.animate(on ? 0.18 : 0.15, {
+            self.jump.alpha = on ? 1 : 0
+            self.jump.transform = on ? .identity : CGAffineTransform(scaleX: 0.7, y: 0.7)
+        }, done: { [weak self] in
+            guard let self, !self.jumpShown else { return }
+            self.jump.isHidden = true
+        })
+    }
+
+    private func key(_ it: Item) -> String {
+        switch it {
+        case .date(let t): return "d:" + t
+        case .msg(let m, _, _): return "m:" + m.str("id")
+        }
+    }
+
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        guard indexPath.row < items.count else { return 60 }
+        if let h = heights[key(items[indexPath.row])] { return h }
+        if case .date = items[indexPath.row] { return 44 }
+        return 60
+    }
+
+    func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        guard indexPath.row < items.count else { return }
+        heights[key(items[indexPath.row])] = cell.frame.height
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -636,7 +726,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
         let own = page.contains { appended.contains($0.str("id")) && $0.bool("outgoing") }
         if page.contains(where: { appended.contains($0.str("id")) && !$0.bool("outgoing") }) { Typing.clear(conversationId) }
-        if wasBottom || own { scrollToBottom(animated: !first) }
+        if first {
+            pendingBottom = true
+            if table.bounds.height > 0 { pendingBottom = false; snapToBottom() }
+        } else if wasBottom || own {
+            scrollToBottom(animated: true)
+        } else if !appended.isEmpty {
+            showJump(true)
+        }
         markRead()
     }
 
@@ -657,9 +754,30 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         return out
     }
 
+    private func bottomOffset() -> CGFloat {
+        max(-table.adjustedContentInset.top, table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
+    }
+
+    /// Lands exactly on the last row; repeats while real heights replace estimates.
+    private func snapToBottom() {
+        for _ in 0..<3 {
+            table.layoutIfNeeded()
+            let y = bottomOffset()
+            if abs(table.contentOffset.y - y) < 1 { break }
+            table.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        }
+    }
+
     private func scrollToBottom(animated: Bool) {
+        showJump(false)
         guard !items.isEmpty else { return }
-        table.scrollToRow(at: IndexPath(row: items.count - 1, section: 0), at: .bottom, animated: animated && !Theme.reducedMotion)
+        table.layoutIfNeeded()
+        // Far away: jump near the end first so the animation stays short and no rows are skipped.
+        if !animated || Theme.reducedMotion || bottomOffset() - table.contentOffset.y > table.bounds.height * 2 {
+            snapToBottom()
+            return
+        }
+        table.setContentOffset(CGPoint(x: 0, y: bottomOffset()), animated: true)
     }
 
     private func markRead() {
@@ -669,7 +787,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     func scrollViewDidScroll(_ s: UIScrollView) {
         if s.contentOffset.y < 200 && s.isDragging { load(older: true) }
-        if atBottom { markRead() }
+        if atBottom {
+            showJump(false)
+            markRead()
+        } else if table.contentSize.height - (s.contentOffset.y + s.bounds.height) > s.bounds.height {
+            showJump(true)
+        }
     }
 
     // MARK: table

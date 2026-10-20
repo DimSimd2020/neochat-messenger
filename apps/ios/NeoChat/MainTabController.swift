@@ -1,7 +1,30 @@
 import UIKit
 
-/// Chats, contacts and profile behind the system tab bar.
+/// Chats, contacts and profile behind a floating glass tab bar, as on Android.
 final class MainTabController: UITabBarController {
+    private let pill = UIView()
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if pill.superview == nil {
+            pill.glass(28)
+            pill.isUserInteractionEnabled = false
+            pill.layer.shadowColor = UIColor.black.cgColor
+            pill.layer.shadowOpacity = 0.12
+            pill.layer.shadowRadius = 14
+            pill.layer.shadowOffset = CGSize(width: 0, height: 4)
+            tabBar.insertSubview(pill, at: 0)
+        }
+        let h = tabBar.bounds.height - tabBar.safeAreaInsets.bottom
+        pill.frame = CGRect(x: 12, y: -6, width: tabBar.bounds.width - 24, height: h + 10)
+        tabBar.sendSubviewToBack(pill)
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        pill.layer.borderColor = Theme.rim.resolvedColor(with: traitCollection).cgColor
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
@@ -10,7 +33,7 @@ final class MainTabController: UITabBarController {
         let profile = nav(ProfileViewController(), "Профиль", "person.crop.circle")
         viewControllers = [chats, contacts, profile]
         let a = UITabBarAppearance()
-        a.configureWithDefaultBackground()
+        a.configureWithTransparentBackground()
         tabBar.standardAppearance = a
         tabBar.scrollEdgeAppearance = a
         tabBar.tintColor = Theme.action
@@ -39,7 +62,9 @@ final class MainTabController: UITabBarController {
         a.titleTextAttributes = [.foregroundColor: Theme.text]
         n.navigationBar.standardAppearance = {
             let s = UINavigationBarAppearance()
-            s.configureWithDefaultBackground()
+            s.configureWithTransparentBackground()
+            s.backgroundEffect = UIBlurEffect(style: .systemUltraThinMaterial)
+            s.backgroundColor = Theme.glass.withAlphaComponent(0.35)
             s.titleTextAttributes = [.foregroundColor: Theme.text]
             return s
         }()
@@ -198,8 +223,11 @@ final class ChatsViewController: ListViewController {
         search.searchBar.scopeButtonTitles = ["Все", "Личные", "Группы"]
         search.searchBar.showsScopeBar = true
         search.searchBar.delegate = self
+        // Bar items lay custom views out with Auto Layout: without constraints the logo stretched wide.
         let logo = UIImageView(image: UIImage(named: "Logo"))
-        logo.frame = CGRect(x: 0, y: 0, width: 28, height: 28)
+        logo.contentMode = .scaleAspectFit
+        logo.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([logo.widthAnchor.constraint(equalToConstant: 28), logo.heightAnchor.constraint(equalToConstant: 28)])
         navigationItem.leftBarButtonItem = UIBarButtonItem(customView: logo)
         title = "NeoChat"
         updateBarItems()
