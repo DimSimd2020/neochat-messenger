@@ -47,13 +47,20 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      - name: Android SDK
+        run: |
+          ANDROID_HOME=/usr/local/lib/android/sdk
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SM=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | tail -n1)
+          yes | "$SM" --licenses >/dev/null || true
+          "$SM" "platforms;android-35" "build-tools;35.0.0"
 
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
           ndk-version: r26d
-          link-to-sdk: true
+          add-to-path: true
 
       - name: Tools
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler perl
