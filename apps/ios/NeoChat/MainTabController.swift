@@ -58,6 +58,7 @@ final class RowCell: UITableViewCell {
     let subtitle = label("", 15, color: Theme.muted)
     let time = label("", 13, color: Theme.muted)
     let badge = PaddedBadge()
+    let pin = UIImageView(image: UIImage(systemName: "pin.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)))
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -70,7 +71,10 @@ final class RowCell: UITableViewCell {
         time.setContentHuggingPriority(.required, for: .horizontal)
         let top = UIStackView(arrangedSubviews: [title, time])
         top.spacing = 8
-        let bottom = UIStackView(arrangedSubviews: [subtitle, badge])
+        pin.tintColor = Theme.muted
+        pin.isHidden = true
+        pin.setContentHuggingPriority(.required, for: .horizontal)
+        let bottom = UIStackView(arrangedSubviews: [subtitle, pin, badge])
         bottom.spacing = 8
         bottom.alignment = .center
         let text = UIStackView(arrangedSubviews: [top, bottom])
@@ -135,12 +139,12 @@ class ListViewController: UITableViewController, UISearchResultsUpdating {
         definesPresentationContext = true
         NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { [weak self] n in
             guard let self, let t = (n.userInfo as? JSON)?.str("type"), self.reacts(to: t) else { return }
-            if self.refreshPending { return }
-            self.refreshPending = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                self.refreshPending = false
-                self.reload()
-            }
+            self.scheduleReload()
+        }
+        NotificationCenter.default.addObserver(forName: .prefsChanged, object: nil, queue: .main) { [weak self] _ in self?.scheduleReload() }
+        NotificationCenter.default.addObserver(forName: .typingChanged, object: nil, queue: .main) { [weak self] _ in
+            guard let self, !self.rows.isEmpty else { return }
+            self.tableView.reloadData()
         }
         reload()
     }
@@ -148,6 +152,15 @@ class ListViewController: UITableViewController, UISearchResultsUpdating {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         reload()
+    }
+
+    func scheduleReload() {
+        if refreshPending { return }
+        refreshPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            self.refreshPending = false
+            self.reload()
+        }
     }
 
     func reacts(to type: String) -> Bool { false }
@@ -176,6 +189,8 @@ class ListViewController: UITableViewController, UISearchResultsUpdating {
 final class ChatsViewController: ListViewController {
     private var filter = 0
     private var all: [JSON] = []
+    private var archived: [JSON] = []
+    private var presenceTimer: Timer?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -183,53 +198,119 @@ final class ChatsViewController: ListViewController {
         search.searchBar.scopeButtonTitles = ["Все", "Личные", "Группы"]
         search.searchBar.showsScopeBar = true
         search.searchBar.delegate = self
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "square.and.pencil"), primaryAction: UIAction { [weak self] _ in
-            self?.presentSheet(NewChatViewController())
-        })
-        navigationItem.rightBarButtonItem?.accessibilityLabel = "Новый чат"
         let logo = UIImageView(image: UIImage(named: "Logo"))
         logo.frame = CGRect(x: 0, y: 0, width: 28, height: 28)
         navigationItem.leftBarButtonItem = UIBarButtonItem(customView: logo)
         title = "NeoChat"
+        updateBarItems()
     }
 
-    override func reacts(to t: String) -> Bool { ["conversations_changed", "contacts_changed", "identity_changed", "messages_changed", "sync_reset", "connection"].contains(t) }
+    private func updateBarItems() {
+        let compose = UIBarButtonItem(image: UIImage(systemName: "square.and.pencil"), primaryAction: UIAction { [weak self] _ in
+            self?.presentSheet(NewChatViewController())
+        })
+        compose.accessibilityLabel = "Новый чат"
+        let sorts = chatSorts.map { k, name in
+            UIAction(title: name, state: k == Prefs.chatSort ? .on : .off) { [weak self] _ in
+                Prefs.set("chat_sort", k)
+                self?.updateBarItems()
+            }
+        }
+        let sort = UIBarButtonItem(image: UIImage(systemName: "arrow.up.arrow.down"), menu: UIMenu(title: "Сортировка чатов", children: sorts))
+        sort.accessibilityLabel = "Сортировка чатов"
+        navigationItem.rightBarButtonItems = [compose, sort]
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        refreshPresence()
+        presenceTimer?.invalidate()
+        presenceTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refreshPresence() }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        presenceTimer?.invalidate()
+        presenceTimer = nil
+    }
+
+    /// Online dots for direct chats, once a minute while the list is visible.
+    private func refreshPresence() {
+        let ids = Set((all + archived).filter { $0.str("kind") == "direct" }.map { $0.str("peer_user_id") }.filter { !$0.isEmpty })
+        guard !ids.isEmpty else { return }
+        Core.shared.call("presence", ["user_ids": Array(ids.prefix(200)), "tz_offset": tzOffsetMinutes]) { [weak self] r in
+            if case .success = r { self?.reload() }
+        }
+    }
+
+    override func reacts(to t: String) -> Bool { ["conversations_changed", "contacts_changed", "identity_changed", "messages_changed", "sync_reset", "connection", "presence"].contains(t) }
 
     override func reload() {
         let q = query
-        Core.shared.call("list_conversations", ["query": q]) { [weak self] r in
+        Core.shared.call("list_conversations", ["query": q, "sort": Prefs.chatSort]) { [weak self] r in
             guard let self, q == self.query, case .success(let v) = r else { return }
-            self.all = v as? [JSON] ?? []
-            self.applyFilter()
+            let list = v as? [JSON] ?? []
+            guard q.isEmpty else {
+                self.all = list
+                self.applyFilter()
+                return
+            }
+            Core.shared.call("list_conversations", ["archived": true, "sort": "activity"]) { ar in
+                guard q == self.query else { return }
+                if case .success(let av) = ar { self.archived = av as? [JSON] ?? [] }
+                self.all = list
+                self.applyFilter()
+            }
         }
     }
 
     private func applyFilter() {
-        let rows = all.filter { filter == 0 || (filter == 1 ? $0.str("kind") == "direct" : ["group", "channel"].contains($0.str("kind"))) }
+        var rows = all.filter { filter == 0 || (filter == 1 ? $0.str("kind") == "direct" : ["group", "channel"].contains($0.str("kind"))) }
+        if query.isEmpty && filter == 0 && !archived.isEmpty {
+            let unread = archived.reduce(0) { $0 + $1.int("unread") }
+            let titles = archived.prefix(4).map { $0.str("title") }.joined(separator: ", ")
+            let summary: JSON = ["_archive": true, "count": archived.count, "unread": unread, "titles": titles]
+            rows.insert(summary, at: 0)
+        }
         apply(rows, empty: all.isEmpty && query.isEmpty ? "Чатов пока нет. Начните переписку с человеком по его имени пользователя." : "Ничего не нашли")
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: RowCell.id, for: indexPath) as! RowCell
         let c = rows[indexPath.row]
-        cell.avatar.set(c.str("title"), seed: c.str("peer_user_id").isEmpty ? c.str("id") : c.str("peer_user_id"))
-        cell.title.text = c.str("title")
-        cell.time.text = formatListTime(c.int64("last_activity"))
-        cell.badge.set(c.int("unread"))
-        var preview = c.str("last_preview").replacingOccurrences(of: "\n", with: " ")
-        var color = Theme.muted
-        let draft = c.str("draft").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !draft.isEmpty { preview = "Черновик: " + draft; color = Theme.accent }
-        if !c.arr("key_changed_users").isEmpty || !(c["key_changed_users"] as? [Any] ?? []).isEmpty { preview = "Ключ собеседника изменился"; color = Theme.warning }
-        cell.subtitle.text = preview
-        cell.subtitle.textColor = color
-        cell.accessibilityLabel = [c.str("title"), c.int("unread") > 0 ? "непрочитанных: \(c.int("unread"))" : "", preview, cell.time.text ?? ""].filter { !$0.isEmpty }.joined(separator: ", ")
+        if c.bool("_archive") {
+            cell.avatar.setIcon("archivebox.fill")
+            cell.title.text = "Архив"
+            cell.time.text = ""
+            cell.badge.set(c.int("unread"))
+            cell.pin.isHidden = true
+            cell.subtitle.text = c.str("titles")
+            cell.subtitle.textColor = Theme.muted
+            cell.accessibilityLabel = "Архив, чатов: \(c.int("count"))" + (c.int("unread") > 0 ? ", непрочитанных: \(c.int("unread"))" : "")
+            return cell
+        }
+        bindChatCell(cell, c)
         return cell
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        navigationController?.pushViewController(ChatViewController(conversationId: rows[indexPath.row].str("id")), animated: !Theme.reducedMotion)
+        let c = rows[indexPath.row]
+        if c.bool("_archive") {
+            AppLock.unlockArchive(from: self) { [weak self] in
+                self?.navigationController?.pushViewController(ArchiveViewController(), animated: !Theme.reducedMotion)
+            }
+            return
+        }
+        navigationController?.pushViewController(ChatViewController(conversationId: c.str("id")), animated: !Theme.reducedMotion)
+    }
+
+    override func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
+        chatSwipe(self, rows[indexPath.row], archive: false)
+    }
+
+    override func tableView(_ tableView: UITableView, leadingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
+        pinSwipe(self, rows[indexPath.row])
     }
 }
 
@@ -251,12 +332,17 @@ final class ContactsViewController: ListViewController {
             UIBarButtonItem(image: UIImage(systemName: "person.badge.plus"), primaryAction: UIAction { [weak self] _ in
                 self?.presentSheet(NewContactViewController())
             }),
+            UIBarButtonItem(image: UIImage(systemName: "qrcode.viewfinder"), primaryAction: UIAction { [weak self] _ in
+                guard let self else { return }
+                ContactQr.scan(from: self)
+            }),
             UIBarButtonItem(image: UIImage(systemName: "phone.arrow.up.right"), primaryAction: UIAction { [weak self] _ in
                 self?.presentSheet(RecentCallsViewController())
             }),
         ]
         navigationItem.rightBarButtonItems?[0].accessibilityLabel = "Новый контакт"
-        navigationItem.rightBarButtonItems?[1].accessibilityLabel = "Недавние звонки"
+        navigationItem.rightBarButtonItems?[1].accessibilityLabel = "Добавить по QR-коду"
+        navigationItem.rightBarButtonItems?[2].accessibilityLabel = "Недавние звонки"
         updateSortMenu()
     }
 
@@ -314,14 +400,18 @@ final class ProfileViewController: UIViewController {
     private let avatar = AvatarView(size: 88)
     private let name = label("", 24, .bold)
     private let sub = label("", 15, color: Theme.muted)
+    private let bio = label("", 15)
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
         name.textAlignment = .center
         sub.textAlignment = .center
+        bio.textAlignment = .center
+        bio.isHidden = true
         let card = UIStackView(arrangedSubviews: [
-            row("pencil", "Изменить имя") { [weak self] in self?.editName() },
+            row("pencil", "Имя и описание") { [weak self] in self?.presentSheet(EditProfileViewController()) },
+            row("qrcode", "Мой QR-код") { [weak self] in self?.presentSheet(MyQrViewController()) },
             row("laptopcomputer.and.iphone", "Устройства") { [weak self] in self?.presentSheet(DevicesViewController()) },
             row("gearshape", "Настройки") { [weak self] in self?.presentSheet(SettingsViewController()) },
         ])
@@ -329,11 +419,11 @@ final class ProfileViewController: UIViewController {
         card.glass(25)
         card.isLayoutMarginsRelativeArrangement = true
         card.layoutMargins = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
-        let stack = UIStackView(arrangedSubviews: [avatar, name, sub, card])
+        let stack = UIStackView(arrangedSubviews: [avatar, name, sub, bio, card])
         stack.axis = .vertical
         stack.alignment = .center
         stack.spacing = 10
-        stack.setCustomSpacing(26, after: sub)
+        stack.setCustomSpacing(26, after: bio)
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -342,33 +432,25 @@ final class ProfileViewController: UIViewController {
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             card.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
-        Core.shared.call("status") { [weak self] r in
-            guard case .success(let v) = r, let s = v as? JSON else { return }
-            let display = s.str("display_name").isEmpty ? s.str("username") : s.str("display_name")
-            self?.avatar.set(display, seed: s.str("user_id"))
-            self?.name.text = display
-            self?.sub.text = "@" + s.str("username") + (s.str("number").isEmpty ? "" : " · ID " + s.str("number"))
-        }
+        NotificationCenter.default.addObserver(forName: .prefsChanged, object: nil, queue: .main) { [weak self] _ in self?.reload() }
+        reload()
     }
 
-    private func editName() {
-        let a = UIAlertController(title: "Имя", message: "Имя видят ваши собеседники. Никнейм и ID не меняются.", preferredStyle: .alert)
-        a.addTextField { [weak self] f in
-            f.text = self?.name.text
-            f.autocapitalizationType = .words
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        reload()
+    }
+
+    private func reload() {
+        Core.shared.call("status") { [weak self] r in
+            guard let self, case .success(let v) = r, let s = v as? JSON else { return }
+            let display = s.str("display_name").isEmpty ? s.str("username") : s.str("display_name")
+            self.avatar.set(display, seed: s.str("user_id"))
+            self.name.text = display
+            self.sub.text = "@" + s.str("username") + (s.str("number").isEmpty ? "" : " · ID " + s.str("number"))
+            self.bio.text = s.str("bio")
+            self.bio.isHidden = s.str("bio").isEmpty
         }
-        a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
-        a.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self, weak a] _ in
-            let n = (a?.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespaces)
-            guard !n.isEmpty else { self?.toast("Введите имя"); return }
-            Core.shared.call("set_profile", ["display_name": n]) { r in
-                switch r {
-                case .failure(let e): self?.toast(e.message)
-                case .success: self?.name.text = n
-                }
-            }
-        })
-        present(a, animated: !Theme.reducedMotion)
     }
 
     private func row(_ icon: String, _ text: String, _ action: @escaping () -> Void) -> UIView {

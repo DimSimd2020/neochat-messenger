@@ -4,19 +4,22 @@ import UIKit
 /// Full-screen camera that reads a QR code with the given prefix. Frames stay on the device.
 final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     private let prefix: String
+    private let wrong: String
     private let onResult: (String) -> Void
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "app.neochat.qr")
-    private let hint = label("Наведите камеру на QR-код на экране входа компьютера", 16, .medium, color: .white)
+    private let hint = label("", 16, .medium, color: .white)
     private var preview: AVCaptureVideoPreviewLayer?
     private let frame = CAShapeLayer()
     private let dim = CAShapeLayer()
     private var done = false
 
-    init(prefix: String, onResult: @escaping (String) -> Void) {
+    init(prefix: String, hint: String, wrong: String, onResult: @escaping (String) -> Void) {
         self.prefix = prefix
+        self.wrong = wrong
         self.onResult = onResult
         super.init(nibName: nil, bundle: nil)
+        self.hint.text = hint
         modalPresentationStyle = .fullScreen
         modalTransitionStyle = .crossDissolve
     }
@@ -24,8 +27,9 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     required init?(coder: NSCoder) { fatalError() }
 
     /// Asks for camera access when needed, then presents the scanner.
-    static func present(from host: UIViewController, prefix: String, onResult: @escaping (String) -> Void) {
-        let show = { host.present(QrScannerViewController(prefix: prefix, onResult: onResult), animated: !Theme.reducedMotion) }
+    static func present(from host: UIViewController, prefix: String, hint: String = "Наведите камеру на QR-код на экране входа компьютера",
+                        wrong: String = "Это не QR-код входа NeoChat", onResult: @escaping (String) -> Void) {
+        let show = { host.present(QrScannerViewController(prefix: prefix, hint: hint, wrong: wrong, onResult: onResult), animated: !Theme.reducedMotion) }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: show()
         case .notDetermined:
@@ -115,7 +119,7 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !done, let text = (objects.first as? AVMetadataMachineReadableCodeObject)?.stringValue else { return }
         guard text.hasPrefix(prefix) else {
-            hint.text = "Это не QR-код входа NeoChat"
+            hint.text = wrong
             return
         }
         done = true

@@ -10,8 +10,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         try? Core.shared.open()
         UNUserNotificationCenter.current().delegate = self
         NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { n in
-            guard let ev = n.userInfo as? JSON, ev.str("type") == "notify" else { return }
-            Notifier.post(ev)
+            guard let ev = n.userInfo as? JSON else { return }
+            switch ev.str("type") {
+            case "notify":
+                Typing.clear(ev.str("conversation_id"))
+                Notifier.post(ev)
+            case "typing": Typing.onEvent(ev)
+            default: break
+            }
         }
         // Without a signed push entitlement the app fetches in the background when iOS allows it.
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshTask, using: nil) { task in
@@ -82,15 +88,26 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         Theme.apply(to: w, animated: false)
         w.rootViewController = RootViewController()
         w.makeKeyAndVisible()
+        AppLock.launched(ws)
+    }
+
+    func sceneWillEnterForeground(_ scene: UIScene) {
+        if let ws = scene as? UIWindowScene { AppLock.foreground(ws) }
+    }
+
+    func sceneWillResignActive(_ scene: UIScene) {
+        if let ws = scene as? UIWindowScene { AppLock.resigned(ws) }
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
+        AppLock.activated()
         Core.shared.call("set_foreground", ["active": true])
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
         Core.shared.call("set_foreground", ["active": false])
         AppDelegate.schedule()
+        if let ws = scene as? UIWindowScene { AppLock.backgrounded(ws) }
     }
 }
 
@@ -120,15 +137,38 @@ final class RootViewController: UIViewController {
     }
 
     /// iOS cannot install an unsigned build itself: the banner opens the IPA link in Safari
-    /// so it can be installed with Scarlet. Checked at most every 6 hours.
-    private func checkUpdate() {
-        guard updateBanner == nil, Date().timeIntervalSince(lastUpdateCheck) > 6 * 3600,
+    /// so it can be installed with Scarlet. Checked at most hourly, or on request from settings.
+    func checkUpdate(manual: Bool = false) {
+        guard manual || (updateBanner == nil && Date().timeIntervalSince(lastUpdateCheck) > 3600),
               let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return }
         lastUpdateCheck = Date()
         Core.shared.call("check_update", ["platform": "ios", "version": version]) { [weak self] r in
-            guard case .success(let v) = r, let o = v as? JSON, o.bool("available"), let url = URL(string: o.str("url")) else { return }
-            self?.showUpdateBanner(o.str("version"), url)
+            switch r {
+            case .failure(let e): if manual { self?.topToast(e.message) }
+            case .success(let v):
+                guard let o = v as? JSON, o.bool("available"), let url = URL(string: o.str("url")) else {
+                    if manual { self?.topToast("Установлена последняя версия \(version)") }
+                    return
+                }
+                if manual { self?.offerUpdate(o.str("version"), url) }
+                self?.showUpdateBanner(o.str("version"), url)
+            }
         }
+    }
+
+    private func offerUpdate(_ version: String, _ url: URL) {
+        var top: UIViewController = self
+        while let p = top.presentedViewController { top = p }
+        let a = UIAlertController(title: "Доступна версия \(version)", message: "Скачайте IPA и установите его через Scarlet поверх текущей версии.", preferredStyle: .alert)
+        a.addAction(UIAlertAction(title: "Позже", style: .cancel))
+        a.addAction(UIAlertAction(title: "Скачать", style: .default) { _ in UIApplication.shared.open(url) })
+        top.present(a, animated: !Theme.reducedMotion)
+    }
+
+    private func topToast(_ text: String) {
+        var top: UIViewController = self
+        while let p = top.presentedViewController { top = p }
+        top.toast(text)
     }
 
     private func showUpdateBanner(_ version: String, _ url: URL) {

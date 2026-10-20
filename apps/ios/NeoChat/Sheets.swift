@@ -94,9 +94,15 @@ final class NewContactViewController: SheetViewController {
         err.isHidden = true
         let add = PillButton("Добавить")
         [user, first, last].forEach(stack.addArrangedSubview)
+        let scan = PillButton("Сканировать QR-код", primary: false)
+        scan.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            ContactQr.scan(from: self)
+        }, for: .touchUpInside)
         muted("Поиск идёт только по точному никнейму: публичного каталога нет. Без своего имени контакт показывается под именем из его профиля.")
         stack.addArrangedSubview(err)
         stack.addArrangedSubview(add)
+        stack.addArrangedSubview(scan)
         add.addAction(UIAction { [weak self] _ in
             let f = (first.text ?? "").trimmingCharacters(in: .whitespaces)
             var u = (user.text ?? "").trimmingCharacters(in: .whitespaces)
@@ -307,54 +313,184 @@ final class DevicesViewController: SheetViewController {
 }
 
 final class SettingsViewController: SheetViewController {
+    private var showLastSeen = true
+    private var twoFactor = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Настройки"
-        heading("Тема")
+        build()
+        Core.shared.call("account_settings") { [weak self] r in
+            guard let self, case .success(let v) = r, let o = v as? JSON else { return }
+            self.showLastSeen = o["show_last_seen"] as? Bool ?? true
+            self.twoFactor = o.bool("two_factor")
+            self.build()
+        }
+    }
+
+    private func push(_ vc: UIViewController) {
+        navigationController?.pushViewController(vc, animated: !Theme.reducedMotion)
+    }
+
+    private func build() {
+        clear()
+        section("Аккаунт", [
+            NavRow("person.crop.circle", "Имя и описание") { [weak self] in self?.push(EditProfileViewController()) },
+            NavRow("qrcode", "Мой QR-код") { [weak self] in self?.push(MyQrViewController()) },
+            NavRow("qrcode.viewfinder", "Добавить контакт по QR-коду") { [weak self] in
+                guard let self else { return }
+                ContactQr.scan(from: self)
+            },
+            NavRow("laptopcomputer.and.iphone", "Устройства") { [weak self] in self?.push(DevicesViewController()) },
+        ])
+
+        var privacy: [UIView] = []
+        let lastSeen = NavRow("clock", "Время последнего визита", value: showLastSeen ? "Все" : "Никто") {}
+        lastSeen.addAction(UIAction { [weak self, weak lastSeen] _ in
+            guard let self, let lastSeen else { return }
+            self.choose("Кто видит время последнего визита", [(true, "Все"), (false, "Никто")], current: self.showLastSeen, from: lastSeen) { v, name in
+                Core.shared.call("set_last_seen_visible", ["visible": v]) { r in
+                    switch r {
+                    case .failure(let e): self.toast(e.message)
+                    case .success:
+                        self.showLastSeen = v
+                        lastSeen.value.text = name
+                    }
+                }
+            }
+        }, for: .touchUpInside)
+        privacy.append(lastSeen)
+        let has = AppLock.hasPasscode
+        privacy.append(NavRow("lock", "Код-пароль", value: has ? "Вкл." : "Выкл.") { [weak self] in
+            guard let self else { return }
+            if has { AppLock.disable(from: self) { self.build() } } else { AppLock.setPasscode(from: self) { self.build() } }
+        })
+        if has {
+            privacy.append(SwitchRow("iphone", "Вход в приложение по коду", on: AppLock.lockApp) { Prefs.set("lock_app", $0) })
+            privacy.append(SwitchRow("archivebox", "Вход в архив по коду", on: AppLock.lockArchive) { Prefs.set("lock_archive", $0) })
+            if let bio = AppLock.biometryName {
+                privacy.append(SwitchRow(bio == "Face ID" ? "faceid" : "touchid", bio, on: AppLock.useBio) { Prefs.set("lock_bio", $0) })
+            }
+            let current = AppLock.afterChoices.first { $0.0 == AppLock.lockAfter }?.1 ?? "Сразу"
+            let after = NavRow("timer", "Автоблокировка", value: current) {}
+            after.addAction(UIAction { [weak self, weak after] _ in
+                guard let self, let after else { return }
+                self.choose("Автоблокировка", AppLock.afterChoices, current: AppLock.lockAfter, from: after) { v, name in
+                    Prefs.set("lock_after", v)
+                    after.value.text = name
+                }
+            }, for: .touchUpInside)
+            privacy.append(after)
+        }
+        privacy.append(SwitchRow("eye.slash", "Скрывать в переключателе приложений", on: Prefs.bool("secure_screen", false)) { Prefs.set("secure_screen", $0) })
+        var tfRow: SwitchRow?
+        tfRow = SwitchRow("checkmark.shield", "Подтверждение входа", on: twoFactor) { [weak self] on in
+            Core.shared.call("set_two_factor", ["enabled": on]) { r in
+                switch r {
+                case .failure(let e): self?.toast(e.message); tfRow?.toggle.setOn(!on, animated: true)
+                case .success: self?.twoFactor = on
+                }
+            }
+        }
+        privacy.append(tfRow!)
+        section("Конфиденциальность", privacy, footer: "Если скрыть время визита, вы тоже не увидите его у других: останется «был(а) недавно» или «давно». Код-пароль хранится только на этом телефоне. Подтверждение входа запрашивает код из чата «NeoChat уведомления» при входе на новом устройстве.")
+
+        section("Уведомления", [
+            SwitchRow("bell", "Уведомления о сообщениях", on: Prefs.bool("notifications", true)) { Prefs.set("notifications", $0) },
+            NavRow("gear", "Настройки iOS") {
+                if let u = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(u) }
+            },
+        ], footer: "В уведомлении видно только название чата, без текста сообщения.")
+
         let theme = UISegmentedControl(items: ["Устройство", "День", "Ночь"])
         theme.selectedSegmentIndex = Theme.mode.rawValue
         theme.addAction(UIAction { _ in Theme.mode = Theme.Mode(rawValue: theme.selectedSegmentIndex) ?? .system }, for: .valueChanged)
-        stack.addArrangedSubview(theme)
-        muted("Размер текста следует системной настройке.")
-        let notify = toggleRow("Уведомления о новых сообщениях", on: UserDefaults.standard.object(forKey: "notifications") as? Bool ?? true) { on in
-            UserDefaults.standard.set(on, forKey: "notifications")
-        }
-        stack.addArrangedSubview(notify)
-        muted("В уведомлении видно только название чата. Мгновенные уведомления недоступны в этой сборке: новые сообщения приходят, когда приложение открыто или iOS разрешает фоновое обновление.")
-        var twoFactorSwitch: UISwitch?
-        let twoFactor = toggleRow("Подтверждение входа", on: false) { on in
-            Core.shared.call("set_two_factor", ["enabled": on]) { [weak self] r in
-                if case .failure(let e) = r { self?.toast(e.message); twoFactorSwitch?.setOn(!on, animated: true) }
+        let sizes: [(Double, String)] = [(15, "Мелкий"), (17, "Обычный"), (19, "Крупный"), (21, "Очень крупный")]
+        let size = NavRow("textformat.size", "Размер текста", value: sizes.first { CGFloat($0.0) == Prefs.textSize }?.1 ?? "Обычный") {}
+        size.addAction(UIAction { [weak self, weak size] _ in
+            guard let self, let size else { return }
+            self.choose("Размер текста в чатах", sizes, current: Double(Prefs.textSize), from: size) { v, name in
+                Prefs.set("text_size", v)
+                size.value.text = name
             }
-        }
-        twoFactorSwitch = twoFactor.arrangedSubviews.last as? UISwitch
-        stack.addArrangedSubview(twoFactor)
-        muted("При входе на новом устройстве понадобится код. Он придёт в чат «NeoChat уведомления» на ваших устройствах.")
-        Core.shared.call("account_settings") { r in
-            if case .success(let v) = r { twoFactorSwitch?.isOn = (v as? JSON)?["two_factor"] as? Bool ?? false }
-        }
+        }, for: .touchUpInside)
+        section("Оформление", [
+            padded(theme),
+            size,
+            SwitchRow("face.smiling", "Крупные эмодзи без текста", on: Prefs.bigEmoji) { Prefs.set("big_emoji", $0) },
+            SwitchRow("figure.walk", "Уменьшить анимацию", on: UserDefaults.standard.bool(forKey: "reduce_motion")) { Prefs.set("reduce_motion", $0) },
+        ])
+
+        let sort = NavRow("arrow.up.arrow.down", "Сортировка чатов", value: chatSorts.first { $0.0 == Prefs.chatSort }?.1 ?? "") {}
+        sort.addAction(UIAction { [weak self, weak sort] _ in
+            guard let self, let sort else { return }
+            self.choose("Сортировка чатов", chatSorts, current: Prefs.chatSort, from: sort) { v, name in
+                Prefs.set("chat_sort", v)
+                sort.value.text = name
+            }
+        }, for: .touchUpInside)
+        section("Чаты", [
+            sort,
+            SwitchRow("photo", "Автозагрузка фото", on: Prefs.autoload) { Prefs.set("autoload", $0) },
+        ], footer: "Смахните чат влево, чтобы убрать его в архив, и вправо, чтобы закрепить. Закрепить можно до 3 чатов.")
+
+        let cache = NavRow("trash", "Очистить кэш", value: sizeOf(cacheDirs())) {}
+        cache.addAction(UIAction { [weak self, weak cache] _ in
+            for d in self?.cacheDirs() ?? [] {
+                for f in (try? FileManager.default.contentsOfDirectory(at: d, includingPropertiesForKeys: nil)) ?? [] { try? FileManager.default.removeItem(at: f) }
+            }
+            Photos.cache.removeAllObjects()
+            cache?.value.text = self?.sizeOf(self?.cacheDirs() ?? [])
+            self?.toast("Кэш очищен")
+        }, for: .touchUpInside)
+        section("Данные", [cache], footer: "Удаляет временные файлы и расшифрованные копии фото. Переписка остаётся.")
+
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        section("О приложении", [
+            NavRow("info.circle", "Версия", value: version, chevron: false) {},
+            NavRow("arrow.down.circle", "Проверить обновления") { [weak self] in
+                (self?.view.window?.rootViewController as? RootViewController)?.checkUpdate(manual: true)
+            },
+        ])
+
         let logout = PillButton("Выйти из аккаунта", primary: false)
         logout.setTitleColor(Theme.warning, for: .normal)
         logout.addAction(UIAction { [weak self] _ in self?.confirmLogout() }, for: .touchUpInside)
-        stack.setCustomSpacing(24, after: stack.arrangedSubviews.last!)
         stack.addArrangedSubview(logout)
     }
 
-    private func toggleRow(_ text: String, on: Bool, _ change: @escaping (Bool) -> Void) -> UIStackView {
-        let s = UISwitch()
-        s.isOn = on
-        s.onTintColor = Theme.action
-        s.addAction(UIAction { _ in change(s.isOn) }, for: .valueChanged)
-        let row = UIStackView(arrangedSubviews: [label(text, 16), s])
-        row.alignment = .center
-        row.spacing = 12
-        return row
+    private func padded(_ v: UIView) -> UIView {
+        let wrap = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(v)
+        NSLayoutConstraint.activate([
+            v.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 10), v.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -10),
+            v.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 14), v.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -14),
+        ])
+        return wrap
+    }
+
+    private func cacheDirs() -> [URL] {
+        [FileManager.default.temporaryDirectory] + FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+    }
+
+    private func sizeOf(_ dirs: [URL]) -> String {
+        var total: Int64 = 0
+        for d in dirs {
+            let e = FileManager.default.enumerator(at: d, includingPropertiesForKeys: [.fileSizeKey])
+            while let f = e?.nextObject() as? URL {
+                total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            }
+        }
+        if total < 1024 * 1024 { return "\(total / 1024) КБ" }
+        return String(format: "%.1f МБ", Double(total) / 1048576).replacingOccurrences(of: ".", with: ",")
     }
 
     private func confirmLogout() {
         let a = UIAlertController(title: "Выйти из аккаунта?", message: "Ключи и переписка на этом телефоне будут удалены.", preferredStyle: .actionSheet)
         a.addAction(UIAlertAction(title: "Выйти", style: .destructive) { [weak self] _ in
             Core.shared.call("logout") { _ in
+                Prefs.set("has_passcode", false)
                 let root = self?.view.window?.rootViewController as? RootViewController
                 self?.dismiss(animated: true) { root?.start() }
             }
@@ -398,7 +534,11 @@ final class ConversationInfoViewController: SheetViewController {
             let members = c.arr("members")
             if c.str("kind") == "direct" {
                 let peer = c.str("peer_user_id")
-                self.stack.addArrangedSubview(self.personRow(c.str("title"), members.first { !$0.bool("me") }.map { "@" + $0.str("username") } ?? "", seed: peer))
+                let other = members.first { !$0.bool("me") }
+                let handle = other.map { "@" + $0.str("username") } ?? ""
+                let seen = c.obj("presence")?.str("text") ?? ""
+                self.stack.addArrangedSubview(self.personRow(c.str("title"), seen.isEmpty ? handle : handle + " · " + seen, seed: peer))
+                if let bio = other?.str("bio"), !bio.isEmpty { self.stack.addArrangedSubview(label(bio, 15)) }
                 Core.shared.call("contact_info", ["user_id": peer]) { r in
                     guard case .success(let iv) = r, let info = iv as? JSON else { return }
                     self.heading("Код безопасности")
@@ -434,7 +574,7 @@ final class ConversationInfoViewController: SheetViewController {
             let others = { (without: String, with: String) -> [String] in
                 members.filter { !$0.bool("me") && $0.str("user_id") != without }.map { $0.str("user_id") } + (with.isEmpty ? [] : [with])
             }
-            self.stack.addArrangedSubview(self.personRow(c.str("title"), channel ? "Канал" : "Группа", seed: self.cid))
+            self.stack.addArrangedSubview(self.personRow(c.str("title"), (channel ? "Канал · " : "Группа · ") + memberCount(c.int("member_count"), channel: channel), seed: self.cid))
             if !c.str("description").isEmpty { self.stack.addArrangedSubview(label(c.str("description"), 15)) }
             if c.bool("can_edit_info") && !gone {
                 let name = Field(channel ? "Название канала" : "Название группы")

@@ -7,8 +7,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.5.3"
-    CURRENT_PROJECT_VERSION: "9"
+    MARKETING_VERSION: "0.6.0"
+    CURRENT_PROJECT_VERSION: "10"
     TARGETED_DEVICE_FAMILY: "1"
     ENABLE_BITCODE: NO
 targets:
@@ -38,6 +38,7 @@ targets:
       - sdk: BackgroundTasks.framework
       - sdk: UserNotifications.framework
       - sdk: AVFoundation.framework
+      - sdk: LocalAuthentication.framework
     scheme:
       testTargets: [NeoChatUITests]
   NeoChatUITests:

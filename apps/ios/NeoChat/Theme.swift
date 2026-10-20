@@ -25,7 +25,7 @@ enum Theme {
     static let warning = dyn(0xF2C989, 0x805015)
     static let warningBg = dyn(0x382F24, 0xFFF3DD, 0.88, 0.92)
 
-    static var reducedMotion: Bool { UIAccessibility.isReduceMotionEnabled }
+    static var reducedMotion: Bool { UIAccessibility.isReduceMotionEnabled || UserDefaults.standard.bool(forKey: "reduce_motion") }
     static func ms(_ d: TimeInterval) -> TimeInterval { reducedMotion ? 0 : d }
     /// cubic-bezier(.22,.8,.25,1)
     static let curve = UICubicTimingParameters(controlPoint1: CGPoint(x: 0.22, y: 0.8), controlPoint2: CGPoint(x: 0.25, y: 1))
@@ -206,6 +206,10 @@ final class Field: UITextField {
 /// Initials avatar; the hue follows the seed so one person keeps one color.
 final class AvatarView: UIView {
     private let initials = UILabel()
+    private let icon = UIImageView()
+    private let dot = UIView()
+    /// Green dot for a person who is online now.
+    var online = false { didSet { dot.isHidden = !online } }
 
     init(size: CGFloat) {
         super.init(frame: .zero)
@@ -218,12 +222,40 @@ final class AvatarView: UIView {
         initials.textAlignment = .center
         initials.frame = CGRect(x: 0, y: 0, width: size, height: size)
         addSubview(initials)
+        icon.frame = CGRect(x: size * 0.25, y: size * 0.25, width: size * 0.5, height: size * 0.5)
+        icon.contentMode = .scaleAspectFit
+        icon.isHidden = true
+        addSubview(icon)
+        let d = max(10, size * 0.27)
+        dot.frame = CGRect(x: size - d * 0.85, y: size - d * 0.85, width: d, height: d)
+        dot.layer.cornerRadius = d / 2
+        dot.backgroundColor = Theme.rgb(0x3CC46B)
+        dot.layer.borderWidth = 2.5
+        dot.layer.borderColor = Theme.dyn(0x12213B, 0xE9F0FC).resolvedColor(with: traitCollection).cgColor
+        dot.isHidden = true
+        addSubview(dot)
         isAccessibilityElement = false
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        dot.layer.borderColor = Theme.dyn(0x12213B, 0xE9F0FC).resolvedColor(with: traitCollection).cgColor
+    }
+
+    /// A symbol instead of initials, e.g. for the archive row.
+    func setIcon(_ name: String) {
+        initials.text = ""
+        icon.image = UIImage(systemName: name, withConfiguration: UIImage.SymbolConfiguration(weight: .semibold))
+        icon.tintColor = .white
+        icon.isHidden = false
+        backgroundColor = Theme.rgb(0x5B6B85)
+        online = false
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func set(_ name: String, seed: String) {
+        icon.isHidden = true
         var out = ""
         for part in name.split(separator: " ") {
             if let ch = part.first(where: { $0.isLetter || $0.isNumber }) { out.append(ch.uppercased()) }

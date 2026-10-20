@@ -138,7 +138,7 @@ private enum Item {
 
 /// One conversation: history, composer and header with details.
 final class ChatViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UITextViewDelegate, UIDocumentPickerDelegate, QLPreviewControllerDataSource,
-    PHPickerViewControllerDelegate {
+    PHPickerViewControllerDelegate, UIPopoverPresentationControllerDelegate {
     let conversationId: String
     private var conv: JSON = [:]
     private var messages: [JSON] = []
@@ -160,7 +160,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private var sendWidth: NSLayoutConstraint!
     private var inputHeight: NSLayoutConstraint!
     private let replyBar = UIStackView()
+    private let replyTitle = label("", 13, .semibold, color: Theme.accent)
     private let replyText = label("", 14, color: Theme.muted)
+    private let titleLabel = label("", 17, .semibold)
+    private let subLabel = label("", 12, color: Theme.muted)
+    private let titleBox = UIStackView()
+    private var baseSub = ""
+    private var peerOnline = false
+    private var presenceTimer: Timer?
     private var replyTo: JSON?
     private var blocked = false
     private let goneLabel = label("", 15, color: Theme.muted)
@@ -214,7 +221,17 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         goneLabel.textAlignment = .center
         goneLabel.isHidden = true
 
-        let stack = UIStackView(arrangedSubviews: [notice, table, replyBar, composer, goneLabel])
+        titleLabel.numberOfLines = 1
+        subLabel.numberOfLines = 1
+        titleBox.addArrangedSubview(titleLabel)
+        titleBox.addArrangedSubview(subLabel)
+        titleBox.axis = .vertical
+        titleBox.alignment = .center
+        titleBox.isAccessibilityElement = true
+        titleBox.accessibilityTraits = .header
+        navigationItem.titleView = titleBox
+
+        let stack = UIStackView(arrangedSubviews: [notice, table, composer, goneLabel])
         stack.axis = .vertical
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -231,9 +248,15 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             case "messages_changed" where ev.str("conversation_id") == self.conversationId: self.scheduleReload()
             case "sync_reset": self.scheduleReload(); self.refreshConversation(first: false)
             case "conversations_changed", "contacts_changed", "identity_changed", "connection": self.refreshConversation(first: false)
+            case "presence" where ev.str("user_id") == self.conv.str("peer_user_id"): self.refreshConversation(first: false)
             default: break
             }
         }
+        NotificationCenter.default.addObserver(forName: .typingChanged, object: nil, queue: .main) { [weak self] n in
+            guard let self, n.object as? String == self.conversationId else { return }
+            self.updateSubtitle()
+        }
+        NotificationCenter.default.addObserver(forName: .prefsChanged, object: nil, queue: .main) { [weak self] _ in self?.table.reloadData() }
         refreshConversation(first: true)
         load(older: false)
     }
@@ -242,11 +265,15 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         super.viewDidAppear(animated)
         Notifier.visibleConversation = conversationId
         markRead()
+        presenceTimer?.invalidate()
+        presenceTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refreshPresence() }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         if Notifier.visibleConversation == conversationId { Notifier.visibleConversation = nil }
+        presenceTimer?.invalidate()
+        presenceTimer = nil
         Core.shared.call("set_draft", ["conversation_id": conversationId, "text": input.text ?? ""])
     }
 
@@ -263,6 +290,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     private func buildComposer() {
         composer.glass(26)
+        let row = UIView()
         attach.setImage(UIImage(systemName: "paperclip"), for: .normal)
         attach.tintColor = Theme.text
         attach.accessibilityLabel = "Прикрепить"
@@ -286,41 +314,66 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         send.clipsToBounds = true
         for v in [attach, input, send, placeholder] {
             v.translatesAutoresizingMaskIntoConstraints = false
-            composer.addSubview(v)
+            row.addSubview(v)
         }
         placeholder.isUserInteractionEnabled = false
         sendWidth = send.widthAnchor.constraint(equalToConstant: 0)
         inputHeight = input.heightAnchor.constraint(equalToConstant: 46)
         NSLayoutConstraint.activate([
-            attach.leadingAnchor.constraint(equalTo: composer.leadingAnchor, constant: 6),
-            attach.bottomAnchor.constraint(equalTo: composer.bottomAnchor, constant: -1),
+            attach.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 6),
+            attach.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -1),
             attach.widthAnchor.constraint(equalToConstant: 44), attach.heightAnchor.constraint(equalToConstant: 44),
             input.leadingAnchor.constraint(equalTo: attach.trailingAnchor),
-            input.topAnchor.constraint(equalTo: composer.topAnchor),
-            input.bottomAnchor.constraint(equalTo: composer.bottomAnchor),
+            input.topAnchor.constraint(equalTo: row.topAnchor),
+            input.bottomAnchor.constraint(equalTo: row.bottomAnchor),
             inputHeight,
             send.leadingAnchor.constraint(equalTo: input.trailingAnchor, constant: 4),
-            send.trailingAnchor.constraint(equalTo: composer.trailingAnchor, constant: -4),
-            send.bottomAnchor.constraint(equalTo: composer.bottomAnchor, constant: -3),
+            send.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -4),
+            send.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -3),
             send.heightAnchor.constraint(equalToConstant: 40), sendWidth,
             placeholder.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 9),
             placeholder.centerYAnchor.constraint(equalTo: input.centerYAnchor),
         ])
         replyBar.axis = .horizontal
-        replyBar.glass(18)
+        replyBar.spacing = 10
+        replyBar.alignment = .center
         replyBar.isLayoutMarginsRelativeArrangement = true
-        replyBar.layoutMargins = UIEdgeInsets(top: 6, left: 14, bottom: 6, right: 6)
+        replyBar.layoutMargins = UIEdgeInsets(top: 9, left: 16, bottom: 0, right: 8)
+        let line = UIView()
+        line.backgroundColor = Theme.accent
+        line.layer.cornerRadius = 1.5
+        line.widthAnchor.constraint(equalToConstant: 3).isActive = true
+        line.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        replyTitle.numberOfLines = 1
         replyText.numberOfLines = 1
-        let cancel = UIButton(type: .close)
+        let col = UIStackView(arrangedSubviews: [replyTitle, replyText])
+        col.axis = .vertical
+        col.spacing = 1
+        let cancel = UIButton(type: .system)
+        cancel.setImage(UIImage(systemName: "xmark.circle.fill"), for: .normal)
+        cancel.tintColor = Theme.muted
         cancel.accessibilityLabel = "Отменить ответ"
+        cancel.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        cancel.heightAnchor.constraint(equalToConstant: 36).isActive = true
         cancel.addAction(UIAction { [weak self] _ in self?.setReply(nil) }, for: .touchUpInside)
-        replyBar.addArrangedSubview(replyText)
+        replyBar.addArrangedSubview(line)
+        replyBar.addArrangedSubview(col)
         replyBar.addArrangedSubview(cancel)
         replyBar.isHidden = true
+        let box = UIStackView(arrangedSubviews: [replyBar, row])
+        box.axis = .vertical
+        box.translatesAutoresizingMaskIntoConstraints = false
+        composer.addSubview(box)
+        NSLayoutConstraint.activate([
+            box.topAnchor.constraint(equalTo: composer.topAnchor), box.bottomAnchor.constraint(equalTo: composer.bottomAnchor),
+            box.leadingAnchor.constraint(equalTo: composer.leadingAnchor), box.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+        ])
     }
 
     func textViewDidChange(_ tv: UITextView) {
         placeholder.isHidden = !tv.text.isEmpty
+        // The core sends "печатает" at most every 4 s.
+        if tv.isFirstResponder && !tv.text.isEmpty && !blocked { Core.shared.call("send_typing", ["conversation_id": conversationId]) }
         // Grows to five lines, then scrolls.
         let lineH = tv.font?.lineHeight ?? 20
         let maxH = lineH * 5 + 24
@@ -346,10 +399,15 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         replyTo = m
         if let m {
             let t = m.str("kind") == "file" ? "Файл" : m.str("text").replacingOccurrences(of: "\n", with: " ")
-            replyText.text = "Ответ: \(m.str("sender_name")) — \(t)"
+            replyTitle.text = "В ответ " + m.str("sender_name")
+            replyText.text = t
             input.becomeFirstResponder()
         }
-        Theme.animate(0.18) { self.replyBar.isHidden = m == nil }
+        replyBar.accessibilityLabel = m == nil ? nil : (replyTitle.text ?? "") + ": " + (replyText.text ?? "")
+        Theme.animate(0.18) {
+            self.replyBar.isHidden = m == nil
+            self.view.layoutIfNeeded()
+        }
     }
 
     private func sendText() {
@@ -469,11 +527,15 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.conv = c
             let members = c.arr("members")
             let channel = c.str("kind") == "channel"
-            let sub = self.group ? "\(c.int("member_count")) участн." : channel ? "\(c.int("member_count")) подписч."
-                : members.first { !$0.bool("me") }.map { "@" + $0.str("username") } ?? ""
-            self.navigationItem.titleView = self.titleView(c.str("title"), sub)
             let system = c.str("kind") == "system"
-            if system { self.navigationItem.titleView = self.titleView(c.str("title"), "Системные сообщения") }
+            let handle = members.first { !$0.bool("me") }.map { "@" + $0.str("username") } ?? ""
+            let seen = c.obj("presence")?.str("text") ?? ""
+            self.peerOnline = c.obj("presence")?.bool("online") ?? false
+            self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) : channel ? memberCount(c.int("member_count"), channel: true)
+                : seen.isEmpty ? handle : seen
+            self.titleLabel.text = c.str("title")
+            self.updateSubtitle()
+            if first { self.refreshPresence() }
             let gone = c.bool("left") || c.bool("archived") || system
             let mute = gone || !(c["can_post"] as? Bool ?? true)
             if mute { self.input.resignFirstResponder() }
@@ -498,18 +560,20 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
     }
 
-    private func titleView(_ title: String, _ sub: String) -> UIView {
-        let t = label(title, 17, .semibold)
-        t.numberOfLines = 1
-        let s = label(sub, 12, color: Theme.muted)
-        s.numberOfLines = 1
-        let v = UIStackView(arrangedSubviews: [t, s])
-        v.axis = .vertical
-        v.alignment = .center
-        v.isAccessibilityElement = true
-        v.accessibilityLabel = title + ", " + sub
-        v.accessibilityTraits = .header
-        return v
+    /// "печатает…" wins over presence and the member count while it lasts.
+    private func updateSubtitle() {
+        let typing = Typing.text(conversationId, group: conv.str("kind") != "direct")
+        subLabel.text = typing ?? baseSub
+        subLabel.textColor = typing != nil || peerOnline ? Theme.accent : Theme.muted
+        titleBox.accessibilityLabel = (titleLabel.text ?? "") + ", " + (subLabel.text ?? "")
+    }
+
+    private func refreshPresence() {
+        let peer = conv.str("peer_user_id")
+        guard conv.str("kind") == "direct", !peer.isEmpty else { return }
+        Core.shared.call("presence", ["user_ids": [peer], "tz_offset": tzOffsetMinutes]) { [weak self] r in
+            if case .success = r { self?.refreshConversation(first: false) }
+        }
     }
 
     private var atBottom: Bool {
@@ -571,6 +635,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             return
         }
         let own = page.contains { appended.contains($0.str("id")) && $0.bool("outgoing") }
+        if page.contains(where: { appended.contains($0.str("id")) && !$0.bool("outgoing") }) { Typing.clear(conversationId) }
         if wasBottom || own { scrollToBottom(animated: !first) }
         markRead()
     }
@@ -623,6 +688,11 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             c.onRetry = { [weak self] in self?.retry(m) }
             c.onPhoto = { [weak self] in self?.openPhoto(m) }
             c.onVote = { [weak self] i in self?.vote(m, i) }
+            c.onTap = { [weak self, weak c] in
+                guard let self, let c else { return }
+                self.showMenu(m, from: c.bubbleView)
+            }
+            c.onReact = { [weak self] e in self?.react(m, e) }
             if animateIds.remove(m.str("id")) != nil, !Theme.reducedMotion {
                 c.contentView.alpha = 0
                 c.contentView.transform = CGAffineTransform(translationX: 0, y: 12)
@@ -637,45 +707,87 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: false)
-        guard case .msg(let m, _, _) = items[indexPath.row] else { return }
-        if isImage(m) { openPhoto(m) } else if m.str("kind") == "file" { openFile(m) } else if links(m).count == 1, let u = URL(string: links(m)[0]) {
-            UIApplication.shared.open(u)
-        }
     }
 
     func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         guard case .msg(let m, _, _) = items[indexPath.row] else { return nil }
-        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-            guard let self else { return nil }
-            var acts: [UIMenuElement] = []
-            let ok = m.str("kind") != "undecryptable"
-            if ok && self.composer.isHidden == false { acts.append(UIAction(title: "Ответить", image: UIImage(systemName: "arrowshape.turn.up.left")) { _ in self.setReply(m) }) }
-            if ok && !m.str("text").isEmpty { acts.append(UIAction(title: "Копировать текст", image: UIImage(systemName: "doc.on.doc")) { _ in UIPasteboard.general.string = m.str("text") }) }
-            for l in links(m).prefix(3) {
-                if let u = URL(string: l) { acts.append(UIAction(title: "Открыть ссылку: " + (u.host ?? l), image: UIImage(systemName: "safari")) { _ in UIApplication.shared.open(u) }) }
-            }
-            if isImage(m) { acts.append(UIAction(title: "Открыть фото", image: UIImage(systemName: "photo")) { _ in self.openPhoto(m) }) }
-            if m.str("kind") == "poll", let p = m.obj("poll") {
-                let who = p.arr("options").compactMap { o -> UIAction? in
-                    let v = o["voters"] as? [String] ?? []
-                    return v.isEmpty ? nil : UIAction(title: o.str("text") + ": " + v.joined(separator: ", "), attributes: .disabled) { _ in }
-                }
-                if !who.isEmpty { acts.append(UIMenu(title: "Кто голосовал", image: UIImage(systemName: "person.2"), children: who)) }
-                if m.bool("outgoing") && !p.bool("closed") {
-                    acts.append(UIAction(title: "Завершить опрос", image: UIImage(systemName: "stop.circle")) { _ in
-                        Core.shared.call("close_poll", ["message_id": m.str("id")]) { r in if case .failure(let e) = r { self.toast(e.message) } }
-                    })
-                }
-            }
-            if m.str("kind") == "file" {
-                acts.append(UIAction(title: "Открыть файл", image: UIImage(systemName: "doc")) { _ in self.openFile(m) })
-                acts.append(UIAction(title: "Сохранить как…", image: UIImage(systemName: "square.and.arrow.down")) { _ in self.saveFile(m) })
-            }
-            if m.str("status") == "failed" { acts.append(UIAction(title: "Повторить отправку", image: UIImage(systemName: "arrow.clockwise")) { _ in self.retry(m) }) }
-            acts.append(UIAction(title: "Удалить у себя", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                Core.shared.call("delete_local_message", ["message_id": m.str("id")]) { r in if case .failure(let e) = r { self.toast(e.message) } }
+        let acts = actions(for: m)
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+            UIMenu(children: acts.map { a in
+                UIAction(title: a.title, image: UIImage(systemName: a.icon), attributes: a.destructive ? .destructive : []) { _ in a.run() }
             })
-            return UIMenu(children: acts)
+        }
+    }
+
+    private func canReact(_ m: JSON) -> Bool {
+        ["text", "file", "poll"].contains(m.str("kind")) && m.str("status") != "failed" && !conv.bool("left") && !conv.bool("archived")
+            && conv.str("kind") != "system" && (conv["key_changed_users"] as? [Any] ?? []).isEmpty
+    }
+
+    /// The same actions on a tap (with reactions) and on a long press.
+    private func actions(for m: JSON) -> [MenuAction] {
+        var acts: [MenuAction] = []
+        let ok = m.str("kind") != "undecryptable"
+        if ok && !composer.isHidden { acts.append(MenuAction(title: "Ответить", icon: "arrowshape.turn.up.left") { [weak self] in self?.setReply(m) }) }
+        if ok && !m.str("text").isEmpty { acts.append(MenuAction(title: "Копировать текст", icon: "doc.on.doc") { UIPasteboard.general.string = m.str("text") }) }
+        for l in links(m).prefix(3) {
+            if let u = URL(string: l) { acts.append(MenuAction(title: "Открыть ссылку: " + (u.host ?? l), icon: "safari") { UIApplication.shared.open(u) }) }
+        }
+        if isImage(m) { acts.append(MenuAction(title: "Открыть фото", icon: "photo") { [weak self] in self?.openPhoto(m) }) }
+        if m.str("kind") == "poll", let p = m.obj("poll") {
+            let who = p.arr("options").compactMap { o -> String? in
+                let v = o["voters"] as? [String] ?? []
+                return v.isEmpty ? nil : o.str("text") + ": " + v.joined(separator: ", ")
+            }
+            if !who.isEmpty {
+                acts.append(MenuAction(title: "Кто голосовал", icon: "person.2") { [weak self] in
+                    let a = UIAlertController(title: "Кто голосовал", message: who.joined(separator: "\n"), preferredStyle: .alert)
+                    a.addAction(UIAlertAction(title: "Готово", style: .cancel))
+                    self?.present(a, animated: !Theme.reducedMotion)
+                })
+            }
+            if m.bool("outgoing") && !p.bool("closed") {
+                acts.append(MenuAction(title: "Завершить опрос", icon: "stop.circle") { [weak self] in
+                    Core.shared.call("close_poll", ["message_id": m.str("id")]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
+                })
+            }
+        }
+        if m.str("kind") == "file" {
+            acts.append(MenuAction(title: "Открыть файл", icon: "doc") { [weak self] in self?.openFile(m) })
+            acts.append(MenuAction(title: "Сохранить как…", icon: "square.and.arrow.down") { [weak self] in self?.saveFile(m) })
+        }
+        if m.str("status") == "failed" { acts.append(MenuAction(title: "Повторить отправку", icon: "arrow.clockwise") { [weak self] in self?.retry(m) }) }
+        acts.append(MenuAction(title: "Удалить у себя", icon: "trash", destructive: true) { [weak self] in
+            Core.shared.call("delete_local_message", ["message_id": m.str("id")]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
+        })
+        return acts
+    }
+
+    /// A tap on a message: quick reactions on top, actions below.
+    private func showMenu(_ m: JSON, from source: UIView) {
+        let mine = m.arr("reactions").first { $0.bool("mine") }?.str("emoji")
+        let vc = MessageMenuViewController(reactions: canReact(m), mine: mine, actions: actions(for: m), react: { [weak self] e in self?.react(m, e) }, more: { [weak self] in
+            self?.presentSheet(EmojiPickerViewController(title: "Реакция") { e in self?.react(m, e) })
+        })
+        vc.modalPresentationStyle = .popover
+        if let pop = vc.popoverPresentationController {
+            pop.sourceView = source
+            pop.sourceRect = source.bounds
+            pop.permittedArrowDirections = [.up, .down]
+            pop.backgroundColor = Theme.glassStrong
+            pop.delegate = self
+        }
+        UISelectionFeedbackGenerator().selectionChanged()
+        present(vc, animated: !Theme.reducedMotion)
+    }
+
+    func adaptivePresentationStyle(for controller: UIPresentationController, traitCollection: UITraitCollection) -> UIModalPresentationStyle { .none }
+
+    /// One reaction per person: the same emoji again removes it.
+    private func react(_ m: JSON, _ e: String) {
+        let mine = m.arr("reactions").first { $0.bool("mine") }?.str("emoji")
+        Core.shared.call("react", ["message_id": m.str("id"), "emoji": e == mine ? "" : e]) { [weak self] r in
+            if case .failure(let err) = r { self?.toast(err.message) }
         }
     }
 
@@ -764,8 +876,9 @@ final class DateCell: UITableViewCell {
     func set(_ t: String) { l.text = t }
 }
 
-final class BubbleCell: UITableViewCell {
+final class BubbleCell: UITableViewCell, UIGestureRecognizerDelegate {
     private let avatar = AvatarView(size: 30)
+    private let reactRow = UIStackView()
     private let sender = label("", 13, .semibold, color: Theme.muted)
     private let bubble = UIView()
     private let content = UIStackView()
@@ -791,6 +904,9 @@ final class BubbleCell: UITableViewCell {
     var onRetry: (() -> Void)?
     var onPhoto: (() -> Void)?
     var onVote: ((Int) -> Void)?
+    var onTap: (() -> Void)?
+    var onReact: ((String) -> Void)?
+    var bubbleView: UIView { bubble }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -831,7 +947,17 @@ final class BubbleCell: UITableViewCell {
         pollWidth.isActive = true
         inner.axis = .vertical
         inner.spacing = 4
-        [quote, fileRow, text, poll, meta].forEach(inner.addArrangedSubview)
+        reactRow.spacing = 6
+        reactRow.alignment = .center
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        reactRow.addArrangedSubview(spacer)
+        [quote, fileRow, text, poll, reactRow, meta].forEach(inner.addArrangedSubview)
+        inner.setCustomSpacing(6, after: reactRow)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+        tap.delegate = self
+        bubble.addGestureRecognizer(tap)
+        bubble.isUserInteractionEnabled = true
         inner.isLayoutMarginsRelativeArrangement = true
         content.axis = .vertical
         content.spacing = 4
@@ -866,6 +992,18 @@ final class BubbleCell: UITableViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    @objc private func tapped() { onTap?() }
+
+    /// Photos, poll answers and reaction chips handle their own taps.
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        var v = touch.view
+        while let x = v, x !== bubble {
+            if x is UIControl || x === photo { return false }
+            v = x.superview
+        }
+        return true
+    }
+
     func bind(_ m: JSON, group: Bool, first: Bool, last: Bool) {
         boundId = m.str("id")
         let out = m.bool("outgoing")
@@ -885,11 +1023,14 @@ final class BubbleCell: UITableViewCell {
         avatar.set(m.str("sender_name"), seed: m.str("sender_user_id"))
         sender.isHidden = !(group && !out && first)
         sender.text = m.str("sender_name") + (m.str("sender_tag").isEmpty ? "" : " · " + m.str("sender_tag"))
-        bubble.backgroundColor = out ? Theme.outgoing : Theme.incoming
-        bubble.layer.borderWidth = out ? 0 : 1
+        // One to three emoji without text are shown large, without a bubble.
+        let emojiCount = Prefs.bigEmoji && kind == "text" && m.obj("reply_to") == nil ? m.int("emoji_only") : 0
+        let big = emojiCount > 0
+        bubble.backgroundColor = big ? .clear : out ? Theme.outgoing : Theme.incoming
+        bubble.layer.borderWidth = out || big ? 0 : 1
         bubble.layer.borderColor = Theme.rim.resolvedColor(with: traitCollection).cgColor
-        let fg: UIColor = out ? .white : Theme.text
-        let muted: UIColor = out ? Theme.outgoingMuted : Theme.muted
+        let fg: UIColor = out && !big ? .white : Theme.text
+        let muted: UIColor = out && !big ? Theme.outgoingMuted : Theme.muted
         text.textColor = fg
         fileName.textColor = fg
         fileMeta.textColor = muted
@@ -919,7 +1060,7 @@ final class BubbleCell: UITableViewCell {
                 photo.image = img
             } else {
                 photo.image = Photos.thumb(m)
-                Photos.load(m) { [weak self] img in if self?.boundId == id { self?.photo.image = img } }
+                if Prefs.autoload { Photos.load(m) { [weak self] img in if self?.boundId == id { self?.photo.image = img } } }
             }
         } else {
             photoW.isActive = false
@@ -937,11 +1078,18 @@ final class BubbleCell: UITableViewCell {
         let body = undecryptable ? "Сообщение не удалось расшифровать" : m.str("text")
         if undecryptable {
             text.attributedText = nil
+            text.font = Theme.font(Prefs.textSize)
             text.text = body
             text.textColor = Theme.warning
+        } else if big {
+            text.attributedText = nil
+            text.font = .systemFont(ofSize: [52, 42, 34][min(emojiCount, 3) - 1])
+            text.text = body
+            text.textColor = fg
         } else {
-            text.attributedText = richText(m, size: 17, color: fg)
+            text.attributedText = richText(m, size: Prefs.textSize, color: fg)
         }
+        bindReactions(m.arr("reactions"), out: out && !big, fg: fg)
         text.isHidden = body.isEmpty || kind == "poll"
         let st = m.str("status")
         let mark = ["queued": " ◷", "sent": " ✓", "delivered": " ✓✓", "read": " ✓✓", "failed": " !"][st] ?? ""
@@ -953,7 +1101,33 @@ final class BubbleCell: UITableViewCell {
         if image { a += "фото. " } else if let f { a += "файл " + f.str("name") + ". " }
         a += body
         if out, !statusText(st).isEmpty { a += ". " + statusText(st) }
+        for r in m.arr("reactions") { a += ", " + r.str("emoji") + " \(r.int("count"))" }
         accessibilityLabel = a
+        accessibilityHint = "Коснитесь дважды, чтобы открыть реакции и действия"
+    }
+
+    private func bindReactions(_ list: [JSON], out: Bool, fg: UIColor) {
+        reactRow.arrangedSubviews.dropLast().forEach { $0.removeFromSuperview() }
+        reactRow.isHidden = list.isEmpty
+        for (i, r) in list.prefix(8).enumerated() {
+            let mine = r.bool("mine")
+            let e = r.str("emoji")
+            let b = UIButton(type: .system)
+            b.setTitle("\(e) \(r.int("count"))", for: .normal)
+            b.titleLabel?.font = Theme.font(14, .semibold)
+            b.setTitleColor(fg, for: .normal)
+            b.backgroundColor = mine ? (out ? UIColor.white.withAlphaComponent(0.32) : Theme.action.withAlphaComponent(0.28))
+                : (out ? UIColor.white.withAlphaComponent(0.14) : Theme.muted.withAlphaComponent(0.16))
+            b.layer.cornerRadius = 14
+            b.layer.borderWidth = mine ? 1 : 0
+            b.layer.borderColor = (out ? UIColor.white : Theme.accent).resolvedColor(with: traitCollection).cgColor
+            b.contentEdgeInsets = UIEdgeInsets(top: 3, left: 9, bottom: 3, right: 9)
+            b.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            let names = r.str("names")
+            b.accessibilityLabel = "Реакция \(e), \(r.int("count"))" + (mine ? ", ваша" : "") + (names.isEmpty ? "" : ", " + names)
+            b.addAction(UIAction { [weak self] _ in self?.onReact?(e) }, for: .touchUpInside)
+            reactRow.insertArrangedSubview(b, at: i)
+        }
     }
 
     private func bindPoll(_ m: JSON, fg: UIColor, muted: UIColor) {
