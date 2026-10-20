@@ -183,8 +183,12 @@ class ListViewController: UITableViewController, UISearchResultsUpdating {
         }
         NotificationCenter.default.addObserver(forName: .prefsChanged, object: nil, queue: .main) { [weak self] _ in self?.scheduleReload() }
         NotificationCenter.default.addObserver(forName: .typingChanged, object: nil, queue: .main) { [weak self] _ in
-            guard let self, !self.rows.isEmpty else { return }
-            self.tableView.reloadData()
+            guard let self = self as? ChatListViewController else { return }
+            for case let cell as RowCell in self.tableView.visibleCells {
+                if let path = self.tableView.indexPath(for: cell), path.row < self.rows.count {
+                    bindChatCell(cell, self.rows[path.row])
+                }
+            }
         }
         reload()
     }

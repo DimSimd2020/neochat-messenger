@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   ipa:
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             core/target
-          key: ios-core-${{ hashFiles('core/Cargo.lock') }}
+          key: ios-core-${{ runner.arch }}-${{ hashFiles('core/Cargo.lock') }}
 
       - name: Core (aarch64-apple-ios)
         working-directory: core
