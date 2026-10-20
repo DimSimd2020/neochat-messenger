@@ -876,9 +876,10 @@ final class DateCell: UITableViewCell {
     func set(_ t: String) { l.text = t }
 }
 
-final class BubbleCell: UITableViewCell, UIGestureRecognizerDelegate {
+final class BubbleCell: UITableViewCell {
     private let avatar = AvatarView(size: 30)
     private let reactRow = UIStackView()
+    private let bubbleTap = UITapGestureRecognizer()
     private let sender = label("", 13, .semibold, color: Theme.muted)
     private let bubble = UIView()
     private let content = UIStackView()
@@ -954,9 +955,9 @@ final class BubbleCell: UITableViewCell, UIGestureRecognizerDelegate {
         reactRow.addArrangedSubview(spacer)
         [quote, fileRow, text, poll, reactRow, meta].forEach(inner.addArrangedSubview)
         inner.setCustomSpacing(6, after: reactRow)
-        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
-        tap.delegate = self
-        bubble.addGestureRecognizer(tap)
+        bubbleTap.addTarget(self, action: #selector(tapped))
+        bubbleTap.delegate = self
+        bubble.addGestureRecognizer(bubbleTap)
         bubble.isUserInteractionEnabled = true
         inner.isLayoutMarginsRelativeArrangement = true
         content.axis = .vertical
@@ -995,7 +996,8 @@ final class BubbleCell: UITableViewCell, UIGestureRecognizerDelegate {
     @objc private func tapped() { onTap?() }
 
     /// Photos, poll answers and reaction chips handle their own taps.
-    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+    override func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard g === bubbleTap else { return super.gestureRecognizer(g, shouldReceive: touch) }
         var v = touch.view
         while let x = v, x !== bubble {
             if x is UIControl || x === photo { return false }
