@@ -104,7 +104,12 @@ jobs:
           APK="Neochat-${TAG}.apk"
           cp apps/android/app/build/outputs/apk/release/app-release.apk "$APK"
           ls -la "$APK"
-          gh release upload "$TAG" "$APK" --clobber --repo "${{ github.repository }}"
+          ok=0
+          for i in 1 2 3 4 5 6; do
+            if gh release upload "$TAG" "$APK" --clobber --repo "${{ github.repository }}"; then ok=1; break; fi
+            sleep $((i * 5))
+          done
+          test "$ok" -eq 1
 
   windows:
     runs-on: windows-latest
@@ -219,4 +224,10 @@ jobs:
           TAG: ${{ steps.rel.outputs.tag }}
         run: |
           $out = "Neochat-$env:TAG-setup.msi"
-          gh release upload "$env:TAG" $out --clobber --repo ${{ github.repository }}
+          $ok = $false
+          foreach ($i in 1..6) {
+            gh release upload "$env:TAG" $out --clobber --repo ${{ github.repository }}
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds (5 * $i)
+          }
+          if (-not $ok) { throw "release upload failed" }

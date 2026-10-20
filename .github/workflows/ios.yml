@@ -85,7 +85,12 @@ jobs:
           cp apps/ios/NeoChat-unsigned.ipa "$IPA"
           gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
             gh release create "$TAG" --title "NeoChat ${TAG#v}" --notes "NeoChat ${TAG#v}" --target "$GITHUB_SHA" --latest --repo "${GITHUB_REPOSITORY}"
-          gh release upload "$TAG" "$IPA" --clobber --repo "${GITHUB_REPOSITORY}"
+          ok=0
+          for i in 1 2 3 4 5 6; do
+            if gh release upload "$TAG" "$IPA" --clobber --repo "${GITHUB_REPOSITORY}"; then ok=1; break; fi
+            sleep $((i * 5))
+          done
+          test "$ok" -eq 1
 
       - uses: actions/upload-artifact@v4
         with:

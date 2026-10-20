@@ -105,4 +105,9 @@ jobs:
           APK="Neochat-${TAG}.apk"
           cp apps/android/app/build/outputs/apk/release/app-release.apk "$APK"
           ls -la "$APK"
-          gh release upload "$TAG" "$APK" --clobber --repo "${{ github.repository }}"
+          ok=0
+          for i in 1 2 3 4 5 6; do
+            if gh release upload "$TAG" "$APK" --clobber --repo "${{ github.repository }}"; then ok=1; break; fi
+            sleep $((i * 5))
+          done
+          test "$ok" -eq 1
