@@ -634,7 +634,7 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     const QJsonObject &m = it->msg;
     const MessageLayout L = layout(*it, width, model->group && !model->flat);
     const bool out = m.value("outgoing").toBool();
-    const auto *view = qobject_cast<const MessageView *>(opt.widget ? opt.widget->parentWidget() : nullptr);
+    const auto *view = qobject_cast<const MessageView *>(parent());
     const bool checking = view && view->checkMode();
     const bool checked = checking && view->isChecked(m.value("id").toString());
     if (checked)
