@@ -11,7 +11,7 @@ import android.os.Build
 import app.neochat.ui.MainActivity
 import org.json.JSONObject
 
-/** System notifications show the conversation title only, never message text. */
+/** System notifications show the conversation title only, never message text (a missed call says so). */
 object Notifier {
     const val CHANNEL = "messages"
     var visibleConversation: String? = null
@@ -33,7 +33,8 @@ object Notifier {
         val n = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_chat)
             .setContentTitle(ev.optString("title", "NeoChat"))
-            .setContentText("Новое сообщение")
+            // A missed call names itself; message text is never shown.
+            .setContentText(ev.optString("text").ifEmpty { "Новое сообщение" })
             .setContentIntent(open)
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_MESSAGE)

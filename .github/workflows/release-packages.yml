@@ -9,7 +9,7 @@ on:
       tag:
         description: "Existing GitHub release tag to upload to"
         required: true
-        default: "v0.6.2"
+        default: "v0.6.3"
 
 permissions:
   contents: write
@@ -174,10 +174,22 @@ jobs:
           set PERL=C:\Strawberry\perl\bin\perl.exe
           cargo build --release --lib
 
+      # Prebuilt libwebrtc for calls (crow-misia/libwebrtc-bin, BSD-3-Clause), pinned by hash.
+      - name: libwebrtc
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/crow-misia/libwebrtc-bin/releases/download/152.7977.0.0/libwebrtc-win-x64.7z"
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\libwebrtc.7z"
+          $hash = (Get-FileHash "$env:RUNNER_TEMP\libwebrtc.7z" -Algorithm SHA256).Hash
+          if ($hash -ne "41E64B712F3777DB0377E8445972051366BC333905B0880A1FC6C4BEF1F5B8CF") { throw "libwebrtc checksum mismatch: $hash" }
+          7z x -y -bd "-o$env:RUNNER_TEMP\webrtc" "$env:RUNNER_TEMP\libwebrtc.7z" | Out-Null
+          "WEBRTC_DIR=$($env:RUNNER_TEMP -replace '\\','/')/webrtc" >> $env:GITHUB_ENV
+
       - name: Desktop
         shell: cmd
         run: |
-          cmake -S apps\desktop -B apps\desktop\build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S apps\desktop -B apps\desktop\build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWEBRTC_DIR=%WEBRTC_DIR%
           cmake --build apps\desktop\build
 
       - name: WiX
@@ -200,6 +212,7 @@ jobs:
           $exe = "apps\desktop\build\neochat.exe"
           if (-not (Test-Path $exe)) { $exe = "apps\desktop\build\Release\neochat.exe" }
           Copy-Item $exe "$stage\neochat.exe"
+          Copy-Item (Join-Path (Split-Path $exe) "neocall.dll") "$stage\neocall.dll"
           windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime "$stage\neochat.exe"
           $crt = $null
           if ($env:VCToolsRedistDir) {

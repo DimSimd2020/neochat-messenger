@@ -196,6 +196,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         if (pass.isEmpty()) return showError("Введите пароль")
         if (mode != Mode.LOGIN && pass.length < 8) return showError("Пароль — не меньше 8 символов")
         val p = JSONObject().put("username", user).put("device_name", deviceName()).put("platform", "android")
+        testServer(ctx)?.let { p.put("server", it) }
         val method = when (mode) {
             Mode.LOGIN -> "login".also {
                 p.put("password", pass)
@@ -258,3 +259,16 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     companion object {
     }
 }
+
+/**
+ * Debug builds only: `adb shell am start -n app.neochat/.ui.MainActivity --es test_server http://10.0.2.2:8098`
+ * points sign-in at a local test server. Release builds always use the built-in one.
+ */
+private fun debuggable(ctx: Context) = ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+
+fun rememberTestServer(ctx: Context, intent: android.content.Intent?) {
+    val url = intent?.getStringExtra("test_server") ?: return
+    if (debuggable(ctx)) Prefs.of(ctx).edit().putString("test_server", url).apply()
+}
+
+fun testServer(ctx: Context): String? = if (debuggable(ctx)) Prefs.of(ctx).getString("test_server", null) else null

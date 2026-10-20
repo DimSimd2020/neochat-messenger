@@ -524,6 +524,11 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
             h += 42;
         }
         w = qMax(w, pw);
+    } else if (kind == "call") {
+        const qreal cw = qMin(inner, 48 + QFontMetricsF(Theme::instance()->font(14.5, QFont::DemiBold)).horizontalAdvance(text) + 2);
+        L.call = QRectF(0, h + 2, cw, 38);
+        w = qMax(w, cw);
+        h += 44;
     } else if (const int n = bigEmojiCount(m); n > 0) {
         const QFontMetricsF bf(bigEmojiFont(n));
         L.big = true;
@@ -579,6 +584,7 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     place(L.reply, false);
     place(L.file, false);
     place(L.text, false);
+    place(L.call, false);
     place(L.pollInfo, false);
     for (QRectF &o : L.options)
         place(o, false);
@@ -813,6 +819,18 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
                     p->drawEllipse(box);
             }
         }
+    } else if (!L.call.isNull()) {
+        const QJsonObject call = m.value("call").toObject();
+        const bool missed = !out && call.value("status").toString() == "missed";
+        const QRectF dot(L.call.left(), L.call.top(), 38, 38);
+        p->setPen(Qt::NoPen);
+        p->setBrush(out ? QColor(255, 255, 255, 46) : c.selected);
+        p->drawEllipse(dot);
+        ui::paintIcon(p, dot.adjusted(10, 10, -10, -10), call.value("video").toBool() ? "video" : "phone", missed ? c.warning : (out ? c.onOutgoing : c.accent));
+        p->setFont(Theme::instance()->font(14.5, QFont::DemiBold));
+        p->setPen(missed ? c.warning : fg);
+        const QRectF tr = L.call.adjusted(48, 0, 0, 0);
+        p->drawText(tr, Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(p->font()).elidedText(messageText(m), Qt::ElideRight, tr.width()));
     } else if (L.big) {
         p->setFont(bigEmojiFont(bigEmojiCount(m)));
         p->setPen(fg);
@@ -1597,7 +1615,7 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
         menu->addWidget(row);
         menu->addSeparator();
     }
-    if (kind != "undecryptable" && !m_searching)
+    if (kind != "undecryptable" && kind != "call" && !m_searching)
         menu->addAction(QStringLiteral("Ответить"), this, [this, m] { emit replyRequested(m); });
     if (!messageText(m).isEmpty())
         menu->addAction(QStringLiteral("Копировать текст"), this, [m] { QApplication::clipboard()->setText(messageText(m)); });
@@ -1620,7 +1638,8 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
         menu->addAction(QStringLiteral("Переслать"), this, [this, m] { emit forwardRequested(QJsonArray{m}); });
     menu->addAction(QStringLiteral("Выбрать"), this, [this, m] { enterCheckMode(m.value("id").toString()); });
     menu->addSeparator();
-    if (m.value("outgoing").toBool() && m.value("status").toString() != "failed")
+    // A call entry is a local log line: there is nothing to delete at the peer.
+    if (m.value("outgoing").toBool() && m.value("status").toString() != "failed" && kind != "call")
         menu->addAction(QStringLiteral("Удалить у всех"), this, [this, m] {
             Core::instance()->call("delete_everywhere", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
                 if (!e.ok())

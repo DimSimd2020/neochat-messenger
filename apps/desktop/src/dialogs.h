@@ -21,6 +21,7 @@ void contacts(const DialogHost &h);
 void newContact(const DialogHost &h, std::function<void()> added = {});
 void newChat(const DialogHost &h);
 void devices(const DialogHost &h);
+void recentCalls(const DialogHost &h);
 void settings(const DialogHost &h);
 void profile(const DialogHost &h);
 void myQr(const DialogHost &h);

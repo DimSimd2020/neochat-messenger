@@ -7,6 +7,7 @@
 mod api;
 mod avatar;
 mod backup;
+mod calls;
 mod conv;
 mod engine;
 mod error;

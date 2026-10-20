@@ -35,6 +35,8 @@ pub struct Inner {
     cb: EventCallback,
     wake: (Mutex<bool>, Condvar),
     pub foreground: AtomicBool,
+    /// Keep the event socket open while in the background (Android service).
+    pub background: AtomicBool,
     pub shutdown: AtomicBool,
     pub conn_state: AtomicU8,
     refresh_lock: Mutex<()>,
@@ -45,6 +47,8 @@ pub struct Inner {
     pub presence: Mutex<HashMap<String, Value>>,
     pub typing_sent: Mutex<HashMap<String, i64>>,
     pub tz_offset: AtomicI32,
+    pub cur_call: Mutex<Option<crate::calls::Call>>,
+    pub ice_cache: Mutex<Option<(Value, i64)>>,
 }
 
 pub struct Core {
@@ -72,6 +76,7 @@ impl Core {
             cb,
             wake: (Mutex::new(false), Condvar::new()),
             foreground: AtomicBool::new(config["foreground"].as_bool().unwrap_or(true)),
+            background: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             conn_state: AtomicU8::new(STATE_OFFLINE),
             refresh_lock: Mutex::new(()),
@@ -80,6 +85,8 @@ impl Core {
             presence: Mutex::new(HashMap::new()),
             typing_sent: Mutex::new(HashMap::new()),
             tz_offset: AtomicI32::new(config["tz_offset"].as_i64().unwrap_or(0) as i32),
+            cur_call: Mutex::new(None),
+            ice_cache: Mutex::new(None),
         });
         let w = inner.clone();
         let worker = std::thread::Builder::new().name("neocore-worker".into()).spawn(move || w.worker_loop()).ok();
@@ -266,6 +273,11 @@ impl Inner {
                 self.wake();
                 Ok(Value::Null)
             }
+            "set_background_connection" => {
+                self.background.store(p["enabled"].as_bool().unwrap_or(false), Ordering::SeqCst);
+                self.wake();
+                Ok(Value::Null)
+            }
             "sync_now" => self.sync_now(),
             "set_push_token" => self.authed("PUT", "/v1/devices/current/push", Some(p)).map(|_| Value::Null),
             "resolve_contact" => self.resolve_contact(p),
@@ -316,6 +328,15 @@ impl Inner {
             "lock_status" => self.lock_status(),
             "my_qr" => self.my_qr(),
             "add_contact_qr" => self.add_contact_qr(p),
+            "call_start" => self.call_start(p),
+            "call_offer" => self.call_offer(p),
+            "call_accept" => self.call_accept(p),
+            "call_answer" => self.call_answer(p),
+            "call_connected" => self.call_connected(p),
+            "call_hangup" => self.call_hangup(p),
+            "call_media" => self.call_media(p),
+            "call_current" => self.call_current(),
+            "list_calls" => self.list_calls(p),
             _ => Err(Error::Invalid(format!("Неизвестный метод {method}"))),
         }
     }

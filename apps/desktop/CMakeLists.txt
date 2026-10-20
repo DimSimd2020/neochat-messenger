@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NeoChat VERSION 0.6.2 LANGUAGES CXX)
+project(NeoChat VERSION 0.6.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ add_library(neochat_ui STATIC
     src/emoji.cpp src/emoji.h
     src/dialogs.cpp src/dialogs.h
     src/mainwindow.cpp src/mainwindow.h
+    src/calls.cpp src/calls.h
     src/style.cpp src/style.h
     src/resources.qrc)
 add_dependencies(neochat_ui neocore)
@@ -48,6 +49,29 @@ if(MSVC)
     target_compile_options(neochat_ui PUBLIC /utf-8 /W3)
 endif()
 
+# Calls: neocall.dll wraps the prebuilt libwebrtc (crow-misia/libwebrtc-bin,
+# release build). libwebrtc uses the static CRT, so it lives in its own DLL with
+# a C ABI and never shares C++ objects with Qt (/MD).
+set(WEBRTC_DIR "E:/dev/webrtc" CACHE PATH "Unpacked libwebrtc-win-x64 (include/, release/webrtc.lib)")
+add_library(neocall SHARED neocall/neocall.cpp neocall/neocall.h)
+set_target_properties(neocall PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded" AUTOMOC OFF)
+target_include_directories(neocall PRIVATE "${WEBRTC_DIR}/include" "${WEBRTC_DIR}/include/third_party/abseil-cpp"
+    "${WEBRTC_DIR}/include/third_party/libyuv/include")
+target_compile_definitions(neocall PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN RTC_ENABLE_VP9)
+if(MSVC)
+    target_compile_options(neocall PRIVATE /utf-8 /W3 /wd4068 /wd4100 /wd4146 /wd4244 /wd4267 /wd4996 /Zc:__cplusplus)
+endif()
+target_link_libraries(neocall PRIVATE "${WEBRTC_DIR}/release/webrtc.lib"
+    winmm secur32 dmoguids wmcodecdspuuid msdmo strmiids iphlpapi ws2_32 crypt32 ole32 oleaut32 uuid avrt
+    d3d11 dxgi dwmapi shcore user32 gdi32 advapi32)
+add_executable(neocall_selftest neocall/selftest.cpp)
+target_link_libraries(neocall_selftest PRIVATE neocall)
+target_include_directories(neochat_ui PUBLIC neocall)
+# neocall.dll is loaded on the first call or device query (delay-load), so the
+# 12 MB libwebrtc never slows the start of the messenger.
+target_link_libraries(neochat_ui PUBLIC neocall winmm delayimp)
+target_link_options(neochat_ui INTERFACE /DELAYLOAD:neocall.dll)
+
 add_executable(neochat WIN32 src/main.cpp packaging/neochat.rc)
 target_link_libraries(neochat PRIVATE neochat_ui)
 
@@ -61,4 +85,4 @@ if(Qt6Test_FOUND)
     target_link_libraries(neochat_interactiontest PRIVATE neochat_ui Qt6::Test)
 endif()
 
-install(TARGETS neochat RUNTIME DESTINATION .)
+install(TARGETS neochat neocall RUNTIME DESTINATION .)

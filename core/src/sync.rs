@@ -28,6 +28,7 @@ struct CycleStats {
     new_messages: usize,
     receipts: BTreeMap<String, Vec<String>>,
     notify: std::collections::BTreeSet<String>,
+    calls: Vec<crate::calls::Signal>,
 }
 
 impl Inner {
@@ -35,8 +36,7 @@ impl Inner {
         let mut ws: Option<std::thread::JoinHandle<()>> = None;
         while !self.shutdown.load(Ordering::SeqCst) {
             if self.logged_in() {
-                let fg = self.foreground.load(Ordering::SeqCst);
-                if fg && !self.ws_active.load(Ordering::SeqCst) {
+                if self.ws_mode().is_some() && !self.ws_active.load(Ordering::SeqCst) {
                     if let Some(h) = ws.take() {
                         let _ = h.join();
                     }
@@ -115,6 +115,7 @@ impl Inner {
         for (conv, ids) in std::mem::take(&mut stats.receipts) {
             self.enqueue_receipt(&conv, "delivered", ids)?;
         }
+        self.apply_call_signals(std::mem::take(&mut stats.calls))?;
         Ok(stats.new_messages)
     }
 
@@ -418,6 +419,11 @@ impl Inner {
                         }
                     }
                 }
+                "call" => {
+                    if let Some(body) = p.call.clone() {
+                        stats.calls.push(crate::calls::Signal { sender: sender.clone(), sdev: sdev.clone(), conv: conv.clone(), ts: p.ts, body });
+                    }
+                }
                 "group_update" | "poll_vote" | "poll_close" | "reaction" => {
                     if let Some(g) = p.group.clone() {
                         control = Some((p.kind.clone(), g));
@@ -504,16 +510,28 @@ impl Inner {
 
     // ---- WebSocket hints ----
 
+    /// Whether the event socket should be open: Some(true) for a background
+    /// connection that does not show the user online.
+    fn ws_mode(&self) -> Option<bool> {
+        if self.foreground.load(Ordering::SeqCst) {
+            Some(false)
+        } else if self.background.load(Ordering::SeqCst) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     fn ws_loop(self: Arc<Self>) {
         let mut backoff = 1u64;
-        while !self.shutdown.load(Ordering::SeqCst) && self.foreground.load(Ordering::SeqCst) && self.logged_in() {
+        while !self.shutdown.load(Ordering::SeqCst) && self.ws_mode().is_some() && self.logged_in() {
             match self.ws_session() {
                 Ok(()) => backoff = 1,
                 Err(_) => {
                     let wait = backoff.min(60);
                     backoff = (backoff * 2).min(60);
                     for _ in 0..wait {
-                        if self.shutdown.load(Ordering::SeqCst) || !self.foreground.load(Ordering::SeqCst) {
+                        if self.shutdown.load(Ordering::SeqCst) || self.ws_mode().is_none() {
                             break;
                         }
                         std::thread::sleep(Duration::from_secs(1));
@@ -527,7 +545,8 @@ impl Inner {
     fn ws_session(&self) -> Result<()> {
         use tungstenite::client::IntoClientRequest;
         let server = kv_get_str(&self.db().conn, "server")?.ok_or(Error::NotLoggedIn)?;
-        let url = server.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1) + "/v1/events";
+        let background = self.ws_mode() == Some(true);
+        let url = server.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1) + if background { "/v1/events?mode=background" } else { "/v1/events" };
         let token = self.access_token()?;
         let mut req = url.into_client_request().map_err(|e| Error::Network(e.to_string()))?;
         req.headers_mut().insert("Authorization", format!("Bearer {token}").parse().map_err(|_| Error::Invalid("Некорректный токен входа".into()))?);
@@ -543,7 +562,8 @@ impl Inner {
         self.set_conn(STATE_ONLINE);
         let mut last = std::time::Instant::now();
         loop {
-            if self.shutdown.load(Ordering::SeqCst) || !self.foreground.load(Ordering::SeqCst) {
+            // Coming to the foreground reconnects so the user shows online, and vice versa.
+            if self.shutdown.load(Ordering::SeqCst) || self.ws_mode() != Some(background) {
                 let _ = sock.close(None);
                 return Ok(());
             }

@@ -96,6 +96,8 @@ impl Inner {
                 convs.insert(r.conversation_id.clone(), (channel, serde_json::from_str(&info.2).unwrap_or(json!({}))));
             }
             let (channel, tags) = &convs[&r.conversation_id];
+            // Call log: {video, status, duration}; the text is its readable form.
+            let call = (r.kind == "call").then(|| serde_json::from_str::<Value>(&r.body).unwrap_or(json!({})));
             if let Some(p) = &r.poll {
                 polls.push((out.len(), r.id.clone(), serde_json::from_str(p).unwrap_or(json!({}))));
             }
@@ -120,7 +122,12 @@ impl Inner {
                 "reactions": reactions.next().unwrap_or(json!([])),
                 "outgoing": r.outgoing,
                 "kind": r.kind,
-                "text": if r.kind == "undecryptable" { "Не удалось расшифровать сообщение".to_string() } else { r.body },
+                "text": match &call {
+                    Some(c) => crate::calls::call_text(r.outgoing, c["video"] == true, c["status"].as_str().unwrap_or(""), c["duration"].as_i64().unwrap_or(0)),
+                    None if r.kind == "undecryptable" => "Не удалось расшифровать сообщение".to_string(),
+                    None => r.body,
+                },
+                "call": call,
                 "reply_to": reply,
                 "file": file,
                 "status": r.status,

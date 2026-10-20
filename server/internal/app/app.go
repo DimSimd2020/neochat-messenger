@@ -20,7 +20,9 @@ type Config struct {
 	DataDir        string // encrypted attachment objects
 	ArgonMemoryKiB uint32
 	ArgonTime      uint32
-	ArgonParallel  int // concurrent password hashes
+	ArgonParallel  int      // concurrent password hashes
+	TurnSecret     string   // coturn static-auth-secret; empty disables TURN
+	TurnURIs       []string // e.g. turn:host:3478?transport=udp
 }
 
 type Server struct {
@@ -113,6 +115,7 @@ func (s *Server) routes() {
 
 	m.HandleFunc("GET /v1/sync", s.authed(s.handleSync))
 	m.HandleFunc("GET /v1/events", s.authed(s.handleEvents))
+	m.HandleFunc("GET /v1/calls/ice", s.authed(s.handleICE))
 
 	m.HandleFunc("POST /v1/attachments", s.authed(s.handleReserveAttachment))
 	m.HandleFunc("PUT /v1/attachments/{id}/content", s.authed(s.handleUploadAttachment))

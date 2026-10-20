@@ -54,7 +54,7 @@ private:
 
 // Geometry of one message row, shared by painting and hit testing.
 struct MessageLayout {
-    QRectF bubble, name, avatar, text, meta, reply, fwd, file, download, retry, image, pollInfo;
+    QRectF bubble, name, avatar, text, meta, reply, fwd, file, download, retry, image, pollInfo, call;
     QList<QRectF> options; // poll answers
     QList<QRectF> reacts;  // reaction chips
     bool big = false;      // emoji-only message without a bubble

@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 
+#include "calls.h"
 #include "chatlist.h"
 #include "composer.h"
 #include "core.h"
@@ -112,15 +113,17 @@ public:
         lay->setContentsMargins(14, 16, 14, 16);
         lay->setSpacing(10);
         chats = new ui::IconButton("chat", QStringLiteral("Чаты"), this, 48);
+        calls = new ui::IconButton("phone", QStringLiteral("Звонки"), this, 48);
         people = new ui::IconButton("people", QStringLiteral("Контакты"), this, 48);
         devices = new ui::IconButton("devices", QStringLiteral("Устройства"), this, 48);
         settings = new ui::IconButton("settings", QStringLiteral("Настройки"), this, 48);
         profile = new ui::IconButton("profile", QStringLiteral("Профиль"), this, 48);
-        for (auto *b : {chats, people, devices, settings, profile})
+        for (auto *b : {chats, calls, people, devices, settings, profile})
             b->setRail(true);
         chats->setCheckable(true);
         chats->setChecked(true);
         lay->addWidget(chats);
+        lay->addWidget(calls);
         lay->addWidget(people);
         lay->addWidget(devices);
         lay->addStretch();
@@ -128,7 +131,7 @@ public:
         lay->addWidget(profile);
         connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     }
-    ui::IconButton *chats, *people, *devices, *settings, *profile;
+    ui::IconButton *chats, *calls, *people, *devices, *settings, *profile;
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -205,17 +208,21 @@ public:
         back = new ui::IconButton("back", QStringLiteral("Вернуться к чатам"), this);
         back->hide();
         title = new HeaderTitle(this);
+        audioCall = new ui::IconButton("phone", QStringLiteral("Аудиозвонок"), this);
+        videoCall = new ui::IconButton("video", QStringLiteral("Видеозвонок"), this);
         search = new ui::IconButton("search", QStringLiteral("Поиск в переписке"), this);
         more = new ui::IconButton("more", QStringLiteral("Меню диалога"), this);
         lay->addWidget(toggle);
         lay->addWidget(back);
         lay->addSpacing(8);
         lay->addWidget(title, 1);
+        lay->addWidget(audioCall);
+        lay->addWidget(videoCall);
         lay->addWidget(search);
         lay->addWidget(more);
         connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     }
-    ui::IconButton *toggle, *back, *search, *more;
+    ui::IconButton *toggle, *back, *audioCall, *videoCall, *search, *more;
     HeaderTitle *title;
 
 protected:
@@ -411,6 +418,10 @@ MainWindow::MainWindow()
     connect(m_panel, &ChatPanel::activated, this, &MainWindow::openConversation);
     connect(m_panel, &ChatPanel::newChat, this, [this] { dialogs::newChat(host()); });
     connect(m_rail->people, &QAbstractButton::clicked, this, [this] { dialogs::contacts(host()); });
+    connect(m_rail->calls, &QAbstractButton::clicked, this, [this] { dialogs::recentCalls(host()); });
+    CallController::instance()->toast = [this](const QString &t) { toast(t); };
+    connect(m_header->audioCall, &QAbstractButton::clicked, this, [this] { CallController::instance()->start(m_current, false); });
+    connect(m_header->videoCall, &QAbstractButton::clicked, this, [this] { CallController::instance()->start(m_current, true); });
     connect(m_rail->devices, &QAbstractButton::clicked, this, [this] { dialogs::devices(host()); });
     connect(m_rail->settings, &QAbstractButton::clicked, this, [this] { dialogs::settings(host()); });
     connect(m_rail->profile, &QAbstractButton::clicked, this, [this] { dialogs::profile(host()); });
@@ -813,6 +824,10 @@ void MainWindow::applyConversation(const QJsonObject &c)
     m_header->title->set(c.value("title").toString(), count, names, seed, accent, c.value("avatar_path").toString());
     const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
     m_composer->setVisible(!gone && c.value("can_post").toBool(true));
+    // Calls are one-to-one, through a direct chat the peer can receive in.
+    const bool callable = c.value("kind").toString() == "direct" && !gone && c.value("can_post").toBool(true) && !c.value("peer_user_id").toString().isEmpty();
+    m_header->audioCall->setVisible(callable);
+    m_header->videoCall->setVisible(callable);
     m_composer->setBlocked(!c.value("key_changed_users").toArray().isEmpty());
     m_view->setCanReact(!gone && c.value("key_changed_users").toArray().isEmpty());
     updateNotice();
@@ -884,6 +899,7 @@ void MainWindow::closeEvent(QCloseEvent *e)
     if (!m_current.isEmpty())
         Core::instance()->call("set_draft", {{"conversation_id", m_current.value("id")}, {"text", m_composer->text()}});
     QSettings().setValue("window/geometry", saveGeometry());
+    CallController::instance()->shutdown();
     QMainWindow::closeEvent(e);
 }
 
@@ -999,6 +1015,6 @@ void MainWindow::notify(const QJsonObject &ev)
         });
         m_tray->show();
     }
-    // The message text is not shown in system notifications.
-    m_tray->showMessage(ev.value("title").toString(), QStringLiteral("Новое сообщение"), QSystemTrayIcon::NoIcon, 4000);
+    // The message text is not shown in system notifications; a missed call names itself.
+    m_tray->showMessage(ev.value("title").toString(), ev.value("text").toString(QStringLiteral("Новое сообщение")), QSystemTrayIcon::NoIcon, 4000);
 }

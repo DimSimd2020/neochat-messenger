@@ -11,7 +11,9 @@
 	<key>CFBundleAllowMixedLocalizations</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Камера нужна, чтобы отсканировать QR-код при привязке нового устройства или добавлении контакта.</string>
+	<string>Камера нужна для видеозвонков и чтобы отсканировать QR-код при привязке нового устройства или добавлении контакта.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Микрофон нужен для звонков.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Face ID открывает NeoChat и архив вместо ввода код-пароля.</string>
 	<key>CFBundleDisplayName</key>
@@ -59,6 +61,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
+		<string>audio</string>
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>

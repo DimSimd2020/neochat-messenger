@@ -251,6 +251,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val avatar = AvatarView(ctx, 40)
     private val title = ctx.label("", 16.5f, 700)
     private val subtitle = ctx.label("", 12.5f, 400, Theme.Role.MUTED)
+    private val audioCall = IconButton(ctx, R.drawable.ic_phone, "Аудиозвонок")
+    private val videoCall = IconButton(ctx, R.drawable.ic_video, "Видеозвонок")
     private val searchBar = SearchBox(ctx, "Найти в этой переписке")
     private val searchWrap = FrameLayout(ctx)
     private var searchOpen = false
@@ -381,6 +383,12 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         names.addView(subtitle, lp().apply { topMargin = dp(2) })
         who.addView(names, lp(0, WRAP, 1f).apply { marginStart = dp(10) })
         header.addView(who, lp(0, WRAP, 1f))
+        audioCall.setOnClickListener { startCall(false) }
+        videoCall.setOnClickListener { startCall(true) }
+        audioCall.visibility = View.GONE
+        videoCall.visibility = View.GONE
+        header.addView(audioCall)
+        header.addView(videoCall)
         val search = IconButton(ctx, R.drawable.ic_search, "Поиск в переписке")
         search.setOnClickListener { toggleSearch() }
         header.addView(search)
@@ -398,6 +406,15 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
+    }
+
+    /** Microphone first, then the camera for a video call (a refusal still allows a voice call). */
+    private fun startCall(video: Boolean) {
+        act.withPermission(android.Manifest.permission.RECORD_AUDIO) { mic ->
+            if (!mic) return@withPermission act.toast("Для звонка нужен доступ к микрофону")
+            if (!video) return@withPermission app.neochat.calls.CallManager.start(conv, false)
+            act.withPermission(android.Manifest.permission.CAMERA) { cam -> app.neochat.calls.CallManager.start(conv, cam) }
+        }
     }
 
     private fun toggleSearch() {
@@ -472,6 +489,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             updateSubtitle()
             val left = conv.optBoolean("left") || conv.optBoolean("archived") || system
             val muteComposer = left || !conv.optBoolean("can_post", true)
+            // Calls are one-to-one, through a direct chat the peer can receive in.
+            val callable = conv.str("kind") == "direct" && !left && conv.optBoolean("can_post", true) && conv.str("peer_user_id").isNotEmpty()
+            audioCall.visibility = if (callable) View.VISIBLE else View.GONE
+            videoCall.visibility = if (callable) View.VISIBLE else View.GONE
             composer.visibility = if (muteComposer) View.GONE else View.VISIBLE
             gone.visibility = if (muteComposer) View.VISIBLE else View.GONE
             gone.text = when {
@@ -953,6 +974,18 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             text.text = rich
             text.setLinkTextColor(fg)
             if (undecryptable) text.setTextColor(Theme.p.warning)
+            if (kind == "call") {
+                val c = m.optJSONObject("call")
+                val missed = !out && c?.str("status") == "missed"
+                val icon = ctx.getDrawable(if (c?.optBoolean("video") == true) R.drawable.ic_video else R.drawable.ic_phone)?.mutate()
+                icon?.setTint(if (missed) Theme.p.warning else if (out) fg else Theme.p.accent)
+                icon?.setBounds(0, 0, dp(20), dp(20))
+                text.setCompoundDrawablesRelative(icon, null, null, null)
+                text.compoundDrawablePadding = dp(10)
+                if (missed) text.setTextColor(Theme.p.warning)
+            } else if (text.compoundDrawablesRelative[0] != null) {
+                text.setCompoundDrawablesRelative(null, null, null, null)
+            }
             // One to three emoji without anything else are shown large and without a bubble.
             val emoji = if (bigEmoji && rep == null && f == null) m.optInt("emoji_only") else 0
             text.setTextSize(TypedValue.COMPLEX_UNIT_SP, when (emoji) { 1 -> 52f; 2 -> 42f; 3 -> 34f; else -> textSp })
@@ -1186,7 +1219,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         if (canReact(m)) pm.header(quickReactions(m) { pm.dismiss() })
         val ok = m.str("kind") != "undecryptable"
         val gone = composer.visibility != View.VISIBLE
-        if (ok && !gone) pm.add("Ответить") { setReply(m) }
+        if (ok && !gone && m.str("kind") != "call") pm.add("Ответить") { setReply(m) }
         if (ok && m.str("text").isNotEmpty()) pm.add("Копировать текст") {
             ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("NeoChat", m.str("text")))
             if (android.os.Build.VERSION.SDK_INT < 33) act.toast("Текст скопирован")

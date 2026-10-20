@@ -205,6 +205,9 @@ type hub struct {
 type wsConn struct {
 	ch     chan []byte
 	cancel context.CancelFunc
+	// A background connection (Android service waiting for messages and calls)
+	// receives hints but does not make its user appear online.
+	background bool
 }
 
 func newHub() *hub {
@@ -219,6 +222,9 @@ func (h *hub) add(user, device string, c *wsConn) bool {
 		h.conns[device] = map[*wsConn]struct{}{}
 	}
 	h.conns[device][c] = struct{}{}
+	if c.background {
+		return false
+	}
 	h.users[user]++
 	return h.users[user] == 1
 }
@@ -230,6 +236,9 @@ func (h *hub) remove(user, device string, c *wsConn) bool {
 	delete(h.conns[device], c)
 	if len(h.conns[device]) == 0 {
 		delete(h.conns, device)
+	}
+	if c.background {
+		return false
 	}
 	h.users[user]--
 	if h.users[user] <= 0 {
@@ -292,7 +301,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, a *authCtx
 	conn.SetReadLimit(1024)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	c := &wsConn{ch: make(chan []byte, 16), cancel: cancel}
+	c := &wsConn{ch: make(chan []byte, 16), cancel: cancel, background: r.URL.Query().Get("mode") == "background"}
 	if s.hub.add(a.UserID, a.DeviceID, c) {
 		s.presenceChanged(a.UserID)
 	}

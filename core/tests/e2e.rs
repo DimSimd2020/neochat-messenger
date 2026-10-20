@@ -623,3 +623,174 @@ fn reactions_bio_presence_typing_qr_archive_pins_lock() {
     assert_eq!(alice.call("lock_check", json!({"passcode": "0000"}))["ok"], false);
     assert_eq!(alice.call("lock_status", json!({}))["enabled"], true);
 }
+
+/// Syncs until a call event matching `f` appears after `from`; returns it.
+fn call_event(c: &Client, from: usize, f: &dyn Fn(&Value) -> bool) -> Value {
+    let t = std::time::Instant::now();
+    loop {
+        if let Some(v) = c.events.lock().unwrap()[from..].iter().find(|v| (v["type"] == "call" || v["type"] == "call_media") && f(v)) {
+            return v.clone();
+        }
+        assert!(t.elapsed().as_secs() < 20, "нет события звонка: {:?}", &c.events.lock().unwrap()[from..]);
+        c.sync();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn mark(c: &Client) -> usize {
+    c.events.lock().unwrap().len()
+}
+
+fn call_logs(c: &Client, conv: &str) -> Vec<String> {
+    c.messages(conv).iter().filter(|m| m["kind"] == "call").map(|m| m["text"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn calls_ring_answer_hangup_busy_and_log() {
+    let Some(e) = env() else { return };
+    let (alice, _) = register(&e, &uname("alice"));
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let cname = uname("carol");
+    let (carol, _) = register(&e, &cname);
+    let b = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
+    alice.call("send_text", json!({"conversation_id": cid, "text": "звоню"}));
+    alice.sync();
+    bob.sync();
+
+    // Calls are one-to-one only.
+    let g = alice.call("create_group", json!({"title": "Группа", "member_ids": [b["user_id"]]}));
+    assert!(alice.try_call("call_start", json!({"conversation_id": g["id"]})).is_err());
+
+    // Ring, answer, connect, camera off, hang up.
+    let start = alice.call("call_start", json!({"conversation_id": cid, "video": true}));
+    let id = start["call"]["call_id"].as_str().unwrap().to_string();
+    assert!(start["ice_servers"].is_array());
+    assert!(alice.try_call("call_start", json!({"conversation_id": cid})).is_err(), "второй звонок при активном");
+    let (a0, b0) = (mark(&alice), mark(&bob));
+    alice.call("call_offer", json!({"call_id": id, "sdp": "v=0 offer"}));
+    alice.sync();
+    let inc = call_event(&bob, b0, &|v| v["state"] == "incoming");
+    assert_eq!((inc["call_id"].as_str().unwrap(), inc["video"].as_bool().unwrap(), inc["outgoing"].as_bool().unwrap()), (id.as_str(), true, false));
+    assert_eq!(bob.call("call_current", json!({}))["state"], "incoming");
+    let acc = bob.call("call_accept", json!({"call_id": id}));
+    assert_eq!(acc["sdp"], "v=0 offer");
+    bob.call("call_answer", json!({"call_id": id, "sdp": "v=0 answer"}));
+    bob.sync();
+    let ans = call_event(&alice, a0, &|v| v["state"] == "answered");
+    assert_eq!(ans["sdp"], "v=0 answer");
+    alice.call("call_connected", json!({"call_id": id}));
+    bob.call("call_connected", json!({"call_id": id}));
+    let b1 = mark(&bob);
+    alice.call("call_media", json!({"call_id": id, "video": false}));
+    alice.sync();
+    assert_eq!(call_event(&bob, b1, &|v| v["type"] == "call_media")["video"], false);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let a1 = mark(&alice);
+    bob.call("call_hangup", json!({"call_id": id}));
+    bob.sync();
+    assert_eq!(call_event(&alice, a1, &|v| v["state"] == "ended")["reason"], "hangup");
+    assert_eq!(alice.call("call_current", json!({})), Value::Null);
+    assert!(call_logs(&alice, &cid)[0].starts_with("Исходящий видеозвонок · 0:0"), "{:?}", call_logs(&alice, &cid));
+    assert!(call_logs(&bob, &cid)[0].starts_with("Входящий видеозвонок · 0:0"), "{:?}", call_logs(&bob, &cid));
+
+    // Decline.
+    let id2 = alice.call("call_start", json!({"conversation_id": cid}))["call"]["call_id"].as_str().unwrap().to_string();
+    let (a2, b2) = (mark(&alice), mark(&bob));
+    alice.call("call_offer", json!({"call_id": id2, "sdp": "v=0"}));
+    alice.sync();
+    call_event(&bob, b2, &|v| v["state"] == "incoming");
+    bob.call("call_hangup", json!({"call_id": id2}));
+    bob.sync();
+    assert_eq!(call_event(&alice, a2, &|v| v["state"] == "ended")["reason"], "declined");
+    assert_eq!(call_logs(&alice, &cid)[1], "Отклонённый звонок");
+
+    // Busy: Carol calls Bob while Alice's call rings there.
+    let c = carol.call("resolve_contact", json!({"username": bname}));
+    let ccid = carol.call("open_direct", json!({"user_id": c["user_id"]}))["id"].as_str().unwrap().to_string();
+    carol.call("send_text", json!({"conversation_id": ccid, "text": "привет"}));
+    carol.sync();
+    bob.sync();
+    let id3 = alice.call("call_start", json!({"conversation_id": cid}))["call"]["call_id"].as_str().unwrap().to_string();
+    let b3 = mark(&bob);
+    alice.call("call_offer", json!({"call_id": id3, "sdp": "v=0"}));
+    alice.sync();
+    call_event(&bob, b3, &|v| v["state"] == "incoming");
+    let idc = carol.call("call_start", json!({"conversation_id": ccid}))["call"]["call_id"].as_str().unwrap().to_string();
+    let c0 = mark(&carol);
+    carol.call("call_offer", json!({"call_id": idc, "sdp": "v=0"}));
+    carol.sync();
+    bob.sync();
+    bob.sync();
+    assert_eq!(call_event(&carol, c0, &|v| v["state"] == "ended")["reason"], "busy");
+    assert_eq!(call_logs(&carol, &ccid), vec!["Абонент занят"]);
+    assert_eq!(call_logs(&bob, &ccid), vec!["Пропущенный звонок"]);
+    assert_eq!(bob.call("call_current", json!({}))["call_id"], id3.as_str(), "звонок Алисы продолжает звонить");
+
+    // Cancelled before Bob synced: no ring, only a missed call with a notification.
+    let a4 = mark(&alice);
+    alice.call("call_hangup", json!({"call_id": id3}));
+    alice.sync();
+    call_event(&alice, a4, &|v| v["state"] == "ended" && v["reason"] == "cancelled");
+    bob.sync();
+    assert_eq!(bob.call("call_current", json!({})), Value::Null);
+    let id5 = alice.call("call_start", json!({"conversation_id": cid}))["call"]["call_id"].as_str().unwrap().to_string();
+    alice.call("call_offer", json!({"call_id": id5, "sdp": "v=0"}));
+    alice.call("call_hangup", json!({"call_id": id5}));
+    alice.sync();
+    let b5 = mark(&bob);
+    let unread = bob.call("get_conversation", json!({"conversation_id": cid}))["unread"].as_i64().unwrap();
+    bob.sync();
+    assert!(!bob.events.lock().unwrap()[b5..].iter().any(|v| v["type"] == "call" && v["state"] == "incoming"), "отменённый звонок не должен звонить");
+    assert!(bob.events.lock().unwrap()[b5..].iter().any(|v| v["type"] == "notify" && v["text"] == "Пропущенный звонок"));
+    assert_eq!(bob.call("get_conversation", json!({"conversation_id": cid}))["unread"].as_i64().unwrap(), unread + 1);
+    assert_eq!(call_logs(&bob, &cid).last().unwrap(), "Пропущенный звонок");
+    assert!(bob.call("list_conversations", json!({}))[0]["last_preview"].as_str().unwrap().starts_with("📞"));
+    let recent = bob.call("list_calls", json!({}));
+    assert_eq!(recent[0]["text"], "Пропущенный звонок");
+    assert_eq!(recent[0]["missed"], true);
+    assert_eq!(recent[0]["conversation_id"], cid.as_str());
+    assert_eq!(recent.as_array().unwrap().len(), call_logs(&bob, &cid).len() + call_logs(&bob, &ccid).len());
+}
+
+#[test]
+fn call_answered_on_one_device_stops_the_other() {
+    let Some(e) = env() else { return };
+    let (alice, _) = register(&e, &uname("alice"));
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let bob2 = Client::new();
+    bob2.call("login", json!({"server": e.server, "username": bname, "password": "correct horse battery", "device_name": "phone", "platform": "android"}));
+    bob.sync();
+    let b = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
+    alice.call("send_text", json!({"conversation_id": cid, "text": "привет"}));
+    alice.sync();
+    bob.sync();
+    bob2.sync();
+
+    let id = alice.call("call_start", json!({"conversation_id": cid}))["call"]["call_id"].as_str().unwrap().to_string();
+    let (a0, b0, c0) = (mark(&alice), mark(&bob), mark(&bob2));
+    alice.call("call_offer", json!({"call_id": id, "sdp": "v=0"}));
+    alice.sync();
+    call_event(&bob, b0, &|v| v["state"] == "incoming");
+    call_event(&bob2, c0, &|v| v["state"] == "incoming");
+    bob2.call("call_accept", json!({"call_id": id}));
+    bob2.call("call_answer", json!({"call_id": id, "sdp": "v=0 phone"}));
+    bob2.sync();
+    assert_eq!(call_event(&bob, b0, &|v| v["state"] == "ended")["reason"], "answered_elsewhere");
+    assert_eq!(call_event(&alice, a0, &|v| v["state"] == "answered")["sdp"], "v=0 phone");
+    // The desktop that did not answer writes no missed call.
+    assert!(call_logs(&bob, &cid).is_empty());
+
+    // The hangup reaches the device that answered.
+    let a1 = mark(&alice);
+    alice.call("call_connected", json!({"call_id": id}));
+    alice.call("call_hangup", json!({"call_id": id}));
+    alice.sync();
+    let c1 = mark(&bob2);
+    call_event(&bob2, c1, &|v| v["state"] == "ended" && v["reason"] == "hangup");
+    assert!(call_event(&alice, a1, &|v| v["state"] == "ended")["reason"] == "hangup");
+    assert_eq!(call_logs(&bob2, &cid), vec!["Входящий звонок"]);
+}

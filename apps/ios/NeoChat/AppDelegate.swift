@@ -9,6 +9,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         try? Core.shared.open()
         UNUserNotificationCenter.current().delegate = self
+        _ = CallManager.shared
         NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { n in
             guard let ev = n.userInfo as? JSON else { return }
             switch ev.str("type") {
@@ -45,7 +46,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
 extension AppDelegate: UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
-        if let cid = response.notification.request.content.userInfo["conversation_id"] as? String {
+        if response.notification.request.content.userInfo["call"] != nil {
+            CallManager.shared.resume()
+        } else if let cid = response.notification.request.content.userInfo["conversation_id"] as? String {
             NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": cid])
         }
         done()
@@ -70,7 +73,7 @@ enum Notifier {
         if !(UserDefaults.standard.object(forKey: "notifications") as? Bool ?? true) { return }
         let c = UNMutableNotificationContent()
         c.title = ev.str("title").isEmpty ? "NeoChat" : ev.str("title")
-        c.body = "Новое сообщение"
+        c.body = ev.str("text").isEmpty ? "Новое сообщение" : ev.str("text")
         c.sound = .default
         c.userInfo = ["conversation_id": cid]
         c.threadIdentifier = cid
@@ -102,6 +105,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func sceneDidBecomeActive(_ scene: UIScene) {
         AppLock.activated()
         Core.shared.call("set_foreground", ["active": true])
+        CallManager.shared.resume()
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

@@ -47,9 +47,9 @@ class SheetViewController: UIViewController {
         return row
     }
 
-    func personRow(_ name: String, _ sub: String, seed: String, subColor: UIColor = Theme.muted, action: (() -> Void)? = nil) -> UIView {
+    func personRow(_ name: String, _ sub: String, seed: String, avatar: String = "", subColor: UIColor = Theme.muted, action: (() -> Void)? = nil) -> UIView {
         let av = AvatarView(size: 44)
-        av.set(name, seed: seed)
+        av.set(name, seed: seed, avatar: avatar)
         let t = label(name, 16, .semibold)
         let s = label(sub, 14, color: subColor)
         let col = UIStackView(arrangedSubviews: [t, s])
@@ -125,16 +125,61 @@ final class NewContactViewController: SheetViewController {
     }
 }
 
+/// Call log of this device (calls are logged locally, like the messages about them).
 final class RecentCallsViewController: SheetViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Недавние звонки"
-        let t = label("Звонков пока нет", 17, .semibold)
-        t.textAlignment = .center
-        stack.addArrangedSubview(t)
-        let s = label("Звонки в этой версии NeoChat не реализованы.", 14, color: Theme.muted)
-        s.textAlignment = .center
-        stack.addArrangedSubview(s)
+        Core.shared.call("list_calls", ["limit": 100]) { [weak self] r in
+            guard let self else { return }
+            guard case .success(let v) = r else {
+                if case .failure(let e) = r { self.toast(e.message) }
+                return
+            }
+            let list = v as? [JSON] ?? []
+            if list.isEmpty {
+                let t = label("Звонков пока нет", 17, .semibold)
+                t.textAlignment = .center
+                self.stack.addArrangedSubview(t)
+            }
+            let time = DateFormatter()
+            time.locale = Locale(identifier: "ru_RU")
+            for c in list {
+                let at = Date(timeIntervalSince1970: TimeInterval(c.int64("at")) / 1000)
+                time.dateFormat = Calendar.current.isDateInToday(at) ? "HH:mm" : "d MMM, HH:mm"
+                let sub = c.str("text") + " · " + time.string(from: at)
+                let cid = c.str("conversation_id")
+                self.stack.addArrangedSubview(self.personRow(c.str("peer_name"), sub, seed: c.str("peer_user_id"), avatar: c.str("avatar_path"),
+                                                             subColor: c.bool("missed") ? Theme.warning : Theme.muted) { [weak self] in self?.actions(cid) })
+            }
+            self.muted("Журнал хранится только на этом устройстве.")
+        }
+    }
+
+    private func actions(_ cid: String) {
+        let a = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        a.addAction(UIAlertAction(title: "Позвонить", style: .default) { [weak self] _ in self?.dial(cid, video: false) })
+        a.addAction(UIAlertAction(title: "Видеозвонок", style: .default) { [weak self] _ in self?.dial(cid, video: true) })
+        a.addAction(UIAlertAction(title: "Открыть чат", style: .default) { [weak self] _ in
+            self?.dismiss(animated: !Theme.reducedMotion) {
+                NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": cid])
+            }
+        })
+        a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        present(a, animated: !Theme.reducedMotion)
+    }
+
+    private func dial(_ cid: String, video: Bool) {
+        Core.shared.call("get_conversation", ["conversation_id": cid]) { [weak self] r in
+            guard let self else { return }
+            guard case .success(let v) = r, let conv = v as? JSON else {
+                if case .failure(let e) = r { self.toast(e.message) }
+                return
+            }
+            CallManager.withPermissions(video: video, from: self) { cam in
+                self.dismiss(animated: !Theme.reducedMotion) { CallManager.shared.start(conv, video: video && cam) }
+            }
+        }
     }
 }
 

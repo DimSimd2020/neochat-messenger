@@ -17,6 +17,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import app.neochat.FilesProvider
 import app.neochat.Notifier
+import app.neochat.RealtimeService
 import app.neochat.core.CoreClient
 import org.json.JSONObject
 import java.io.File
@@ -70,6 +71,7 @@ class MainActivity : Activity(), Sheet.Host {
         Prefs.applySecure(this)
         CoreClient.addListener(listener)
         pendingConversation = intent?.getStringExtra("conversation_id")
+        rememberTestServer(this, intent)
         start()
     }
 
@@ -150,6 +152,7 @@ class MainActivity : Activity(), Sheet.Host {
         archive = null
         chat = null
         Notifier.visibleConversation = null
+        RealtimeService.stop(this)
         show(OnboardingScreen(this, status) { showMain() }, 0f)
     }
 
@@ -159,6 +162,7 @@ class MainActivity : Activity(), Sheet.Host {
         archive = null
         chat = null
         show(h, 0f)
+        RealtimeService.sync(this)
         AppLock.maybeLock(this)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)

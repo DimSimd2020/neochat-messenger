@@ -4,11 +4,16 @@ options:
   deploymentTarget:
     iOS: "15.0"
   createIntermediateGroups: true
+packages:
+  # WebRTC for calls: Google's libwebrtc M152 as an XCFramework (stasel/WebRTC); BSD-3-Clause.
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    exactVersion: 152.0.0
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.6.2"
-    CURRENT_PROJECT_VERSION: "12"
+    MARKETING_VERSION: "0.6.3"
+    CURRENT_PROJECT_VERSION: "13"
     TARGETED_DEVICE_FAMILY: "1"
     ENABLE_BITCODE: NO
 targets:
@@ -32,6 +37,7 @@ targets:
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGN_IDENTITY: ""
     dependencies:
+      - package: WebRTC
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
       - sdk: QuickLook.framework

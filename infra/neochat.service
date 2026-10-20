@@ -14,6 +14,8 @@ Environment=NEOCHAT_LISTEN=127.0.0.1:8090
 Environment=NEOCHAT_DATA_DIR=/var/lib/neochat
 Environment=NEOCHAT_ARGON_MEMORY_KIB=65536
 Environment=NEOCHAT_ARGON_PARALLEL=1
+# TURN secret and URIs for calls (written by deploy.sh on the host, mode 600).
+EnvironmentFile=-/etc/neochat/turn.env
 Restart=on-failure
 RestartSec=2
 MemoryMax=300M

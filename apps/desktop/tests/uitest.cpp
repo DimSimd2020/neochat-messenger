@@ -2,11 +2,13 @@
 // a second, headless neocore client acting as the peer. Run via scripts/uitest.sh,
 // which passes NEOCHAT_E2E_SERVER and NEOCHAT_SHOTS.
 
+#include "calls.h"
 #include "chatlist.h"
 #include "composer.h"
 #include "core.h"
 #include "mainwindow.h"
 #include "messages.h"
+#include "neocall.h"
 #include "popupmenu.h"
 #include "sheet.h"
 #include "style.h"
@@ -34,6 +36,9 @@
 #include <QTest>
 #include <QTranslator>
 #include <QUuid>
+#include <QElapsedTimer>
+
+#include <mutex>
 
 extern "C" {
 #include "neocore.h"
@@ -48,7 +53,11 @@ public:
     {
         const QJsonObject cfg{{"data_dir", dir}, {"db_key", QString(64, 'a')}, {"foreground", false}};
         char *err = nullptr;
-        m_core = nc_open(QJsonDocument(cfg).toJson().constData(), [](void *, const char *) {}, nullptr, &err);
+        m_core = nc_open(QJsonDocument(cfg).toJson().constData(), [](void *ctx, const char *json) {
+            auto *self = static_cast<Peer *>(ctx);
+            std::lock_guard<std::mutex> g(self->m_mu);
+            self->m_events << QJsonDocument::fromJson(QByteArray(json)).object();
+        }, this, &err);
         if (err)
             nc_free(err);
     }
@@ -71,9 +80,63 @@ public:
         }
         return res.value("ok");
     }
+    // Syncs until an event of `type` matching `pred` arrives; returns it or {}.
+    QJsonObject waitEvent(const QString &type, const std::function<bool(const QJsonObject &)> &pred = {}, int ms = 20000)
+    {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms) {
+            {
+                std::lock_guard<std::mutex> g(m_mu);
+                for (int i = 0; i < m_events.size(); ++i)
+                    if (m_events[i].value("type").toString() == type && (!pred || pred(m_events[i])))
+                        return m_events.takeAt(i);
+            }
+            call("sync_now");
+            QTest::qWait(200);
+        }
+        return {};
+    }
 
 private:
     void *m_core = nullptr;
+    std::mutex m_mu;
+    QList<QJsonObject> m_events;
+};
+
+// The peer's call media: neocall in this process, microphone muted.
+struct PeerMedia {
+    std::mutex mu;
+    QString sdp;
+    bool connected = false;
+    neocall *nc = nullptr;
+    PeerMedia()
+    {
+        neocall_config cfg{};
+        nc = neocall_create(&cfg, &PeerMedia::event, [](void *, int, const uint8_t *, int, int, int) {}, this);
+        neocall_set_mic(nc, 0);
+    }
+    ~PeerMedia() { neocall_destroy(nc); }
+    static void event(void *ctx, const char *json)
+    {
+        auto *m = static_cast<PeerMedia *>(ctx);
+        const QJsonObject o = QJsonDocument::fromJson(QByteArray(json)).object();
+        std::lock_guard<std::mutex> g(m->mu);
+        if (o.value("type") == "local_sdp")
+            m->sdp = o.value("sdp").toString();
+        if (o.value("state") == "connected")
+            m->connected = true;
+    }
+    QString localSdp()
+    {
+        std::lock_guard<std::mutex> g(mu);
+        return sdp;
+    }
+    bool isConnected()
+    {
+        std::lock_guard<std::mutex> g(mu);
+        return connected;
+    }
 };
 
 // QTest::keyClicks only handles ASCII; send real key events with Unicode text.
@@ -105,6 +168,8 @@ private slots:
     void composeSendAndFile();
     void receiptsAndGroup();
     void socialFeatures();
+    void calls();
+    void phonePeer();
     void themeSettingsAndSidebar();
     void keyChangeBlocksSending();
     void chatSelectionAndClear();
@@ -554,6 +619,159 @@ void UiTest::socialFeatures()
     Core::instance()->call("set_archived", {{"conversation_id", gid}, {"archived", false}});
     panel->setArchiveMode(false);
     QTRY_VERIFY_WITH_TIMEOUT(!panel->conversation(gid).value("in_archive").toBool() && !list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("_archive").toBool(), 10000);
+}
+
+void UiTest::calls()
+{
+    auto *calls = CallController::instance();
+    auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
+    panel->select(m_conv);
+    emit panel->activated(m_conv);
+    QTRY_VERIFY_WITH_TIMEOUT(button("Аудиозвонок"), 10000);
+    auto callWindow = [] {
+        for (QWidget *w : QApplication::topLevelWidgets())
+            if (w->isVisible() && w->windowTitle().startsWith(QStringLiteral("Звонок")))
+                return w;
+        return static_cast<QWidget *>(nullptr);
+    };
+    auto callButton = [&](const QString &name) -> QAbstractButton * {
+        if (QWidget *w = callWindow())
+            for (auto *b : w->findChildren<QAbstractButton *>())
+                if (b->isVisible() && b->accessibleName() == name)
+                    return b;
+        return nullptr;
+    };
+    auto callShot = [&](const QString &name) {
+        QTest::qWait(Theme::reducedMotion() ? 50 : 400);
+        if (QWidget *w = callWindow())
+            w->grab().save(m_shots + "/" + name + ".png");
+    };
+
+    // Alice calls; Bob answers in the call window, then hangs up.
+    const QJsonObject start = m_alice->call("call_start", {{"conversation_id", m_conv}, {"video", false}}).toObject();
+    const QString id = start.value("call").toObject().value("call_id").toString();
+    QVERIFY(!id.isEmpty());
+    {
+        PeerMedia media;
+        neocall_offer(media.nc);
+        QTRY_VERIFY_WITH_TIMEOUT(!media.localSdp().isEmpty(), 10000);
+        m_alice->call("call_offer", {{"call_id", id}, {"sdp", media.localSdp()}});
+        m_alice->call("sync_now");
+        QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Incoming, 20000);
+        QTRY_VERIFY(callButton("Ответить"));
+        callShot("40-call-incoming");
+        callButton("Ответить")->click();
+        const QJsonObject answered = m_alice->waitEvent("call", [](const QJsonObject &e) { return e.value("state") == "answered"; });
+        QVERIFY2(!answered.isEmpty(), "no answer reached the caller");
+        neocall_set_answer(media.nc, answered.value("sdp").toString().toUtf8().constData());
+        QTRY_VERIFY_WITH_TIMEOUT(media.isConnected(), 15000);
+        m_alice->call("call_connected", {{"call_id", id}});
+        QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Active, 15000);
+        QTest::qWait(1600);
+        callShot("41-call-active");
+        callButton("Выключить микрофон")->click();
+        QVERIFY(!calls->micOn());
+        QTRY_VERIFY(callButton("Включить микрофон"));
+        callShot("42-call-muted");
+        callButton("Завершить")->click();
+        const QJsonObject ended = m_alice->waitEvent("call", [](const QJsonObject &e) { return e.value("state") == "ended"; });
+        QCOMPARE(ended.value("reason").toString(), QStringLiteral("hangup"));
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Idle, 5000);
+    auto *view = find<MessageView>([](MessageView *) { return true; });
+    QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("kind").toString() == "call", 5000);
+    QVERIFY(lastMessage(view).value("text").toString().startsWith(QStringLiteral("Входящий звонок · ")));
+    shot("43-call-log");
+
+    // Bob calls; Alice declines.
+    button("Аудиозвонок")->click();
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Outgoing, 15000);
+    callShot("44-call-outgoing");
+    const QJsonObject incoming = m_alice->waitEvent("call", [](const QJsonObject &e) { return e.value("state") == "incoming"; });
+    QVERIFY2(!incoming.isEmpty(), "the call did not ring at the peer");
+    m_alice->call("call_hangup", {{"call_id", incoming.value("call_id")}});
+    m_alice->call("sync_now");
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Ended, 15000);
+    QCOMPARE(calls->endText(), QStringLiteral("Собеседник отклонил звонок"));
+    callShot("45-call-declined");
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Idle, 5000);
+    QTRY_VERIFY(!callWindow());
+
+    button("Звонки")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().contains(QStringLiteral("Отклонённый звонок")); }), 5000);
+    shot("46-recent-calls");
+    QTest::keyClick(QApplication::focusWidget() ? QApplication::focusWidget() : m_window, Qt::Key_Escape);
+    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+    button("Настройки")->click();
+    QTRY_VERIFY(find<ui::Button>([](ui::Button *b) { return b->text() == QStringLiteral("Звонки"); }));
+    find<ui::Button>([](ui::Button *b) { return b->text() == QStringLiteral("Звонки"); })->click();
+    QTRY_VERIFY(button("Устройство ввода по умолчанию"));
+    QTRY_VERIFY_WITH_TIMEOUT(button("Устройство ввода по умолчанию")->isEnabled(), 10000);
+    shot("47-call-settings");
+    QTest::keyClick(QApplication::focusWidget() ? QApplication::focusWidget() : m_window, Qt::Key_Escape);
+    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+}
+
+// Manual cross-platform check, skipped unless NEOCHAT_PHONE_PEER names a file:
+//   bash scripts/uitest.sh registerAccount phonePeer
+// writes this account's username there, then waits for a call from a phone
+// (emulator: test server http://10.0.2.2:8098), answers it, and calls back with video.
+void UiTest::phonePeer()
+{
+    const QString out = qEnvironmentVariable("NEOCHAT_PHONE_PEER");
+    if (out.isEmpty())
+        QSKIP("NEOCHAT_PHONE_PEER is not set");
+    QFile f(out);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(m_bobName.toUtf8());
+    f.close();
+    CallController *calls = CallController::instance();
+    auto callButton = [&](const QString &name) -> QAbstractButton * {
+        for (QWidget *w : QApplication::topLevelWidgets())
+            if (w->isVisible() && w->windowTitle().startsWith(QStringLiteral("Звонок")))
+                for (auto *b : w->findChildren<QAbstractButton *>())
+                    if (b->isVisible() && b->accessibleName() == name)
+                        return b;
+        return nullptr;
+    };
+    auto callShot = [&](const QString &name) {
+        for (QWidget *w : QApplication::topLevelWidgets())
+            if (w->isVisible() && w->windowTitle().startsWith(QStringLiteral("Звонок")))
+                w->grab().save(m_shots + "/" + name + ".png");
+    };
+
+    qInfo() << "waiting for a call to" << m_bobName;
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Incoming, 600000);
+    const QString conv = calls->call().value("conversation_id").toString();
+    QTest::qWait(1500);
+    callShot("50-phone-incoming");
+    QTRY_VERIFY(callButton("Ответить"));
+    callButton("Ответить")->click();
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Active, 30000);
+    QTest::qWait(8000);
+    callShot("51-phone-active");
+    QCOMPARE(calls->phase(), CallController::Active);
+    qInfo() << "remote video:" << calls->remoteVideo();
+    callButton("Завершить")->click();
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Idle, 10000);
+
+    // Call back with video; the phone answers.
+    QTest::qWait(5000);
+    QJsonObject conversation;
+    Core::instance()->call("get_conversation", {{"conversation_id", conv}}, this, [&](const QJsonValue &v, const CoreError &) { conversation = v.toObject(); });
+    QTRY_VERIFY(!conversation.isEmpty());
+    qInfo() << "calling back";
+    calls->start(conversation, true);
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Outgoing, 15000);
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Active, 180000);
+    QTest::qWait(10000);
+    callShot("52-phone-callback");
+    QCOMPARE(calls->phase(), CallController::Active);
+    qInfo() << "remote video:" << calls->remoteVideo();
+    // The phone hangs up this one.
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Ended, 180000);
+    QCOMPARE(calls->endText(), QStringLiteral("Звонок завершён"));
+    QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Idle, 5000);
 }
 
 void UiTest::themeSettingsAndSidebar()

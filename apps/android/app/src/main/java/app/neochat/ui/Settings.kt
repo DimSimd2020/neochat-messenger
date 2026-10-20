@@ -27,6 +27,7 @@ class SettingsPage(private val act: MainActivity) {
     private val lockBox = LinearLayout(ctx)
     private val cacheValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val lastSeenValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
+    private val batteryValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
 
     init {
         scroll.isVerticalScrollBarEnabled = false
@@ -94,6 +95,9 @@ class SettingsPage(private val act: MainActivity) {
         section("Уведомления").apply {
             addView(toggle("Уведомления о сообщениях", "notifications", true))
             addView(note("В уведомлении видно только название чата, текст не показывается."))
+            addView(toggle("Мгновенная доставка", "realtime", true) { app.neochat.RealtimeService.sync(ctx) })
+            addView(note("NeoChat держит соединение с сервером в фоне, поэтому сообщения и звонки приходят сразу. В шторке остаётся тихое уведомление «NeoChat на связи». Если выключить, новые сообщения проверяются примерно раз в 15 минут, а звонки в фоне не приходят."))
+            addView(nav(R.drawable.ic_shield, "Работа в фоне", batteryValue) { requestUnrestricted() })
             addView(nav(R.drawable.ic_bell, "Звук и вибрация") {
                 act.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName))
             })
@@ -204,6 +208,7 @@ class SettingsPage(private val act: MainActivity) {
     }
 
     fun load() {
+        batteryValue.text = if (unrestricted()) "Без ограничений" else "Ограничена"
         CoreClient.call("status") { v, _ ->
             val s = v as? JSONObject ?: return@call
             status = s
@@ -266,6 +271,15 @@ class SettingsPage(private val act: MainActivity) {
             CoreClient.call("set_avatar", JSONObject().put("path", "")) { _, e -> if (e != null) act.toast(e.message) else load() }
         }
         menu.show()
+    }
+
+    private fun unrestricted() = ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
+
+    /** Battery optimization may cut the background connection while the phone sleeps. */
+    private fun requestUnrestricted() {
+        val intent = if (unrestricted()) Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        else Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:" + ctx.packageName))
+        runCatching { act.startActivity(intent) }.onFailure { act.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
     }
 
     private fun chooseLastSeen() {

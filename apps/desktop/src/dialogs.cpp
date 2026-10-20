@@ -1,5 +1,6 @@
 #include "dialogs.h"
 
+#include "calls.h"
 #include "core.h"
 #include "sheet.h"
 #include "theme.h"
@@ -588,6 +589,133 @@ void devices(const DialogHost &h)
     sheet->open();
 }
 
+// ---- calls ----
+
+void recentCalls(const DialogHost &h)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Звонки"));
+    auto *list = new RowList(420);
+    auto *empty = mutedText(QStringLiteral("Звонков пока нет. Позвонить можно из личного чата: кнопки звонка в шапке переписки."));
+    sheet->body()->addWidget(list);
+    sheet->body()->addWidget(empty);
+    sheet->body()->addWidget(mutedText(QStringLiteral("Звонки идут напрямую между устройствами и шифруются. Журнал хранится только на этом компьютере.")));
+    auto reload = std::make_shared<std::function<void()>>();
+    *reload = [=] {
+        Core::instance()->call("list_calls", {{"limit", 100}}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+            if (!e.ok())
+                return fail(h, e);
+            list->clear();
+            const QJsonArray arr = v.toArray();
+            for (const auto &x : arr) {
+                const QJsonObject c = x.toObject();
+                const QDateTime at = QDateTime::fromMSecsSinceEpoch(qint64(c.value("at").toDouble()));
+                const QString when = at.date() == QDate::currentDate() ? at.toString("HH:mm") : at.toString("dd.MM HH:mm");
+                const QString sub = c.value("text").toString() + QStringLiteral(" · ") + when;
+                auto *row = new PersonRow(c.value("peer_name").toString(), sub, c.value("peer_user_id").toString());
+                row->avatar = c.value("avatar_path").toString();
+                if (c.value("missed").toBool())
+                    row->warning = sub;
+                const QString cid = c.value("conversation_id").toString();
+                QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
+                    QMenu menu(row);
+                    auto call = [=](bool video) {
+                        Core::instance()->call("get_conversation", {{"conversation_id", cid}}, sheet, [=](const QJsonValue &cv, const CoreError &ce) {
+                            if (!ce.ok())
+                                return fail(h, ce);
+                            sheet->close();
+                            CallController::instance()->start(cv.toObject(), video);
+                        });
+                    };
+                    menu.addAction(QStringLiteral("Позвонить"), sheet, [=] { call(false); });
+                    menu.addAction(QStringLiteral("Видеозвонок"), sheet, [=] { call(true); });
+                    menu.addAction(QStringLiteral("Открыть чат"), sheet, [=] {
+                        sheet->close();
+                        h.openChat(cid);
+                    });
+                    menu.exec(row->mapToGlobal(QPoint(60, row->height())));
+                });
+                list->add(row);
+            }
+            list->fit();
+            empty->setVisible(arr.isEmpty());
+            list->setVisible(!arr.isEmpty());
+        });
+    };
+    QObject::connect(Core::instance(), &Core::event, sheet, [=](const QJsonObject &ev) {
+        if (ev.value("type").toString() == "conversations_changed")
+            (*reload)();
+    });
+    (*reload)();
+    sheet->open();
+}
+
+// Devices for the next call. Ids are kept even while the device is unplugged;
+// the call then uses the system default.
+void callSettings(const DialogHost &h)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Звонки"), 480);
+    struct Choice {
+        const char *key, *list, *title, *fallback;
+    };
+    // Windows has default audio devices but no default camera.
+    static const Choice choices[] = {
+        {"calls/input", "inputs", "Устройство ввода по умолчанию", "Как в системе"},
+        {"calls/output", "outputs", "Устройство вывода по умолчанию", "Как в системе"},
+        {"calls/camera", "cameras", "Камера", "Первая найденная"},
+    };
+    QList<ui::Button *> buttons;
+    for (const Choice &ch : choices) {
+        sheet->body()->addWidget(new ui::Label(QString::fromUtf8(ch.title), 15, QFont::DemiBold));
+        auto *b = new ui::Button(QStringLiteral("Загрузка…"), ui::Button::Secondary);
+        b->setEnabled(false);
+        b->setAccessibleName(QString::fromUtf8(ch.title));
+        sheet->body()->addWidget(b);
+        buttons << b;
+    }
+    sheet->body()->addWidget(mutedText(QStringLiteral("Выбор применяется к следующему звонку. «Как в системе» следует за устройством, выбранным в Windows.")));
+    CallController::instance()->devices(sheet, [=](const QJsonObject &all) {
+        for (int i = 0; i < 3; ++i) {
+            const Choice ch = choices[i];
+            ui::Button *b = buttons[i];
+            const QJsonArray devs = all.value(ch.list).toArray();
+            auto label = [=] {
+                const QString id = QSettings().value(ch.key).toString();
+                if (id.isEmpty())
+                    return QString::fromUtf8(ch.fallback);
+                for (const auto &d : devs)
+                    if (d.toObject().value("id").toString() == id)
+                        return d.toObject().value("name").toString();
+                return QStringLiteral("Не подключено — ") + QString::fromUtf8(ch.fallback).toLower();
+            };
+            b->setText(label());
+            b->setEnabled(true);
+            QObject::connect(b, &QAbstractButton::clicked, sheet, [=] {
+                QMenu menu(b);
+                const QString cur = QSettings().value(ch.key).toString();
+                auto add = [&](const QString &name, const QString &id) {
+                    QAction *a = menu.addAction(name);
+                    a->setCheckable(true);
+                    a->setChecked(cur == id);
+                    QObject::connect(a, &QAction::triggered, sheet, [=] {
+                        if (id.isEmpty())
+                            QSettings().remove(ch.key);
+                        else
+                            QSettings().setValue(ch.key, id);
+                        b->setText(label());
+                    });
+                };
+                add(QString::fromUtf8(ch.fallback), {});
+                for (const auto &d : devs)
+                    add(d.toObject().value("name").toString(), d.toObject().value("id").toString());
+                if (devs.isEmpty())
+                    menu.addAction(QString::fromUtf8(i == 2 ? "Камеры не найдены" : "Устройства не найдены"))->setEnabled(false);
+                menu.exec(b->mapToGlobal(QPoint(0, b->height())));
+            });
+        }
+    });
+    sheet->open();
+}
+
 // ---- settings ----
 
 void graphicsSettings(const DialogHost &h)
@@ -664,6 +792,11 @@ void settings(const DialogHost &h)
     auto *groups = new QHBoxLayout;
     auto *graphics = new ui::Button(QStringLiteral("Графика"), ui::Button::Secondary);
     auto *privacy = new ui::Button(QStringLiteral("Конфиденциальность"), ui::Button::Secondary);
+    auto *calls = new ui::Button(QStringLiteral("Звонки"), ui::Button::Secondary);
+    QObject::connect(calls, &QAbstractButton::clicked, sheet, [=] {
+        sheet->close();
+        callSettings(h);
+    });
     QObject::connect(graphics, &QAbstractButton::clicked, sheet, [=] {
         sheet->close();
         graphicsSettings(h);
@@ -674,6 +807,7 @@ void settings(const DialogHost &h)
     });
     groups->addWidget(graphics);
     groups->addWidget(privacy);
+    groups->addWidget(calls);
     sheet->body()->addLayout(groups);
 
     sheet->body()->addSpacing(4);

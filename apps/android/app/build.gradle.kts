@@ -19,8 +19,8 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 12
-        versionName = "0.6.2"
+        versionCode = 13
+        versionName = "0.6.3"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
@@ -63,4 +63,6 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.0")
     // QR decoding for device linking; Apache-2.0.
     implementation("com.google.zxing:core:3.5.3")
+    // WebRTC for calls (libwebrtc M150 prebuilt by the webrtc-sdk project); BSD-3-Clause.
+    implementation("io.github.webrtc-sdk:android:150.7871.01")
 }

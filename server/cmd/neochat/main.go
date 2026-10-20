@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,7 +55,10 @@ func main() {
 		}
 		mem, _ := strconv.Atoi(env("NEOCHAT_ARGON_MEMORY_KIB", "65536"))
 		par, _ := strconv.Atoi(env("NEOCHAT_ARGON_PARALLEL", "2"))
-		srv := app.New(db, app.Config{DataDir: dataDir, ArgonMemoryKiB: uint32(mem), ArgonParallel: par}, log)
+		srv := app.New(db, app.Config{
+			DataDir: dataDir, ArgonMemoryKiB: uint32(mem), ArgonParallel: par,
+			TurnSecret: os.Getenv("NEOCHAT_TURN_SECRET"), TurnURIs: strings.Fields(os.Getenv("NEOCHAT_TURN_URIS")),
+		}, log)
 		go srv.RunCleanup(ctx)
 		hs := &http.Server{
 			Addr:              env("NEOCHAT_LISTEN", "127.0.0.1:8090"),

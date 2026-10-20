@@ -214,6 +214,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     // Measured row heights: estimates made the table jump while sending and left the first screen half drawn.
     private var heights: [String: CGFloat] = [:]
     private var pendingBottom = false
+    private let callButton = UIButton(type: .system)
+    private var callItem: UIBarButtonItem?
 
     init(conversationId: String) {
         self.conversationId = conversationId
@@ -307,6 +309,19 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             },
         ]))]
         navigationItem.rightBarButtonItems?.last?.accessibilityLabel = "Действия чата"
+        // Calls: direct chats only; the menu offers voice or video.
+        callButton.glass(20)
+        callButton.setImage(UIImage(systemName: "phone.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)), for: .normal)
+        callButton.tintColor = Theme.accent
+        callButton.accessibilityLabel = "Позвонить"
+        callButton.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([callButton.widthAnchor.constraint(equalToConstant: 40), callButton.heightAnchor.constraint(equalToConstant: 40)])
+        callButton.menu = UIMenu(children: [
+            UIAction(title: "Аудиозвонок", image: UIImage(systemName: "phone")) { [weak self] _ in self?.startCall(video: false) },
+            UIAction(title: "Видеозвонок", image: UIImage(systemName: "video")) { [weak self] _ in self?.startCall(video: true) },
+        ])
+        callButton.showsMenuAsPrimaryAction = true
+        callItem = UIBarButtonItem(customView: callButton)
 
         let stack = UIStackView(arrangedSubviews: [notice, table, composer, goneLabel])
         stack.axis = .vertical
@@ -696,6 +711,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 : c.bool("left") ? (channel ? "Вы вышли из канала" : "Вы вышли из этой группы")
                 : channel ? "Публикуют только владелец и админы канала" : "Писать здесь могут только владелец и админы"
             self.updateAttachMenu()
+            self.updateCallButton(gone: gone || mute)
             let keyChanged = !(c["key_changed_users"] as? [Any] ?? []).isEmpty
             self.blocked = keyChanged || !(c["can_send"] as? Bool ?? true)
             self.updateSend(animated: false)
@@ -708,6 +724,20 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 self.textViewDidChange(self.input)
             }
         }
+    }
+
+    private func updateCallButton(gone: Bool) {
+        guard let callItem, var items = navigationItem.rightBarButtonItems else { return }
+        let callable = conv.str("kind") == "direct" && !gone && !conv.str("peer_user_id").isEmpty
+        let shown = items.contains { $0 === callItem }
+        if callable == shown { return }
+        if callable { items.append(callItem) } else { items.removeAll { $0 === callItem } }
+        navigationItem.setRightBarButtonItems(items, animated: false)
+    }
+
+    private func startCall(video: Bool) {
+        let c = conv
+        CallManager.withPermissions(video: video, from: self) { cam in CallManager.shared.start(c, video: video && cam) }
     }
 
     /// "печатает…" wins over presence and the member count while it lasts.
@@ -1291,6 +1321,17 @@ final class BubbleCell: UITableViewCell {
             text.font = .systemFont(ofSize: [52, 42, 34][min(emojiCount, 3) - 1])
             text.text = body
             text.textColor = fg
+        } else if kind == "call", let c = m.obj("call") {
+            // Call log entry: phone or camera icon, missed calls in the warning color.
+            let missed = c.str("status") == "missed" && !out
+            let color: UIColor = missed ? Theme.warning : fg
+            let font = Theme.font(Prefs.textSize, .semibold)
+            let icon = NSTextAttachment()
+            icon.image = UIImage(systemName: c.bool("video") ? "video.fill" : "phone.fill", withConfiguration: UIImage.SymbolConfiguration(font: font))?
+                .withTintColor(missed ? Theme.warning : out ? fg : Theme.accent, renderingMode: .alwaysOriginal)
+            let a = NSMutableAttributedString(attachment: icon)
+            a.append(NSAttributedString(string: "  " + body, attributes: [.font: font, .foregroundColor: color]))
+            text.attributedText = a
         } else {
             text.attributedText = richText(m, size: Prefs.textSize, color: fg)
         }

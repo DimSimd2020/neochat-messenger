@@ -77,6 +77,9 @@ pub struct Payload {
     /// Forward header: {"name": <original sender>, "ts": <original sent_at>}.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fwd: Option<Value>,
+    /// Call signaling: {op, id, ...} (see calls.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -465,7 +468,7 @@ impl Inner {
         conn.execute("DELETE FROM reactions WHERE message_id=?1", [id])?;
         conn.execute("DELETE FROM poll_votes WHERE poll_id=?1", [id])?;
         conn.execute(
-            "UPDATE conversations SET last_preview=COALESCE((SELECT CASE kind WHEN 'file' THEN '📎 Файл' WHEN 'poll' THEN '📊 ' || body ELSE body END FROM messages WHERE conversation_id=?1 ORDER BY local_id DESC LIMIT 1),'') WHERE id=?1",
+            "UPDATE conversations SET last_preview=COALESCE((SELECT CASE kind WHEN 'file' THEN '📎 Файл' WHEN 'poll' THEN '📊 ' || body WHEN 'call' THEN '📞 Звонок' ELSE body END FROM messages WHERE conversation_id=?1 ORDER BY local_id DESC LIMIT 1),'') WHERE id=?1",
             [conv],
         )?;
         Ok(())

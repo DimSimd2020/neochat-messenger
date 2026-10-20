@@ -76,18 +76,58 @@ object Dialogs {
 
     fun recentCalls(act: MainActivity) {
         val s = Sheet(act, "Недавние звонки")
-        val box = LinearLayout(s.ctx).apply {
+        val ctx = s.ctx
+        val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val empty = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, s.ctx.dp(18), 0, s.ctx.dp(18))
+            setPadding(0, ctx.dp(18), 0, ctx.dp(18))
+            visibility = View.GONE
         }
-        box.addView(TintedIcon(s.ctx, R.drawable.ic_call_history, Theme.Role.MUTED), lp(s.ctx.dp(40), s.ctx.dp(40)))
-        box.addView(s.ctx.label("Звонков пока нет", 16f, 600).apply { gravity = Gravity.CENTER }, lp(WRAP, WRAP).apply { topMargin = s.ctx.dp(12) })
-        box.addView(
-            s.ctx.label("Звонки в этой версии NeoChat не реализованы.", 13.5f, 400, Theme.Role.MUTED).apply { gravity = Gravity.CENTER },
-            lp(WRAP, WRAP).apply { topMargin = s.ctx.dp(6) }
+        empty.addView(TintedIcon(ctx, R.drawable.ic_call_history, Theme.Role.MUTED), lp(ctx.dp(40), ctx.dp(40)))
+        empty.addView(ctx.label("Звонков пока нет", 16f, 600).apply { gravity = Gravity.CENTER }, lp(WRAP, WRAP).apply { topMargin = ctx.dp(12) })
+        empty.addView(
+            ctx.label("Позвонить можно из личного чата: кнопки звонка в шапке переписки.", 13.5f, 400, Theme.Role.MUTED).apply { gravity = Gravity.CENTER },
+            lp(WRAP, WRAP).apply { topMargin = ctx.dp(6) }
         )
-        s.add(box, 0)
+        s.add(rows, 0)
+        s.add(empty, 0)
+        s.muted("Звонки идут напрямую между устройствами и шифруются. Журнал хранится только на этом телефоне.", 10)
+        val fmt = SimpleDateFormat("dd.MM HH:mm", Locale.getDefault())
+        val today = SimpleDateFormat("HH:mm", Locale.getDefault())
+        CoreClient.call("list_calls", JSONObject().put("limit", 100)) { v, e ->
+            if (e != null) return@call act.toast(e.message)
+            val list = (v as? JSONArray)?.objects() ?: emptyList()
+            empty.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+            for (c in list) {
+                val row = ListRow(ctx, 44)
+                row.avatar.set(c.str("peer_name"), c.str("peer_user_id"), c.str("avatar_path"))
+                row.title.text = c.str("peer_name")
+                val at = c.optLong("at")
+                val sameDay = android.text.format.DateUtils.isToday(at)
+                row.subtitle.text = c.str("text") + " · " + (if (sameDay) today else fmt).format(java.util.Date(at))
+                if (c.optBoolean("missed")) row.subtitle.role(Theme.Role.WARNING)
+                row.contentDescription = c.str("peer_name") + ", " + row.subtitle.text
+                val cid = c.str("conversation_id")
+                row.setOnClickListener {
+                    fun dial(video: Boolean) = CoreClient.call("get_conversation", JSONObject().put("conversation_id", cid)) { cv, ce ->
+                        if (ce != null) return@call act.toast(ce.message)
+                        s.dismiss()
+                        act.withPermission(android.Manifest.permission.RECORD_AUDIO) { mic ->
+                            if (!mic) return@withPermission act.toast("Для звонка нужен доступ к микрофону")
+                            if (!video) return@withPermission app.neochat.calls.CallManager.start(cv as JSONObject, false)
+                            act.withPermission(android.Manifest.permission.CAMERA) { cam -> app.neochat.calls.CallManager.start(cv as JSONObject, cam) }
+                        }
+                    }
+                    PopupMenu(act, row)
+                        .add("Позвонить") { dial(false) }
+                        .add("Видеозвонок") { dial(true) }
+                        .add("Открыть чат") { s.dismiss(); act.openChat(cid) }
+                        .show()
+                }
+                rows.addView(row, lp())
+            }
+        }
         s.show()
     }
 

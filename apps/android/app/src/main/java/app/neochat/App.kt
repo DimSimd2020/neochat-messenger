@@ -8,6 +8,8 @@ import android.app.job.JobInfo
 import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.os.Bundle
+import app.neochat.calls.CallManager
+import app.neochat.calls.CallNotifications
 import app.neochat.core.CoreClient
 import app.neochat.core.DbKey
 import org.json.JSONObject
@@ -25,10 +27,20 @@ class App : Application() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(Notifier.CHANNEL, "Сообщения", NotificationManager.IMPORTANCE_HIGH)
         )
-        CoreClient.addListener { ev -> if (ev.optString("type") == "notify") Notifier.onNotify(this, ev) }
+        CallNotifications.createChannels(this)
+        CoreClient.addListener { ev ->
+            when (ev.optString("type")) {
+                "notify" -> Notifier.onNotify(this, ev)
+                "call", "call_media" -> CallManager.onCoreEvent(ev)
+            }
+        }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityStarted(a: Activity) {
-                if (started++ == 0) CoreClient.call("set_foreground", JSONObject().put("active", true))
+                if (started++ == 0) {
+                    CoreClient.call("set_foreground", JSONObject().put("active", true))
+                    // Android only lets a foreground app start the service; retry on every return.
+                    RealtimeService.sync(this@App)
+                }
             }
 
             override fun onActivityStopped(a: Activity) {
@@ -50,7 +62,8 @@ class App : Application() {
         CoreClient.open(dir.absolutePath, DbKey.loadOrCreate(this))
     }
 
-    /** Push needs FCM credentials that this build does not have; a periodic job fetches instead. */
+    /** Push needs FCM credentials that this build does not have: RealtimeService keeps a socket open,
+     *  and this periodic job is the fallback when the setting is off or the system stopped the service. */
     private fun scheduleSync() {
         val js = getSystemService(JobScheduler::class.java)
         if (js.getPendingJob(SyncJob.ID) != null) return
