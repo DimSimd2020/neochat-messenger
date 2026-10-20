@@ -21,15 +21,18 @@ import (
 )
 
 const (
-	accessTTL     = 15 * time.Minute
-	refreshTTL    = 30 * 24 * time.Hour
-	refreshGrace  = 60 * time.Second
-	maxDevices    = 3
+	accessTTL    = 15 * time.Minute
+	refreshTTL   = 30 * 24 * time.Hour
+	refreshGrace = 60 * time.Second
+	// Per-account active devices. Keep in sync with core MAX_DEVICES.
+	maxDevices    = 10
 	loginSkew     = 5 * time.Minute
 	identityLen   = 33   // libsignal serialized Curve25519 public key
 	kyberKeyLen   = 1569 // libsignal serialized Kyber1024 public key
 	signatureLen  = 64
 	maxPrekeysReq = 200
+	// 10 devices × (16 uuid + 33 identity + 32 auth) plus roster header stays well under this.
+	maxRosterBlob = 4096
 )
 
 var usernameRe = regexp.MustCompile(`^[a-z0-9_]{3,32}$`)
@@ -113,10 +116,14 @@ func validatePrekeys(ec, kyber []prekeyIn) error {
 
 func validateRoster(r *rosterIn) (int64, error) {
 	rev, err := strconv.ParseInt(r.Revision, 10, 64)
-	if err != nil || rev < 1 || len(r.Blob) == 0 || len(r.Blob) > 4096 || len(r.Signature) != signatureLen {
+	if err != nil || rev < 1 || len(r.Blob) == 0 || len(r.Blob) > maxRosterBlob || len(r.Signature) != signatureLen {
 		return 0, errf(400, "bad_request", "Некорректный список устройств")
 	}
 	return rev, nil
+}
+
+func errDeviceLimit() *apiError {
+	return errf(409, "device_limit", fmt.Sprintf("У аккаунта уже %d устройств. Отзовите одно из них", maxDevices))
 }
 
 func validatePassword(p string) error {

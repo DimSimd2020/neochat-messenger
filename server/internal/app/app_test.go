@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -496,5 +497,74 @@ func TestAttachmentUploadAndAccess(t *testing.T) {
 	}
 	if st := get(eve); st != 404 {
 		t.Fatalf("eve download: %d", st)
+	}
+}
+
+func TestDeviceAndRecipientCaps(t *testing.T) {
+	if maxDevices != 10 {
+		t.Fatalf("maxDevices=%d", maxDevices)
+	}
+	want := maxChannelMembers*maxDevices - 1
+	if maxRecipients != want {
+		t.Fatalf("maxRecipients=%d want %d", maxRecipients, want)
+	}
+	if want != 1999 {
+		t.Fatalf("channel fan-out cap %d, want 1999", want)
+	}
+	if maxRosterBlob < 1024 {
+		t.Fatalf("roster blob cap too small for 10 devices: %d", maxRosterBlob)
+	}
+}
+
+func addDeviceViaPassword(t *testing.T, ts *httptest.Server, username string, rev int64) {
+	t.Helper()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	c := &client{t: t, base: ts.URL}
+	st, m := c.do("POST", "/v1/devices/new/start", map[string]string{"username": username, "password": "correct horse battery"}, nil)
+	if st != 200 {
+		t.Fatalf("new device start: %d %v", st, m)
+	}
+	token, _ := m["start_token"].(string)
+	st, m = c.do("POST", "/v1/devices/new/finish", map[string]any{
+		"start_token": token,
+		"device":      fakeDevice(newUUID(), pub),
+		"roster":      rosterIn{Revision: strconv.FormatInt(rev, 10), Blob: []byte("roster"), Signature: rnd(64)},
+	}, nil)
+	if st != 200 {
+		t.Fatalf("new device finish: %d %v", st, m)
+	}
+}
+
+func TestDeviceLimit(t *testing.T) {
+	s, ts := testServer(t)
+	register(t, s, ts, "alice")
+	for i := 2; i <= maxDevices; i++ {
+		addDeviceViaPassword(t, ts, "alice", int64(i))
+	}
+	c := &client{t: t, base: ts.URL}
+	st, m := c.do("POST", "/v1/devices/new/start", map[string]string{"username": "alice", "password": "correct horse battery"}, nil)
+	if st != 409 || m["code"] != "device_limit" {
+		t.Fatalf("device %d: %d %v", maxDevices+1, st, m)
+	}
+	if msg, _ := m["message"].(string); !strings.Contains(msg, "10") {
+		t.Fatalf("limit message should mention 10: %v", m)
+	}
+}
+
+func TestSendRejectsTooManyRecipients(t *testing.T) {
+	s, ts := testServer(t)
+	a := register(t, s, ts, "alice")
+	b := register(t, s, ts, "bob")
+	conv := direct(t, a, b)
+	recips := make([]map[string]any, maxRecipients+1)
+	for i := range recips {
+		recips[i] = map[string]any{"target_device_id": newUUID(), "ciphertext": []byte{1, 2}}
+	}
+	st, m := a.do("POST", "/v1/conversations/"+conv.ID+"/messages", map[string]any{
+		"version": 1, "client_message_id": newUUID(), "conversation_revision": conv.Revision,
+		"recipient_set_revision": conv.RecipientSetRevision, "recipients": recips, "attachment_ids": []string{},
+	}, nil)
+	if st != 400 {
+		t.Fatalf("oversize recipient list: %d %v", st, m)
 	}
 }

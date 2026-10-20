@@ -227,6 +227,7 @@ object Dialogs {
         val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         s.add(rows, 0)
         s.muted("Отзыв устройства прекращает доставку новых сообщений на него. Уже скачанные на нём копии удалённо не стираются.", 8)
+        s.muted("На аккаунте может быть до 10 устройств.", 4)
         s.heading("Вход на компьютере", 18)
         s.muted("Откройте NeoChat на компьютере и отсканируйте QR-код с экрана входа.", 4)
         val scan = PillButton(ctx, "Сканировать QR-код")

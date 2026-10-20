@@ -106,7 +106,7 @@ func (s *Server) handleNewDeviceStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if n >= maxDevices {
-		s.fail(w, r, errf(409, "device_limit", "У аккаунта уже 3 устройства. Отзовите одно из них"))
+		s.fail(w, r, errDeviceLimit())
 		return
 	}
 	// Without other devices there is nowhere to deliver the code, so the password suffices.
@@ -224,7 +224,7 @@ func (s *Server) addDevice(r *http.Request, tx pgx.Tx, userID string, d *deviceI
 		return nil, err
 	}
 	if n >= maxDevices {
-		return nil, errf(409, "device_limit", "У аккаунта уже 3 устройства. Отзовите одно из них")
+		return nil, errDeviceLimit()
 	}
 	if err := updateRoster(r, tx, userID, ro); err != nil {
 		return nil, err

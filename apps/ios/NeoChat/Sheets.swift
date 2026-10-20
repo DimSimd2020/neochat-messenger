@@ -268,6 +268,7 @@ final class DevicesViewController: SheetViewController {
                     self.stack.addArrangedSubview(row)
                 }
                 self.muted("Отзыв устройства прекращает доставку новых сообщений на него. Уже скачанные на нём копии удалённо не стираются.")
+                self.muted("На аккаунте может быть до 10 устройств.")
                 self.heading("Вход на компьютере")
                 self.muted("Откройте NeoChat на компьютере и отсканируйте QR-код с экрана входа.")
                 let scan = PillButton("Сканировать QR-код")
