@@ -90,7 +90,7 @@ jobs:
 
       - name: APK
         working-directory: apps/android
-        run: ./gradlew assembleRelease --no-daemon
+        run: chmod +x ./gradlew && ./gradlew assembleRelease --no-daemon
 
       - name: Upload APK to release
         env:
