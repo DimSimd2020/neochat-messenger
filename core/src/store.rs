@@ -130,6 +130,10 @@ impl Db {
             "ALTER TABLE conversations ADD COLUMN state_rev INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN state_blob BLOB",
             "ALTER TABLE messages ADD COLUMN poll TEXT",
+            // Archive and pins are per device; pinned holds the pin time (0 = not pinned).
+            "ALTER TABLE conversations ADD COLUMN in_archive INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE contacts ADD COLUMN bio TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(sql, []);
         }
@@ -137,6 +141,10 @@ impl Db {
             "CREATE TABLE IF NOT EXISTS poll_votes (
                 poll_id TEXT NOT NULL, user_id TEXT NOT NULL, choices TEXT NOT NULL, at INTEGER NOT NULL,
                 PRIMARY KEY (poll_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS reactions (
+                message_id TEXT NOT NULL, user_id TEXT NOT NULL, emoji TEXT NOT NULL, at INTEGER NOT NULL,
+                PRIMARY KEY (message_id, user_id)
             );",
         )?;
         Ok(Db { conn })

@@ -196,30 +196,66 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, a *authCtx) 
 type hub struct {
 	mu    sync.Mutex
 	conns map[string]map[*wsConn]struct{}
+	// Open connections per user: a user with any is online.
+	users map[string]int
 }
 
+// wsConn gets nil for "sync now" and a ready JSON message for live hints
+// (typing, presence) that are never stored.
 type wsConn struct {
-	ch     chan struct{}
+	ch     chan []byte
 	cancel context.CancelFunc
 }
 
-func newHub() *hub { return &hub{conns: map[string]map[*wsConn]struct{}{}} }
+func newHub() *hub {
+	return &hub{conns: map[string]map[*wsConn]struct{}{}, users: map[string]int{}}
+}
 
-func (h *hub) add(device string, c *wsConn) {
+// add reports whether the user just came online.
+func (h *hub) add(user, device string, c *wsConn) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.conns[device] == nil {
 		h.conns[device] = map[*wsConn]struct{}{}
 	}
 	h.conns[device][c] = struct{}{}
+	h.users[user]++
+	return h.users[user] == 1
 }
 
-func (h *hub) remove(device string, c *wsConn) {
+// remove reports whether the user just went offline.
+func (h *hub) remove(user, device string, c *wsConn) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.conns[device], c)
 	if len(h.conns[device]) == 0 {
 		delete(h.conns, device)
+	}
+	h.users[user]--
+	if h.users[user] <= 0 {
+		delete(h.users, user)
+		return true
+	}
+	return false
+}
+
+func (h *hub) online(user string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.users[user] > 0
+}
+
+// send delivers a live hint to the connected devices; a full queue drops it.
+func (h *hub) send(devices []string, msg []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, d := range devices {
+		for c := range h.conns[d] {
+			select {
+			case c.ch <- msg:
+			default:
+			}
+		}
 	}
 }
 
@@ -231,7 +267,7 @@ func (h *hub) notify(devices []string) {
 	for _, d := range devices {
 		for c := range h.conns[d] {
 			select {
-			case c.ch <- struct{}{}:
+			case c.ch <- nil:
 			default:
 				c.cancel()
 			}
@@ -256,10 +292,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, a *authCtx
 	conn.SetReadLimit(1024)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	c := &wsConn{ch: make(chan struct{}, 8), cancel: cancel}
-	s.hub.add(a.DeviceID, c)
-	defer s.hub.remove(a.DeviceID, c)
-	c.ch <- struct{}{}
+	c := &wsConn{ch: make(chan []byte, 16), cancel: cancel}
+	if s.hub.add(a.UserID, a.DeviceID, c) {
+		s.presenceChanged(a.UserID)
+	}
+	defer func() {
+		if s.hub.remove(a.UserID, a.DeviceID, c) {
+			s.presenceChanged(a.UserID)
+		}
+	}()
+	c.ch <- nil
 
 	// Clients never send application data; reading detects close frames.
 	go func() {
@@ -284,7 +326,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, a *authCtx
 			if err != nil {
 				return
 			}
-		case <-c.ch:
+		case live := <-c.ch:
+			if live != nil {
+				wctx, wc := context.WithTimeout(ctx, 10*time.Second)
+				err := conn.Write(wctx, websocket.MessageText, live)
+				wc()
+				if err != nil {
+					return
+				}
+				continue
+			}
 			var head int64
 			var revoked *time.Time
 			if err := s.db.QueryRow(ctx, `SELECT event_head, revoked_at FROM devices WHERE id=$1`, a.DeviceID).Scan(&head, &revoked); err != nil || revoked != nil {

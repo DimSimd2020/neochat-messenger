@@ -52,6 +52,11 @@ impl Inner {
         // Per conversation: (channel title when it is a channel, member tags).
         let mut convs: std::collections::HashMap<String, (Option<String>, Value)> = Default::default();
         let mut polls: Vec<(usize, String, Value)> = Vec::new();
+        let mut reactions: Vec<Value> = Vec::with_capacity(rows.len());
+        for r in &rows {
+            reactions.push(self.reactions_json(&db.conn, &r.id, &me)?);
+        }
+        let mut reactions = reactions.into_iter();
         for r in rows {
             let reply = match &r.reply_to {
                 Some(rid) => db
@@ -107,6 +112,8 @@ impl Inner {
                 "sender_tag": if channel.is_some() { json!("") } else { tags.get(&r.sender).cloned().unwrap_or(json!("")) },
                 "channel": channel.is_some(),
                 "spans": if r.kind == "text" || r.kind == "file" { json!(crate::markdown::spans(&r.body)) } else { json!([]) },
+                "emoji_only": if r.kind == "text" { crate::social::emoji_count(&r.body).filter(|n| *n <= 3).unwrap_or(0) } else { 0 },
+                "reactions": reactions.next().unwrap_or(json!([])),
                 "outgoing": r.outgoing,
                 "kind": r.kind,
                 "text": if r.kind == "undecryptable" { "Не удалось расшифровать сообщение".to_string() } else { r.body },

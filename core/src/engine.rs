@@ -5,7 +5,8 @@
 //! happen outside it; results are applied in short transactions afterwards.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -40,6 +41,10 @@ pub struct Inner {
     pub ws_active: AtomicBool,
     /// Serializes sync cycles between the worker and `sync_now`.
     pub cycle_lock: Mutex<()>,
+    /// Last known presence per user (see social.rs) and when we last said "typing".
+    pub presence: Mutex<HashMap<String, Value>>,
+    pub typing_sent: Mutex<HashMap<String, i64>>,
+    pub tz_offset: AtomicI32,
 }
 
 pub struct Core {
@@ -72,6 +77,9 @@ impl Core {
             refresh_lock: Mutex::new(()),
             ws_active: AtomicBool::new(false),
             cycle_lock: Mutex::new(()),
+            presence: Mutex::new(HashMap::new()),
+            typing_sent: Mutex::new(HashMap::new()),
+            tz_offset: AtomicI32::new(config["tz_offset"].as_i64().unwrap_or(0) as i32),
         });
         let w = inner.clone();
         let worker = std::thread::Builder::new().name("neocore-worker".into()).spawn(move || w.worker_loop()).ok();
@@ -292,6 +300,18 @@ impl Inner {
             "get_settings" => self.get_settings(),
             "set_settings" => self.set_settings(p),
             "safety_number" => self.contact_info(p),
+            "react" => self.react(p),
+            "set_archived" => self.set_archived(p),
+            "set_pinned" => self.set_pinned(p),
+            "presence" => self.presence(p),
+            "send_typing" => self.send_typing(p),
+            "set_last_seen_visible" => self.set_last_seen_visible(p),
+            "lock_set" => self.lock_set(p),
+            "lock_check" => self.lock_check(p),
+            "lock_clear" => self.lock_clear(),
+            "lock_status" => self.lock_status(),
+            "my_qr" => self.my_qr(),
+            "add_contact_qr" => self.add_contact_qr(p),
             _ => Err(Error::Invalid(format!("Неизвестный метод {method}"))),
         }
     }
@@ -307,6 +327,7 @@ impl Inner {
         Ok(json!({
             "logged_in": kv_get(c, "refresh_token")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "display_name": kv_get_str(c, "display_name")?,
+            "bio": kv_get_str(c, "bio")?.unwrap_or_default(),
             "number": kv_get_str(c, "number")?,
             "has_device_keys": kv_get(c, "device_identity")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "user_id": kv_get_str(c, "user_id")?,
@@ -785,8 +806,8 @@ impl Inner {
             }
         }
         tx.execute(
-            "UPDATE contacts SET username=?2, profile_name=?3, number=?4 WHERE user_id=?1",
-            params![user_id, s(u, "username")?, u["display_name"].as_str().unwrap_or("").trim(), u["number"].as_str().unwrap_or("")],
+            "UPDATE contacts SET username=?2, profile_name=?3, number=?4, bio=?5 WHERE user_id=?1",
+            params![user_id, s(u, "username")?, u["display_name"].as_str().unwrap_or("").trim(), u["number"].as_str().unwrap_or(""), u["bio"].as_str().unwrap_or("").chars().take(100).collect::<String>()],
         )?;
         if let Some((first, last)) = as_contact {
             tx.execute(
@@ -819,17 +840,30 @@ impl Inner {
         kv_set(&db.conn, "username", s(&u, "username")?.as_bytes())?;
         kv_set(&db.conn, "display_name", u["display_name"].as_str().unwrap_or("").as_bytes())?;
         kv_set(&db.conn, "number", u["number"].as_str().unwrap_or("").as_bytes())?;
+        kv_set(&db.conn, "bio", u["bio"].as_str().unwrap_or("").as_bytes())?;
         drop(db);
         self.emit(json!({"type": "account_changed"}));
         Ok(())
     }
 
+    /// Display name and/or the about text (up to 100 characters); absent fields stay.
     fn set_profile(&self, p: &Value) -> Result<Value> {
-        let name = s(p, "display_name")?.trim().to_string();
-        if name.is_empty() {
-            return Err(Error::Invalid("Введите имя".into()));
+        let mut body = json!({});
+        if let Some(name) = p["display_name"].as_str() {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(Error::Invalid("Введите имя".into()));
+            }
+            body["display_name"] = json!(name);
         }
-        self.authed("PUT", "/v1/accounts/current/profile", Some(&json!({"display_name": name})))?;
+        if let Some(bio) = p["bio"].as_str() {
+            let bio = bio.trim();
+            if bio.chars().count() > 100 {
+                return Err(Error::Invalid("О себе: до 100 символов".into()));
+            }
+            body["bio"] = json!(bio);
+        }
+        self.authed("PUT", "/v1/accounts/current/profile", Some(&body))?;
         self.refresh_profile()?;
         Ok(Value::Null)
     }
@@ -867,7 +901,7 @@ impl Inner {
         let db = self.db();
         db.conn
             .query_row(
-                "SELECT user_id, username, first_name, last_name, verified, key_changed, is_contact, added_at, profile_name, number FROM contacts WHERE user_id=?1",
+                "SELECT user_id, username, first_name, last_name, verified, key_changed, is_contact, added_at, profile_name, number, bio FROM contacts WHERE user_id=?1",
                 [user_id],
                 |r| {
                     Ok(json!({
@@ -878,6 +912,7 @@ impl Inner {
                         "display_name": display_name(&alias_or_profile(&r.get::<_, String>(2)?, &r.get::<_, String>(3)?, &r.get::<_, String>(8)?), &r.get::<_, String>(3)?, &r.get::<_, String>(1)?),
                         "profile_name": r.get::<_, String>(8)?,
                         "number": r.get::<_, String>(9)?,
+                        "bio": r.get::<_, String>(10)?,
                         "verified": r.get::<_, i64>(4)? == 1,
                         "key_changed": r.get::<_, i64>(5)? == 1,
                         "is_contact": r.get::<_, i64>(6)? == 1,
@@ -998,7 +1033,11 @@ fn set_history_owner(tx: &rusqlite::Connection, user_id: &str) -> Result<()> {
 }
 
 fn qr_rows(text: &str) -> Result<Vec<String>> {
-    let code = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::M).map_err(|_| Error::Invalid("Не удалось построить QR-код".into()))?;
+    qr_rows_with(text, qrcode::EcLevel::M)
+}
+
+pub fn qr_rows_with(text: &str, level: qrcode::EcLevel) -> Result<Vec<String>> {
+    let code = qrcode::QrCode::with_error_correction_level(text, level).map_err(|_| Error::Invalid("Не удалось построить QR-код".into()))?;
     let w = code.width();
     let colors = code.to_colors();
     Ok(colors.chunks(w).map(|row| row.iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect()).collect())

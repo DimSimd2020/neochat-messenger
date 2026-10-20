@@ -312,7 +312,7 @@ impl Inner {
         let row = db
             .conn
             .query_row(
-                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags FROM conversations WHERE id=?1",
+                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags, in_archive, pinned FROM conversations WHERE id=?1",
                 [id],
                 |r| {
                     Ok((
@@ -330,12 +330,14 @@ impl Inner {
                         r.get::<_, i64>(11)?,
                         r.get::<_, String>(12)?,
                         r.get::<_, String>(13)?,
+                        r.get::<_, i64>(14)?,
+                        r.get::<_, i64>(15)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| Error::Invalid("Беседа не найдена".into()))?;
-        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags) = row;
+        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags, in_archive, pinned) = row;
         drop(db);
         let rights = self.rights(&id)?;
         let db = self.db();
@@ -352,15 +354,15 @@ impl Inner {
             }
             let c = db
                 .conn
-                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))
+                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed, c.bio FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?))
                 })
                 .optional()?;
-            if let Some((u, f, l, v, k)) = c {
+            if let Some((u, f, l, v, k, bio)) = c {
                 if Some(m) == peer.as_ref() {
                     peer_verified = v == 1;
                 }
-                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false,
+                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio,
                     "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
             }
         }
@@ -419,14 +421,25 @@ impl Inner {
             "description": description,
             "tags": tags,
             "notice": notice,
+            "in_archive": in_archive == 1,
+            "pinned": pinned > 0,
+            "pinned_at": pinned,
+            "presence": peer.as_deref().and_then(|u| self.cached_presence(u)),
         }))
     }
 
+    /// The main list (pinned first) or, with `archived`, the archive. `sort`:
+    /// "activity" (default), "unread" (unread first) or "name". A search query
+    /// looks through both lists.
     pub fn list_conversations(&self, p: &Value) -> Result<Value> {
         let q = p["query"].as_str().unwrap_or("").trim().to_lowercase();
+        let archive = p["archived"].as_bool().unwrap_or(false);
+        let filter = if !q.is_empty() { "1" } else if archive { "in_archive=1" } else { "in_archive=0" };
+        let order = if p["sort"] == "unread" { "(unread>0) DESC, last_activity DESC" } else { "last_activity DESC" };
+        let pins = if archive || !q.is_empty() { "" } else { "pinned DESC, " };
         let ids: Vec<String> = {
             let db = self.db();
-            let mut st = db.conn.prepare("SELECT id FROM conversations ORDER BY last_activity DESC")?;
+            let mut st = db.conn.prepare(&format!("SELECT id FROM conversations WHERE {filter} ORDER BY {pins}{order}"))?;
             st.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?
         };
         let mut out = Vec::new();
@@ -438,6 +451,11 @@ impl Inner {
             {
                 out.push(c);
             }
+        }
+        if p["sort"] == "name" {
+            // Titles of direct chats come from contacts, so the name order is applied here.
+            let key = |c: &Value| (!archive && c["pinned"] == true, c["pinned_at"].as_i64().unwrap_or(0));
+            out.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| a["title"].as_str().unwrap_or("").to_lowercase().cmp(&b["title"].as_str().unwrap_or("").to_lowercase())));
         }
         Ok(Value::Array(out))
     }

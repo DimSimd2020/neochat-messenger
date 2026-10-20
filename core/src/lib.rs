@@ -14,6 +14,7 @@ mod groups;
 mod markdown;
 mod keys;
 mod outbox;
+mod social;
 mod store;
 mod sync;
 mod update;

@@ -378,27 +378,30 @@ func (s *Server) handleQRApprove(w http.ResponseWriter, r *http.Request, a *auth
 // ---- account settings ----
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request, a *authCtx) {
-	var twoFactor bool
-	if err := s.db.QueryRow(r.Context(), `SELECT two_factor FROM users WHERE id=$1`, a.UserID).Scan(&twoFactor); err != nil {
+	var twoFactor, showLastSeen bool
+	if err := s.db.QueryRow(r.Context(), `SELECT two_factor, show_last_seen FROM users WHERE id=$1`, a.UserID).Scan(&twoFactor, &showLastSeen); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"two_factor": twoFactor})
+	writeJSON(w, 200, map[string]any{"two_factor": twoFactor, "show_last_seen": showLastSeen})
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request, a *authCtx) {
+	// Absent fields keep their value.
 	var req struct {
-		TwoFactor bool `json:"two_factor"`
+		TwoFactor    *bool `json:"two_factor"`
+		ShowLastSeen *bool `json:"show_last_seen"`
 	}
 	if err := readJSON(w, r, 4<<10, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	if _, err := s.db.Exec(r.Context(), `UPDATE users SET two_factor=$2 WHERE id=$1`, a.UserID, req.TwoFactor); err != nil {
+	if _, err := s.db.Exec(r.Context(), `UPDATE users SET two_factor=COALESCE($2, two_factor), show_last_seen=COALESCE($3, show_last_seen) WHERE id=$1`,
+		a.UserID, req.TwoFactor, req.ShowLastSeen); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"two_factor": req.TwoFactor})
+	s.handleGetSettings(w, r, a)
 }
 
 // ---- encrypted history copy: an opaque blob the server cannot read ----

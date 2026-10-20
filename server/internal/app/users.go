@@ -16,6 +16,7 @@ type userOut struct {
 	UserID             string           `json:"user_id"`
 	Username           string           `json:"username"`
 	DisplayName        string           `json:"display_name"`
+	Bio                string           `json:"bio"`
 	Number             string           `json:"number"`
 	AccountIdentityKey []byte           `json:"account_identity_key"`
 	IdentityEpoch      string           `json:"identity_epoch"`
@@ -34,8 +35,8 @@ func (s *Server) loadUser(ctx context.Context, q interface {
 }, where string, arg any) (*userOut, error) {
 	u := &userOut{}
 	var epoch, rev, number int64
-	err := q.QueryRow(ctx, `SELECT id, `+nicknameSQL+`, display_name, number, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig FROM users WHERE `+where, arg).
-		Scan(&u.UserID, &u.Username, &u.DisplayName, &number, &u.AccountIdentityKey, &epoch, &rev, &u.Roster.Blob, &u.Roster.Signature)
+	err := q.QueryRow(ctx, `SELECT id, `+nicknameSQL+`, display_name, bio, number, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig FROM users WHERE `+where, arg).
+		Scan(&u.UserID, &u.Username, &u.DisplayName, &u.Bio, &number, &u.AccountIdentityKey, &epoch, &rev, &u.Roster.Blob, &u.Roster.Signature)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -67,24 +68,46 @@ func validateDisplayName(name string) (string, error) {
 	return name, nil
 }
 
-// handlePutProfile changes the display name; related users refresh it on the "profile" event.
+const maxBio = 100
+
+// handlePutProfile changes the display name and/or the about text; related users
+// refresh it on the "profile" event.
 func (s *Server) handlePutProfile(w http.ResponseWriter, r *http.Request, a *authCtx) {
 	var req struct {
-		DisplayName string `json:"display_name"`
+		DisplayName *string `json:"display_name"`
+		Bio         *string `json:"bio"`
 	}
 	if err := readJSON(w, r, 4<<10, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	name, err := validateDisplayName(req.DisplayName)
-	if err != nil {
-		s.fail(w, r, err)
-		return
+	var name string
+	if req.DisplayName != nil {
+		var err error
+		if name, err = validateDisplayName(*req.DisplayName); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	var bio string
+	if req.Bio != nil {
+		bio = strings.TrimSpace(*req.Bio)
+		if utf8.RuneCountInString(bio) > maxBio || !utf8.ValidString(bio) {
+			s.fail(w, r, errf(400, "bad_bio", "О себе: до 100 символов"))
+			return
+		}
 	}
 	var notify []string
-	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(r.Context(), `UPDATE users SET display_name=$2 WHERE id=$1`, a.UserID, name); err != nil {
-			return err
+	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
+		if req.DisplayName != nil {
+			if _, err := tx.Exec(r.Context(), `UPDATE users SET display_name=$2 WHERE id=$1`, a.UserID, name); err != nil {
+				return err
+			}
+		}
+		if req.Bio != nil {
+			if _, err := tx.Exec(r.Context(), `UPDATE users SET bio=$2 WHERE id=$1`, a.UserID, bio); err != nil {
+				return err
+			}
 		}
 		var err error
 		notify, err = s.emitToRelated(r.Context(), tx, a.UserID, "profile", map[string]string{"user_id": a.UserID})
@@ -95,7 +118,7 @@ func (s *Server) handlePutProfile(w http.ResponseWriter, r *http.Request, a *aut
 		return
 	}
 	s.hub.notify(notify)
-	writeJSON(w, 200, map[string]any{"display_name": name})
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // handleResolve finds a user by exact username. There is no listing or prefix search.

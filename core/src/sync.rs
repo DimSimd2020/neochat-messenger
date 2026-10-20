@@ -400,7 +400,7 @@ impl Inner {
                         }
                     }
                 }
-                "group_update" | "poll_vote" | "poll_close" => {
+                "group_update" | "poll_vote" | "poll_close" | "reaction" => {
                     if let Some(g) = p.group.clone() {
                         control = Some((p.kind.clone(), g));
                     }
@@ -412,7 +412,11 @@ impl Inner {
         tx.commit()?;
         drop(db);
         if let Some((kind, g)) = control {
-            let applied = if kind == "group_update" { self.apply_group_update(&conv, &sender, &g) } else { self.apply_poll_control(&conv, &sender, &kind, &g) };
+            let applied = match kind.as_str() {
+                "group_update" => self.apply_group_update(&conv, &sender, &g),
+                "reaction" => self.apply_reaction(&conv, &sender, &g),
+                _ => self.apply_poll_control(&conv, &sender, &kind, &g),
+            };
             changed_conv |= applied.unwrap_or(false) && kind == "group_update";
         }
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
@@ -523,9 +527,12 @@ impl Inner {
                 return Ok(());
             }
             match sock.read() {
-                Ok(tungstenite::Message::Text(_)) => {
+                Ok(tungstenite::Message::Text(t)) => {
                     last = std::time::Instant::now();
-                    self.wake();
+                    match serde_json::from_str::<Value>(&t) {
+                        Ok(v) if v["type"] == "typing" || v["type"] == "presence" => self.on_live_hint(&v),
+                        _ => self.wake(),
+                    }
                 }
                 Ok(tungstenite::Message::Close(_)) => return Err(Error::Network("closed".into())),
                 Ok(_) => last = std::time::Instant::now(),

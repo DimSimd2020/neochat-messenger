@@ -440,3 +440,68 @@ fn groups_admins_tags_polls_and_channels() {
     assert_eq!(posts.last().unwrap()["text"], "Первый пост");
     assert_eq!(posts.last().unwrap()["sender_name"], "Новости");
 }
+
+#[test]
+fn reactions_bio_presence_typing_qr_archive_pins_lock() {
+    let Some(e) = env() else { return };
+    if std::env::var("NEOCHAT_E2E_LIVE").is_err() {
+        return;
+    }
+    let (alice, _) = register(&e, &uname("alice"));
+    let (bob, _) = register(&e, &uname("bob"));
+    // Adding by QR verifies the key.
+    let qr = bob.call("my_qr", json!({}));
+    assert!(qr["qr_rows"].as_array().unwrap().len() > 20);
+    let b = alice.call("add_contact_qr", json!({"link": qr["link"]}));
+    assert_eq!(b["verified"], true);
+    let bad = qr["link"].as_str().unwrap().replace("?k=", "?k=x");
+    assert!(alice.try_call("add_contact_qr", json!({"link": bad})).is_err());
+
+    bob.call("set_profile", json!({"bio": "Люблю чай"}));
+    assert!(bob.try_call("set_profile", json!({"bio": "я".repeat(101)})).is_err());
+    let cid = alice.call("open_direct", json!({"user_id": b["user_id"]}))["id"].as_str().unwrap().to_string();
+    alice.call("send_text", json!({"conversation_id": cid, "text": "👍"}));
+    let wait = |c: &Client, f: &dyn Fn(&Client) -> bool| {
+        let t = std::time::Instant::now();
+        while !f(c) {
+            assert!(t.elapsed().as_secs() < 20, "не дождались");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    wait(&bob, &|c| c.messages(&cid).len() == 1);
+    let m = bob.messages(&cid)[0].clone();
+    assert_eq!(m["emoji_only"], 1);
+    bob.call("react", json!({"message_id": m["id"], "emoji": "🔥"}));
+    wait(&alice, &|c| c.messages(&cid)[0]["reactions"][0]["emoji"] == "🔥");
+    assert!(bob.try_call("react", json!({"message_id": m["id"], "emoji": "ab"})).is_err());
+
+    alice.sync();
+    let info = alice.call("contact_info", json!({"user_id": b["user_id"]}));
+    assert_eq!(info["bio"], "Люблю чай");
+    let p = alice.call("presence", json!({"user_ids": [b["user_id"]], "tz_offset": 180}));
+    let st = p[b["user_id"].as_str().unwrap()]["status"].as_str().unwrap().to_string();
+    assert!(st == "online" || st == "exact", "{st}");
+    // Hiding the time hides it both ways.
+    bob.call("set_last_seen_visible", json!({"visible": false}));
+    let p = alice.call("presence", json!({"user_ids": [b["user_id"]]}));
+    assert_eq!(p[b["user_id"].as_str().unwrap()]["status"], "recently");
+    bob.call("set_last_seen_visible", json!({"visible": true}));
+
+    bob.call("send_typing", json!({"conversation_id": cid}));
+    let t = std::time::Instant::now();
+    while !alice.events.lock().unwrap().iter().any(|v| v["type"] == "typing" && v["conversation_id"] == cid.as_str()) {
+        assert!(t.elapsed().as_secs() < 10, "нет typing");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    alice.call("set_pinned", json!({"conversation_id": cid, "pinned": true}));
+    assert_eq!(alice.call("list_conversations", json!({}))[0]["pinned"], true);
+    alice.call("set_archived", json!({"conversation_id": cid, "archived": true}));
+    assert!(alice.call("list_conversations", json!({})).as_array().unwrap().iter().all(|c| c["id"] != cid.as_str()));
+    assert_eq!(alice.call("list_conversations", json!({"archived": true}))[0]["pinned"], false);
+
+    alice.call("lock_set", json!({"passcode": "1234"}));
+    assert_eq!(alice.call("lock_check", json!({"passcode": "1234"}))["ok"], true);
+    assert_eq!(alice.call("lock_check", json!({"passcode": "0000"}))["ok"], false);
+    assert_eq!(alice.call("lock_status", json!({}))["enabled"], true);
+}
