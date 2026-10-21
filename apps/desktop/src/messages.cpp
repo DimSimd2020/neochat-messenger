@@ -148,7 +148,11 @@ QTextDocument *textDoc(const QJsonObject &m)
 {
     static QHash<QString, QTextDocument *> cache;
     const QFont font = textFont();
-    const QString key = m.value("id").toString() + '|' + font.family() + '|' + QString::number(font.pointSizeF()) + '|' + messageText(m);
+    const bool out = m.value("outgoing").toBool();
+    // Outgoing bubbles are blue, the same family as the accent, so the tag color is part of the cache key.
+    const QString key = m.value("id").toString() + '|' + font.family() + '|' + QString::number(font.pointSizeF()) + '|'
+        + messageText(m) + (out ? QStringLiteral("|out") : QStringLiteral("|in"))
+        + Theme::p().accent.name() + (Theme::instance()->isDark() ? QStringLiteral("|d") : QStringLiteral("|l"));
     if (QTextDocument *d = cache.value(key))
         return d;
     if (cache.size() > 3000) {
@@ -183,7 +187,19 @@ QTextDocument *textDoc(const QJsonObject &m)
             f.setFontItalic(true);
         if (s.value("strike").toBool())
             f.setFontStrikeOut(true);
-        if (s.contains("mention")) { f.setForeground(Theme::p().accent); f.setFontWeight(QFont::DemiBold); }
+        if (s.contains("mention")) {
+            const QString name = s.value("mention").toString();
+            const bool broadcast = name.compare(QStringLiteral("everyone"), Qt::CaseInsensitive) == 0
+                || name.compare(QStringLiteral("here"), Qt::CaseInsensitive) == 0;
+            // Warm sand on a blue bubble; accent stays on incoming, where the bubble is not blue.
+            f.setForeground(out ? QColor(QStringLiteral("#FFE3A1")) : Theme::p().accent);
+            f.setFontWeight(QFont::DemiBold);
+            if (!broadcast) {
+                f.setFontUnderline(true);
+                f.setAnchor(true);
+                f.setAnchorHref(QStringLiteral("mention:") + name);
+            }
+        }
         if (s.contains("link")) {
             f.setAnchor(true);
             f.setAnchorHref(s.value("link").toString());
@@ -1426,6 +1442,8 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
             retry(m);
         else if (L.image.contains(e->pos()))
             openImage(m);
+        else if (link.startsWith(QStringLiteral("mention:")))
+            openMention(link.mid(8));
         else if (!link.isEmpty())
             QDesktopServices::openUrl(QUrl(link));
         else if (option >= 0)
@@ -1463,7 +1481,19 @@ QString MessageView::linkAt(const QJsonObject &m, const MessageLayout &L, const 
     if (L.text.isNull() || !L.options.isEmpty() || !L.text.contains(pos))
         return {};
     const QString href = textDoc(m)->documentLayout()->anchorAt(pos - L.text.topLeft());
+    if (href.startsWith(QStringLiteral("mention:")))
+        return href;
     return href.startsWith("https://") || href.startsWith("http://") ? href : QString();
+}
+
+void MessageView::openMention(const QString &name)
+{
+    Core::instance()->call("lookup_user", {{"username", name}, {"conversation_id", m_conv}}, this, [this](const QJsonValue &v, const CoreError &e) {
+        if (!e.ok())
+            emit toast(e.message);
+        else
+            emit profileRequested(v.toObject().value("user_id").toString());
+    });
 }
 
 bool MessageView::viewportEvent(QEvent *e)

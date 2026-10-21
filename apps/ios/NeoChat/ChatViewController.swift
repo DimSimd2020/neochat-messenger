@@ -80,8 +80,33 @@ func isImage(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.boo
 /// Links found by the core's markdown parser.
 func links(_ m: JSON) -> [String] { m.arr("spans").compactMap { $0["link"] as? String } }
 
+extension UILabel {
+    /// The @name under `point`, when the finger is actually on that glyph.
+    func mentionName(at point: CGPoint) -> String? {
+        guard let attr = attributedText, bounds.width > 1, attr.length > 0 else { return nil }
+        let storage = NSTextStorage(attributedString: attr)
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: bounds.size)
+        container.lineFragmentPadding = 0
+        container.maximumNumberOfLines = numberOfLines
+        container.lineBreakMode = lineBreakMode
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        let index = manager.characterIndex(for: point, in: container, fractionOfDistanceBetweenInsertionPoints: nil)
+        guard index < attr.length else { return nil }
+        let glyph = manager.glyphIndexForCharacter(at: index)
+        let rect = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+        guard rect.insetBy(dx: -2, dy: -2).contains(point) else { return nil }
+        return attr.attribute(.neochatMention, at: index, effectiveRange: nil) as? String
+    }
+}
+
 /// Telegram-like formatting from the core's markdown spans.
-func richText(_ m: JSON, size: CGFloat, color: UIColor) -> NSAttributedString {
+extension NSAttributedString.Key {
+    static let neochatMention = NSAttributedString.Key("neochat.mention")
+}
+
+func richText(_ m: JSON, size: CGFloat, color: UIColor, outgoing: Bool = false) -> NSAttributedString {
     let base = Theme.font(size)
     let spans = m.arr("spans")
     if spans.isEmpty { return NSAttributedString(string: m.str("text"), attributes: [.font: base, .foregroundColor: color]) }
@@ -104,7 +129,15 @@ func richText(_ m: JSON, size: CGFloat, color: UIColor) -> NSAttributedString {
         if s.bool("strike") { a[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
         if pre || s.bool("code") { a[.backgroundColor] = UIColor.gray.withAlphaComponent(0.2) }
         if s["link"] is String { a[.underlineStyle] = NSUnderlineStyle.single.rawValue }
-        if s["mention"] is String { a[.foregroundColor] = Theme.accent; a[.font] = Theme.font(size,.semibold) }
+        if let name = s["mention"] as? String {
+            let broadcast = name.lowercased() == "everyone" || name.lowercased() == "here"
+            a[.foregroundColor] = outgoing ? UIColor(red: 1, green: 0.89, blue: 0.63, alpha: 1) : Theme.accent
+            a[.font] = Theme.font(size, .semibold)
+            if !broadcast {
+                a[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                a[.neochatMention] = name
+            }
+        }
         out.append(NSAttributedString(string: s.str("text"), attributes: a))
         if pre { out.append(NSAttributedString(string: "\n", attributes: plain)) }
     }
@@ -254,6 +287,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Theme.canvas
+        view.clipsToBounds = true
         view.insertSubview(BackgroundView(frame: view.bounds), at: 0)
         navigationItem.largeTitleDisplayMode = .never
 
@@ -1120,6 +1154,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             c.onRetry = { [weak self] in self?.retry(m) }
             c.onPhoto = { [weak self] in self?.openPhoto(m) }
             c.onProfile = { [weak self] in self?.navigationController?.pushViewController(PersonProfileViewController(userId:m.str("sender_user_id")),animated:!Theme.reducedMotion) }
+            c.onMention = { [weak self] name in
+                guard let self else { return }
+                Core.shared.call("lookup_user", ["username": name, "conversation_id": self.conversationId]) { r in
+                    if case .success(let v) = r, let id = (v as? JSON)?.str("user_id"), !id.isEmpty {
+                        self.navigationController?.pushViewController(PersonProfileViewController(userId: id), animated: !Theme.reducedMotion)
+                    } else if case .failure(let e) = r { self.toast(e.message) }
+                }
+            }
             c.onVote = { [weak self] i in self?.vote(m, i) }
             c.onTap = { [weak self, weak c] in
                 guard let self, let c else { return }
@@ -1357,6 +1399,7 @@ final class BubbleCell: UITableViewCell {
     /// Own messages are answered with a swipe to the right, the others' with a swipe to the left.
     private(set) var swipesRight = false
     var onTap: (() -> Void)?
+    var onMention: ((String) -> Void)?
     var onProfile: (() -> Void)?
     var onReact: ((String) -> Void)?
     /// Swipe anywhere on the row, the empty part included: to the left for others' messages, to the right for own.
@@ -1424,7 +1467,7 @@ final class BubbleCell: UITableViewCell {
         reactRow.addArrangedSubview(spacer)
         [fwd, quote, fileRow, text, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
         inner.setCustomSpacing(6, after: reactRow)
-        bubbleTap.addTarget(self, action: #selector(tapped))
+        bubbleTap.addTarget(self, action: #selector(tapped(_:)))
         bubbleTapDelegate.photo = photo
         bubbleTapDelegate.avatar = avatar
         bubbleTapDelegate.sender = sender
@@ -1489,7 +1532,14 @@ final class BubbleCell: UITableViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    @objc private func tapped() { onTap?() }
+    @objc private func tapped(_ g: UITapGestureRecognizer) {
+        let point = g.location(in: text)
+        if !text.isHidden, text.bounds.contains(point), let name = text.mentionName(at: point) {
+            onMention?(name)
+            return
+        }
+        onTap?()
+    }
 
     @objc private func doubleTapped() {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -1651,7 +1701,7 @@ final class BubbleCell: UITableViewCell {
             a.append(NSAttributedString(string: "  " + body, attributes: [.font: font, .foregroundColor: color]))
             text.attributedText = a
         } else {
-            text.attributedText = richText(m, size: Prefs.textSize, color: fg)
+            text.attributedText = richText(m, size: Prefs.textSize, color: fg, outgoing: out && !big)
         }
         bindReactions(m.arr("reactions"), out: out && !big, fg: fg)
         text.isHidden = body.isEmpty || kind == "poll"

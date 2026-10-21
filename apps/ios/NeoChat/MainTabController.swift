@@ -9,16 +9,31 @@ final class ChatNavController: UINavigationController, UIGestureRecognizerDelega
         delegate = self
     }
 
-    // Leaving a chat brings the tab bar back by sliding it in over the list, and its translucent
-    // glass shows as a green slab on the way. It stays hidden until the chat is gone.
+    // Leaving a chat slides the transparent tab bar back in. In the light theme its glass
+    // picks up the mint spot and sits over the list, blocking taps, until the transition ends.
     func navigationController(_ nc: UINavigationController, willShow vc: UIViewController, animated: Bool) {
         guard let bar = tabBarController?.tabBar else { return }
-        let leavingChat = animated && !vc.hidesBottomBarWhenPushed && nc.transitionCoordinator?.viewController(forKey: .from)?.hidesBottomBarWhenPushed == true
-        bar.alpha = leavingChat ? 0 : 1
+        let returning = animated && !vc.hidesBottomBarWhenPushed && nc.transitionCoordinator?.viewController(forKey: .from)?.hidesBottomBarWhenPushed == true
+        guard returning, let coordinator = nc.transitionCoordinator else {
+            setBar(bar, shown: !vc.hidesBottomBarWhenPushed)
+            return
+        }
+        setBar(bar, shown: false)
+        coordinator.animate(alongsideTransition: nil) { ctx in
+            self.setBar(bar, shown: !ctx.isCancelled)
+        }
     }
 
     func navigationController(_ nc: UINavigationController, didShow vc: UIViewController, animated: Bool) {
-        if !vc.hidesBottomBarWhenPushed { tabBarController?.tabBar.alpha = 1 }
+        guard let bar = tabBarController?.tabBar else { return }
+        setBar(bar, shown: !vc.hidesBottomBarWhenPushed)
+    }
+
+    private func setBar(_ bar: UITabBar, shown: Bool) {
+        UIView.setAnimationsEnabled(false)
+        bar.alpha = shown ? 1 : 0
+        bar.isUserInteractionEnabled = shown
+        UIView.setAnimationsEnabled(true)
     }
 
     func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
@@ -43,8 +58,13 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
             pill.layer.shadowOffset = CGSize(width: 0, height: 4)
             tabBar.insertSubview(pill, at: 0)
         }
-        let h = tabBar.bounds.height - tabBar.safeAreaInsets.bottom
-        pill.frame = CGRect(x: 12, y: -6, width: tabBar.bounds.width - 24, height: h + 10)
+        // During the pop the tab bar's height is briefly the whole screen. An animated pill of
+        // that size is the green slab at the bottom of the chat list.
+        let contentH = tabBar.bounds.height - tabBar.safeAreaInsets.bottom
+        let h = min(56, max(0, contentH))
+        UIView.performWithoutAnimation {
+            pill.frame = CGRect(x: 12, y: -6, width: max(0, tabBar.bounds.width - 24), height: h + 10)
+        }
         tabBar.sendSubviewToBack(pill)
     }
 

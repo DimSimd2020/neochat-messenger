@@ -16,8 +16,9 @@ import java.io.File
 /** Real Android touch dispatch, without a network account or additional test libraries. */
 class InteractionInstrumentation : Instrumentation() {
     private var archive = false
+    private var fixes = false
     private var profileServer = ""
-    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); archive = arguments?.getString("archive") == "true"; profileServer=arguments?.getString("profile_server") ?: ""; start() }
+    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); archive = arguments?.getString("archive") == "true"; fixes = arguments?.getString("fixes") == "true"; profileServer=arguments?.getString("profile_server") ?: ""; start() }
 
     override fun onStart() {
         val result = Bundle()
@@ -63,12 +64,89 @@ class InteractionInstrumentation : Instrumentation() {
                 } finally { Theme.forceReduced = oldReduced; row.reset() }
             }
             if (archive) archiveInteraction()
+            if (fixes) screenAndFileRegressions()
             result.putString("stream", "OK: reply gestures; archive follows finger, partial/cancelled pull, scroll hiding, navigation cleanup, inline undo\n")
             finish(-1, result)
         } catch (e: Throwable) {
             result.putString("stream", "FAIL: ${e.message}\n")
             finish(0, result)
         }
+    }
+
+    private fun screenAndFileRegressions() {
+        val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra("test_server", "http://127.0.0.1:1")
+        }) as MainActivity
+        waitForIdleSync()
+        SystemClock.sleep(300)
+        fun field(host: Any, name: String): Any = host.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(host)!!
+        try {
+            runOnMainSync {
+                val content = field(activity, "content") as FrameLayout
+                val show = MainActivity::class.java.getDeclaredMethod("show", Screen::class.java, Float::class.javaPrimitiveType, Boolean::class.javaPrimitiveType).apply { isAccessible = true }
+                val source = object : Screen { override val view = View(activity).apply { setBackgroundColor(android.graphics.Color.RED) } }
+                val target = object : Screen { override val view = FrameLayout(activity) }
+                val reduced = Theme.forceReduced
+                Theme.forceReduced = false
+                try {
+                    fun measure() {
+                        content.measure(View.MeasureSpec.makeMeasureSpec(content.width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(content.height, View.MeasureSpec.EXACTLY))
+                        content.layout(content.left, content.top, content.right, content.bottom)
+                    }
+                    fun pixel(): Int {
+                        val bitmap = Bitmap.createBitmap(content.width, content.height, Bitmap.Config.ARGB_8888)
+                        content.draw(Canvas(bitmap))
+                        val color = bitmap.getPixel(content.width - 2, content.height / 2)
+                        bitmap.recycle()
+                        return color
+                    }
+                    for (forward in listOf(true, false)) {
+                        show.invoke(activity, if (forward) source else target, 0f, false)
+                        show.invoke(activity, if (forward) target else source, if (forward) 22f else -22f, true)
+                        measure()
+                        val anim = field(activity, "slideAnim") as android.animation.ValueAnimator
+                        anim.currentPlayTime = 160
+                        source.view.setBackgroundColor(android.graphics.Color.RED)
+                        val red = pixel()
+                        source.view.setBackgroundColor(android.graphics.Color.GREEN)
+                        check(red == pixel()) { "Previous screen bleeds through during navigation (forward=$forward)" }
+                        anim.end()
+                        check(content.childCount == 1) { "Transition left extra layers" }
+                    }
+                } finally { Theme.forceReduced = reduced }
+
+                val chat = ChatScreen(activity, "file-fixture")
+                val adapter = field(chat, "adapter") as RecyclerView.Adapter<RecyclerView.ViewHolder>
+                val itemClass = ChatScreen::class.java.declaredClasses.single { it.simpleName == "Item" }
+                val ctor = itemClass.declaredConstructors.single().apply { isAccessible = true }
+                val names = listOf("name.txt", "Очень длинное имя документа для проверки сохранения расширения.txt")
+                for (kind in listOf("direct", "group")) for (out in listOf(false, true)) for (name in names) {
+                    (field(chat, "conv") as JSONObject).put("kind", kind)
+                    val message = JSONObject().put("id", "file-fixture").put("kind", "file").put("outgoing", out)
+                        .put("file", JSONObject().put("name", name).put("size", 1536).put("mime", "text/plain"))
+                    adapter.javaClass.getDeclaredMethod("setItems", List::class.java).apply { isAccessible = true }
+                        .invoke(adapter, listOf(ctor.newInstance(message, true, true)))
+                    val holder = adapter.onCreateViewHolder(FrameLayout(activity), 1)
+                    adapter.onBindViewHolder(holder, 0)
+                    val row = field(holder, "row")
+                    val file = field(row, "file") as View
+                    val label = field(row, "fileName") as android.widget.TextView
+                    val meta = field(row, "fileMeta") as android.widget.TextView
+                    for (width in listOf(320, 360, 412)) {
+                        val view = holder.itemView
+                        view.measure(View.MeasureSpec.makeMeasureSpec(activity.dp(width), View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                        view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                        check(label.width > 0 && meta.width > 0 && meta.height > 0) { "File labels collapsed: $kind, outgoing=$out, width=$width" }
+                        check(label.text.toString() == name && meta.text.startsWith(sizeText(1536)))
+                        check(label.layout.getLineEnd(0) == name.length || label.lineCount > 1) { "Filename extension lost" }
+                        val rect = android.graphics.Rect(0, 0, file.width, file.height)
+                        (view as android.view.ViewGroup).offsetDescendantRectToMyCoords(file, rect)
+                        check(rect.left >= 0 && rect.right <= view.width) { "File card clipped at width=$width" }
+                    }
+                }
+            }
+        } finally { runOnMainSync { activity.finish() } }
     }
 
     private fun archiveInteraction() {

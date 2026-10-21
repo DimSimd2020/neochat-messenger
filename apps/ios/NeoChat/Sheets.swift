@@ -8,7 +8,7 @@ class SheetViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground.withAlphaComponent(0)
+        view.backgroundColor = Theme.canvas
         view.addSubview(BackgroundView(frame: view.bounds))
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
             self?.dismiss(animated: !Theme.reducedMotion)

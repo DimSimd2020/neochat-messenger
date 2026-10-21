@@ -118,6 +118,16 @@ impl Inner {
     }
 
     pub fn emit(&self, v: Value) {
+        // Notification producers call this after releasing their database transaction.
+        // Keep delivery and unread counts active while the conversation is in the archive.
+        if v["type"] == "notify" {
+            let archived = self.db().conn.query_row(
+                "SELECT in_archive FROM conversations WHERE id=?1",
+                [v["conversation_id"].as_str().unwrap_or("")],
+                |r| r.get::<_, bool>(0),
+            ).unwrap_or(false);
+            if archived { return; }
+        }
         (self.cb)(&v.to_string());
     }
 
@@ -294,6 +304,7 @@ impl Inner {
             "set_profile_photo" => self.set_profile_photo(p),
             "delete_profile_photo" => self.delete_profile_photo(p),
             "mention_candidates" => self.mention_candidates(p),
+            "lookup_user" => self.lookup_user(p),
             "verify_contact" => self.verify_contact(p),
             "accept_key_change" => self.accept_key_change(p),
             "open_direct" => self.open_direct(p),
@@ -1128,4 +1139,56 @@ pub fn qr_rows_with(text: &str, level: qrcode::EcLevel) -> Result<Vec<String>> {
     let w = code.width();
     let colors = code.to_colors();
     Ok(colors.chunks(w).map(|row| row.iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect()).collect())
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn archive_silences_notifications_until_restored() {
+        let dir = std::env::temp_dir().join(format!("neochat-notify-{}", uuid::Uuid::new_v4()));
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let received = events.clone();
+        let core = Core::open(
+            &json!({"data_dir": dir, "db_key": "ab".repeat(32), "foreground": false}),
+            Box::new(move |event| received.lock().unwrap().push(serde_json::from_str(event).unwrap())),
+        ).unwrap();
+        for kind in ["direct", "group", "channel"] {
+            core.inner.db().conn.execute("INSERT INTO conversations(id, kind) VALUES (?1, ?1)", [kind]).unwrap();
+            for archived in [false, true, false] {
+                core.inner.db().conn.execute("UPDATE conversations SET in_archive=?2 WHERE id=?1", params![kind, archived]).unwrap();
+                events.lock().unwrap().clear();
+                for text in ["Новое сообщение", "Вас упомянули", "Пропущенный звонок"] {
+                    core.inner.emit(json!({"type": "notify", "conversation_id": kind, "title": "Тест", "text": text}));
+                }
+                core.inner.emit(json!({"type": "messages_changed", "conversation_id": kind}));
+                let captured = events.lock().unwrap();
+                assert_eq!(captured.iter().filter(|v| v["type"] == "notify").count(), if archived { 0 } else { 3 }, "{kind}, archived={archived}");
+                assert!(captured.iter().any(|v| v["type"] == "messages_changed"));
+            }
+        }
+        drop(core);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lookup_user_opens_people_not_broadcasts() {
+        let dir = std::env::temp_dir().join(format!("neochat-lookup-{}", uuid::Uuid::new_v4()));
+        let core = Core::open(
+            &json!({"data_dir": dir, "db_key": "ab".repeat(32), "foreground": false}),
+            Box::new(|_| {}),
+        ).unwrap();
+        core.inner.db().conn.execute(
+            "INSERT INTO contacts(user_id, username, account_key, added_at) VALUES ('user-alice', 'Alice', x'00', 1)",
+            [],
+        ).unwrap();
+        let found = core.inner.lookup_user(&json!({"username": "@Alice"})).unwrap();
+        assert_eq!(found["user_id"], "user-alice");
+        assert!(core.inner.lookup_user(&json!({"username": "everyone"})).is_err());
+        assert!(core.inner.lookup_user(&json!({"username": "here"})).is_err());
+        assert!(core.inner.lookup_user(&json!({"username": "nobody"})).is_err());
+        drop(core);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

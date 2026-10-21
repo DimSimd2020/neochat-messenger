@@ -17,6 +17,9 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
     private var generation = 0
     private var items: [JSON] = []
     private var tabs: [UIButton] = []
+    private let tabCanvas = UIView()
+    private let indicator = UIView()
+    private var tabIndex = 0
 
     init(userId: String? = nil) { self.userId = userId; super.init(nibName: nil, bundle: nil); hidesBottomBarWhenPushed = userId != nil }
     required init?(coder: NSCoder) { fatalError() }
@@ -25,6 +28,7 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
         super.viewDidLoad()
         title = "Профиль"
         navigationItem.largeTitleDisplayMode = .never
+        view.backgroundColor = Theme.canvas
         view.addSubview(BackgroundView(frame: view.bounds))
         [stack, details, content].forEach { $0.axis = .vertical; $0.spacing = 12 }
         stack.alignment = .center
@@ -40,20 +44,32 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
         tabScroll.showsHorizontalScrollIndicator = false
         let row = UIStackView()
         row.spacing = 6
+        indicator.backgroundColor = Theme.action.withAlphaComponent(0.22)
+        indicator.layer.cornerRadius = 19
+        indicator.isUserInteractionEnabled = false
+        tabCanvas.addSubview(indicator)
         for (key, title) in [("media","Медиа"),("files","Файлы"),("links","Ссылки"),("groups","Группы"),("privacy","Конфиденциальность")] {
             let b = UIButton(type: .system)
             b.setTitle(title, for: .normal)
             b.titleLabel?.font = Theme.font(14, .semibold)
+            b.setTitleColor(Theme.muted, for: .normal)
             b.contentEdgeInsets = UIEdgeInsets(top: 13, left: 14, bottom: 13, right: 14)
-            b.layer.cornerRadius = 19
             b.accessibilityIdentifier = key
             b.addAction(UIAction { [weak self] _ in self?.select(key) }, for: .touchUpInside)
             tabs.append(b); row.addArrangedSubview(b)
         }
         row.translatesAutoresizingMaskIntoConstraints = false
-        tabScroll.addSubview(row)
+        tabCanvas.translatesAutoresizingMaskIntoConstraints = false
+        tabCanvas.addSubview(row)
+        tabScroll.addSubview(tabCanvas)
         tabScroll.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        NSLayoutConstraint.activate([row.topAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.topAnchor), row.bottomAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.bottomAnchor), row.leadingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.leadingAnchor), row.trailingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.trailingAnchor)])
+        NSLayoutConstraint.activate([
+            tabCanvas.topAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.topAnchor), tabCanvas.bottomAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.bottomAnchor),
+            tabCanvas.leadingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.leadingAnchor), tabCanvas.trailingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.trailingAnchor),
+            tabCanvas.heightAnchor.constraint(equalTo: tabScroll.frameLayoutGuide.heightAnchor),
+            row.topAnchor.constraint(equalTo: tabCanvas.topAnchor), row.bottomAnchor.constraint(equalTo: tabCanvas.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: tabCanvas.leadingAnchor), row.trailingAnchor.constraint(equalTo: tabCanvas.trailingAnchor),
+        ])
         stack.addArrangedSubview(tabScroll)
         stack.addArrangedSubview(content)
         let scroll = UIScrollView()
@@ -154,10 +170,13 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
     }
 
     private func select(_ key: String, animated: Bool = true) {
+        let keys = ["media","files","links","groups","privacy"]
+        let next = keys.firstIndex(of: key) ?? 0
+        let dir = next == tabIndex ? 0 : (next > tabIndex ? 1 : -1)
+        tabIndex = next
         category = key; before = nil; items = []; generation += 1
-        tabs.forEach { b in let on = b.accessibilityIdentifier == key; b.backgroundColor = on ? Theme.action.withAlphaComponent(0.25) : .clear; b.tintColor = on ? Theme.accent : Theme.muted; b.accessibilityTraits = on ? [.button,.selected] : .button }
+        placeIndicator(animated: animated && dir != 0)
         clear(content)
-        if animated && !Theme.reducedMotion { content.alpha = 0; Theme.animate(0.18) { self.content.alpha = 1 } }
         if key == "privacy" {
             let text = profile.bool("me") ? "Коды безопасности доступны в профилях ваших собеседников." : profile.str("safety_number")
             content.addArrangedSubview(label("Сквозное шифрование",18,.semibold))
@@ -167,17 +186,47 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
                 if profile.bool("key_changed") { content.addArrangedSubview(button("Код сверен, принять новый ключ","checkmark.shield") { [weak self] in self?.verify("accept_key_change") }) }
                 else if !profile.bool("verified") { content.addArrangedSubview(button("Отметить как сверенный","checkmark.shield") { [weak self] in self?.verify("verify_contact") }) }
             }
+            reveal(dir, animated)
         } else if key == "groups" {
             let groups = profile.arr("groups")
             if groups.isEmpty { content.addArrangedSubview(label("Общих групп пока нет",15,color:Theme.muted)) }
             for g in groups { content.addArrangedSubview(button(g.str("title"),"person.3") { NotificationCenter.default.post(name:.openConversation,object:nil,userInfo:["id":g.str("id")]) }) }
-        } else { loadItems() }
+            reveal(dir, animated)
+        } else { loadItems(dir: dir, animated: animated) }
+    }
+    private func placeIndicator(animated: Bool) {
+        for (i, b) in tabs.enumerated() {
+            let on = i == tabIndex
+            b.backgroundColor = .clear
+            b.setTitleColor(on ? Theme.accent : Theme.muted, for: .normal)
+            b.accessibilityTraits = on ? [.button, .selected] : .button
+        }
+        view.layoutIfNeeded()
+        guard tabs.indices.contains(tabIndex) else { return }
+        let frame = tabs[tabIndex].convert(tabs[tabIndex].bounds, to: tabCanvas).insetBy(dx: 0, dy: 5)
+        guard frame.width > 1 else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.tabs.indices.contains(self.tabIndex) else { return }
+                let again = self.tabs[self.tabIndex].convert(self.tabs[self.tabIndex].bounds, to: self.tabCanvas).insetBy(dx: 0, dy: 5)
+                if again.width > 1 { self.indicator.frame = again }
+            }
+            return
+        }
+        let apply = { self.indicator.frame = frame }
+        if animated && !Theme.reducedMotion { Theme.animate(0.28, apply) } else { apply() }
+    }
+    private func reveal(_ dir: Int, _ animated: Bool) {
+        guard animated, !Theme.reducedMotion else { content.alpha = 1; content.transform = .identity; return }
+        content.alpha = 0
+        content.transform = CGAffineTransform(translationX: CGFloat(dir) * 16, y: 0)
+        Theme.animate(0.22) { self.content.alpha = 1; self.content.transform = .identity }
     }
     private func verify(_ method: String) {
         Core.shared.call(method,["user_id":profile.str("user_id")]) { [weak self] r in if case .failure(let e) = r { self?.toast(e.message) } else { self?.reload() } }
     }
-    private func loadItems() {
+    private func loadItems(dir: Int = 0, animated: Bool = false) {
         let gen = generation
+        let fresh = before == nil
         var p: JSON = ["user_id":profile.str("user_id"),"kind":category,"limit":48]
         if let before { p["before"] = before }
         Core.shared.call("profile_items",p) { [weak self] r in
@@ -216,6 +265,7 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
                 }
             }
             if page.count == 48 { self.content.addArrangedSubview(self.button("Показать ещё","chevron.down") { [weak self] in self?.loadItems() }) }
+            if fresh { self.reveal(dir, animated) }
         }
     }
 

@@ -144,6 +144,7 @@ private:
     void react(const QJsonObject &m, const QString &emoji);
     void showMenu(const QJsonObject &m, const QPoint &globalPos);
     QString linkAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const;
+    void openMention(const QString &name);
     void placeJump();
     QJsonObject messageAt(const QPoint &pos, MessageLayout *lay = nullptr) const;
     int textHit(const QPoint &pos) const;

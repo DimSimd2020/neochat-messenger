@@ -1,5 +1,6 @@
 package app.neochat.ui
 
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
@@ -31,7 +32,11 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     private val avatar = AvatarView(act, 112)
     private val name = act.label("", 27f, 700)
     private val sub = act.label("", 14f, 400, Theme.Role.MUTED)
+    private val tabHost = FrameLayout(act)
     private val tabs = LinearLayout(act)
+    private val indicator = View(act)
+    private val tabKeys = listOf("media", "files", "links", "groups", "privacy")
+    private var tabIndex = 0
     private var profile = JSONObject()
     private var category = "media"
     private var before: Long? = null
@@ -54,10 +59,23 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         name.gravity = Gravity.CENTER; sub.gravity = Gravity.CENTER
         col.addView(name,lp().apply { topMargin = dp(16) }); col.addView(sub,lp().apply { topMargin = dp(6) })
         col.addView(details,lp().apply { topMargin = dp(22) })
-        val tabScroll = HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(tabs) }
+        indicator.background = GlassDrawable(act, GlassDrawable.Kind.GLASS, act.dpf(19))
+        indicator.isClickable = false
+        tabHost.addView(indicator, FrameLayout.LayoutParams(0, dp(40), Gravity.CENTER_VERTICAL))
+        tabHost.addView(tabs)
+        val tabScroll = HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(tabHost) }
         for ((key,title) in listOf("media" to "Медиа","files" to "Файлы","links" to "Ссылки","groups" to "Группы","privacy" to "Конфиденциальность")) {
-            val b = PillButton(act,title,primary=false); b.tag = key
-            b.setOnClickListener { select(key) }; tabs.addView(b,lp(WRAP,dp(48)).apply { marginEnd = dp(6) })
+            val b = LinearLayout(act).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(14), 0, dp(14), 0)
+                isClickable = true
+                isFocusable = true
+                tag = key
+                contentDescription = title
+                setOnClickListener { select(key) }
+                addView(act.label(title, 15f, 600, Theme.Role.MUTED))
+            }
+            tabs.addView(b, lp(WRAP, dp(48)).apply { marginEnd = dp(6) })
         }
         col.addView(tabScroll,lp().apply { topMargin = dp(22) }); col.addView(content,lp().apply { topMargin = dp(16) })
         scroll.addView(col); column.addView(scroll,lp(MATCH,0,1f)); root.addView(column,flp(MATCH,MATCH))
@@ -134,13 +152,16 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         act.openPage(object:Screen {override val view=column;override fun applyInsets(top:Int,bottom:Int,ime:Int) {column.setPadding(0,top,0,maxOf(bottom,ime))}})
     }
     private fun select(key:String,animated:Boolean=true) {
-        category=key;before=null;items.clear();generation++;content.removeAllViews()
-        for(i in 0 until tabs.childCount) { val b=tabs.getChildAt(i) as PillButton; b.isSelected=b.tag==key; b.setPrimary(b.isSelected) }
-        if(animated) {content.alpha=0f;content.animate().alpha(1f).setDuration(Theme.ms(180)).start()}
+        val next = tabKeys.indexOf(key).coerceAtLeast(0)
+        val dir = when { next > tabIndex -> 1; next < tabIndex -> -1; else -> 0 }
+        tabIndex = next
+        category=key;before=null;items.clear();generation++;content.animate().cancel();content.removeAllViews()
+        placeIndicator(animated && dir != 0)
         if(key=="groups") {
             val groups=profile.optJSONArray("groups")?.objects().orEmpty()
             if(groups.isEmpty()) content.addView(act.label("Общих групп пока нет",15f,400,Theme.Role.MUTED))
             groups.forEach { g -> content.addView(action(g.str("title"),R.drawable.ic_people) {act.openChat(g.str("id"))}) }
+            reveal(dir, animated)
         } else if(key=="privacy") {
             content.addView(act.label("Сквозное шифрование",18f,600))
             content.addView(act.label(if(profile.optBoolean("me")) "Коды безопасности доступны в профилях ваших собеседников." else profile.str("safety_number"),17f,600,Theme.Role.ACCENT).apply {setTextIsSelectable(true)},lp().apply {topMargin=dp(14)})
@@ -151,9 +172,61 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
                     CoreClient.call(if(changed) "accept_key_change" else "verify_contact",JSONObject().put("user_id",profile.str("user_id"))) { _,e -> if(e!=null) act.toast(e.message) else load() }
                 })
             }
-        } else loadItems()
+            reveal(dir, animated)
+        } else loadItems(dir, animated)
     }
-    private fun loadItems() {
+    private fun placeIndicator(animated: Boolean) {
+        val selected = tabs.getChildAt(tabIndex) ?: return
+        for (i in 0 until tabs.childCount) {
+            val child = tabs.getChildAt(i)
+            (child.getChildAt(0) as? android.widget.TextView)?.role(if (child === selected) Theme.Role.TEXT else Theme.Role.MUTED)
+        }
+        if (selected.width == 0) {
+            selected.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
+                override fun onLayoutChange(v: View, a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int) {
+                    v.removeOnLayoutChangeListener(this)
+                    placeIndicator(animated)
+                }
+            })
+            return
+        }
+        tabHost.post {
+            val targetX = selected.left.toFloat()
+            val targetW = selected.width
+            if (targetW == 0) return@post
+            val lp = indicator.layoutParams as FrameLayout.LayoutParams
+            if (!animated || Theme.reducedMotion || lp.width <= 1) {
+                indicator.animate().cancel()
+                lp.width = targetW
+                indicator.layoutParams = lp
+                indicator.translationX = targetX
+                return@post
+            }
+            indicator.animate().translationX(targetX).setDuration(Theme.ms(280)).setInterpolator(Theme.surfaceCurve).start()
+            ValueAnimator.ofInt(indicator.width.coerceAtLeast(1), targetW).apply {
+                duration = Theme.ms(280)
+                interpolator = Theme.surfaceCurve
+                addUpdateListener {
+                    lp.width = it.animatedValue as Int
+                    indicator.layoutParams = lp
+                }
+                start()
+            }
+        }
+    }
+    private fun reveal(dir: Int, animated: Boolean) {
+        content.animate().cancel()
+        if (!animated || Theme.reducedMotion) {
+            content.alpha = 1f
+            content.translationX = 0f
+            return
+        }
+        content.alpha = 0f
+        content.translationX = dir * dp(16).toFloat()
+        content.animate().alpha(1f).translationX(0f).setDuration(Theme.ms(220)).setInterpolator(Theme.surfaceCurve).start()
+    }
+    private fun loadItems(dir: Int = 0, animated: Boolean = false) {
+        val fresh = before == null
         val gen=generation;val p=JSONObject().put("user_id",profile.str("user_id")).put("kind",category).put("limit",48);before?.let {p.put("before",it)}
         CoreClient.call("profile_items",p) { v,e ->
             if(gen!=generation)return@call;if(e!=null)return@call act.toast(e.message)
@@ -178,6 +251,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
                 })
             }
             if(page.size==48) content.addView(action("Показать ещё",R.drawable.ic_down) {loadItems()})
+            if (fresh) reveal(dir, animated)
         }
     }
 }

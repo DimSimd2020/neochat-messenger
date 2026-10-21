@@ -71,6 +71,7 @@ final class BackgroundView: UIView {
         super.init(frame: frame)
         backgroundColor = Theme.canvas
         isOpaque = true
+        clipsToBounds = true
         autoresizingMask = [.flexibleWidth, .flexibleHeight]
         isUserInteractionEnabled = false
         for l in [grad, top, bottom] { layer.addSublayer(l) }

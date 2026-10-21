@@ -24,12 +24,15 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.text.TextPaint
 import android.text.style.BackgroundColorSpan
+import android.text.style.ClickableSpan
+import android.text.style.ForegroundColorSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
+import android.text.style.UnderlineSpan
 import android.text.style.URLSpan
-import android.text.style.ForegroundColorSpan
 import android.util.Base64
 import android.util.LruCache
 import android.util.TypedValue
@@ -122,11 +125,28 @@ fun spanned(m: JSONObject): CharSequence {
             set(BackgroundColorSpan(0x30808080))
         }
         if (s.has("link")) set(URLSpan(s.str("link")))
-        if (s.has("mention")) { set(ForegroundColorSpan(Theme.p.accent)); set(StyleSpan(Typeface.BOLD)) }
+        if (s.has("mention")) {
+            val name = s.str("mention")
+            val broadcast = name.equals("everyone", true) || name.equals("here", true)
+            // Outgoing bubbles are blue, so a blue tag disappears into them. Warm sand stays readable.
+            val mention = if (m.optBoolean("outgoing")) 0xFFFFE3A1.toInt() else Theme.p.accent
+            set(ForegroundColorSpan(mention))
+            set(StyleSpan(Typeface.BOLD))
+            if (!broadcast) {
+                set(UnderlineSpan())
+                set(MentionSpan(name))
+            }
+        }
         if (pre) b.append('\n')
     }
     while (b.isNotEmpty() && b[b.length - 1] == '\n') b.delete(b.length - 1, b.length)
     return b
+}
+
+/** A tappable @name. @everyone and @here are not profiles. */
+private class MentionSpan(val name: String) : ClickableSpan() {
+    override fun onClick(widget: View) {}
+    override fun updateDrawState(ds: TextPaint) { ds.isUnderlineText = true }
 }
 
 fun isImage(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?.optBoolean("image") == true
@@ -876,14 +896,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val fcol = LinearLayout(ctx).apply { orientation = VERTICAL }
             fileName.maxLines = 2
             fileName.ellipsize = TextUtils.TruncateAt.MIDDLE
-            fcol.addView(fileName)
-            fcol.addView(fileMeta, LayoutParams(WRAP, WRAP).apply { topMargin = dp(3) })
+            fileName.setHorizontallyScrolling(false)
+            fcol.addView(fileName, LayoutParams(MATCH, WRAP))
+            fcol.addView(fileMeta, LayoutParams(MATCH, WRAP).apply { topMargin = dp(3) })
             file.addView(fcol, LayoutParams(0, WRAP, 1f).apply { setMargins(dp(12), 0, dp(8), 0) })
             fileAction.setImageResource(R.drawable.ic_download)
             fileAction.setPadding(dp(8), dp(8), dp(8), dp(8))
             fileAction.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
             file.addView(fileAction, LayoutParams(dp(40), dp(40)))
-            file.minimumWidth = dp(220)
             bubble.addView(file, LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(4) })
             photo.scaleType = ImageView.ScaleType.CENTER_CROP
             photo.outlineProvider = object : ViewOutlineProvider() {
@@ -909,7 +929,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             text.maxWidth = maxText
             quoteText.maxWidth = maxText
             fwd.maxWidth = maxText
-            fileName.maxWidth = maxText - dp(46 + 60)
             text.setTextIsSelectable(false)
             text.setLineSpacing(0f, 1.2f)
             text.setOnLongClickListener { menu(m, bubble); true }
@@ -936,6 +955,17 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             bubble.setOnClickListener { tap { if (isImage(m)) openPhoto(m) else menu(m, bubble) } }
             setOnClickListener { tap { menu(m, bubble) } }
             setOnLongClickListener { menu(m, bubble); true }
+        }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            // MATCH_PARENT inside a WRAP_CONTENT bubble collapses the filename to nothing.
+            // Give the card a real width that still fits the row, including the bubble padding.
+            val avatarWidth = if (av.visibility != GONE) dp(38) else 0
+            val rowInner = MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight - avatarWidth
+            val pad = bubble.paddingLeft + bubble.paddingRight
+            val cap = minOf((ctx.resources.displayMetrics.widthPixels * 0.78f).toInt(), rowInner) - pad
+            file.layoutParams.width = cap.coerceAtLeast(0)
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
         }
 
         fun bind(item: Item) {
@@ -1246,9 +1276,9 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         v.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { root.removeView(v) }.start()
     }
 
-    /** Opens a link under the finger; any other tap falls through to the bubble's actions. */
+    /** Opens a link or a person's tag under the finger; any other tap falls through to the bubble. */
     private fun openLinkAt(tv: TextView, e: MotionEvent): Boolean {
-        if (e.action != MotionEvent.ACTION_UP) return false
+        if (e.action != MotionEvent.ACTION_UP && e.action != MotionEvent.ACTION_DOWN) return false
         val text = tv.text as? Spanned ?: return false
         val layout = tv.layout ?: return false
         val x = e.x.toInt() - tv.totalPaddingLeft + tv.scrollX
@@ -1256,13 +1286,27 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         val line = layout.getLineForVertical(y)
         if (x < layout.getLineLeft(line) || x > layout.getLineRight(line)) return false
         val off = layout.getOffsetForHorizontal(line, x.toFloat())
-        val link = text.getSpans(off, off, URLSpan::class.java).firstOrNull() ?: return false
-        try {
-            act.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link.url)))
-        } catch (_: Exception) {
-            act.toast("Не удалось открыть ссылку")
+        val mention = text.getSpans(off, off, MentionSpan::class.java).firstOrNull()
+        val link = text.getSpans(off, off, URLSpan::class.java).firstOrNull()
+        if (mention == null && link == null) return false
+        if (e.action == MotionEvent.ACTION_UP) {
+            if (mention != null) openMention(mention.name)
+            else if (link != null) {
+                try {
+                    act.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link.url)))
+                } catch (_: Exception) {
+                    act.toast("Не удалось открыть ссылку")
+                }
+            }
         }
         return true
+    }
+
+    private fun openMention(name: String) {
+        CoreClient.call("lookup_user", JSONObject().put("username", name).put("conversation_id", conversationId)) { v, e ->
+            if (e != null) act.toast(e.message)
+            else act.openPage(PersonProfilePage(act, (v as JSONObject).str("user_id")))
+        }
     }
 
     private fun canReact(m: JSONObject) = m.str("kind") in setOf("text", "file", "poll") &&

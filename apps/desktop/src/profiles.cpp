@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QEvent>
 #include <QDir>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -18,7 +19,10 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointer>
+#include <QPropertyAnimation>
 #include <QScrollArea>
+#include <QStringList>
+#include <QTimer>
 #include <QShortcut>
 #include <QTemporaryFile>
 #include <QThreadPool>
@@ -162,6 +166,55 @@ void clearLayout(QLayout *layout)
     while(auto *item=layout->takeAt(0)) { if(item->widget())delete item->widget(); if(item->layout())clearLayout(item->layout());delete item; }
 }
 
+class TabPill : public QWidget {
+public:
+    explicit TabPill(QWidget *parent = nullptr) : QWidget(parent) { setAttribute(Qt::WA_TransparentForMouseEvents); hide(); }
+    void moveTo(QWidget *tab) {
+        m_target = tab;
+        const QRect r = tab->geometry().adjusted(0, 4, 0, -4);
+        if (!isVisible() || Theme::ms(1) == 0 || geometry().width() <= 1) {
+            setGeometry(r);
+            show();
+            lower();
+            return;
+        }
+        auto *a = new QPropertyAnimation(this, "geometry", this);
+        a->setDuration(Theme::ms(280));
+        a->setEasingCurve(Theme::surfaceEasing());
+        a->setStartValue(geometry());
+        a->setEndValue(r);
+        a->start(QAbstractAnimation::DeleteWhenStopped);
+        show();
+        lower();
+    }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(Theme::p().raised);
+        p.drawRoundedRect(QRectF(rect()), 16, 16);
+    }
+    bool eventFilter(QObject *o, QEvent *e) override {
+        if (o == parent() && e->type() == QEvent::Resize && m_target) {
+            const QRect r = m_target->geometry().adjusted(0, 4, 0, -4);
+            if (r != geometry())
+                setGeometry(r);
+            show();
+            lower();
+        }
+        return false;
+    }
+private:
+    QPointer<QWidget> m_target;
+};
+
+int profileTabIndex(const QString &key) {
+    const QStringList order{QStringLiteral("media"), QStringLiteral("files"), QStringLiteral("links"), QStringLiteral("groups"), QStringLiteral("privacy")};
+    const int i = order.indexOf(key);
+    return i < 0 ? 0 : i;
+}
+
 class ProfileContent : public QWidget {
 public:
     DialogHost host;
@@ -170,12 +223,23 @@ public:
     QJsonArray items;
     QVBoxLayout *column;
     int generation=0;
+    int tabIndex=0;
+    int slide=0;
     ProfileContent(const DialogHost &h,QJsonObject p) : host(h),uid(p.value("user_id").toString()),profile(p) { column=new QVBoxLayout(this);column->setContentsMargins(0,0,0,0); }
     void select(const QString &key) {
-        ui::transition(this,rect(),ui::Motion::Dissolve,[this,key] { build(key); });
+        const int next = profileTabIndex(key);
+        slide = next == tabIndex ? 0 : (next > tabIndex ? 1 : -1);
+        tabIndex = next;
+        const auto motion = slide < 0 ? ui::Motion::PullRight : ui::Motion::PullLeft;
+        if (key == QLatin1String("privacy") || key == QLatin1String("groups"))
+            ui::transition(this, rect(), motion, [this, key] { build(key); });
+        else
+            build(key);
     }
     void build(const QString &key) {
-        kind=key;items={};++generation;clearLayout(column);
+        kind=key;items={};++generation;
+        if (key != QLatin1String("privacy") && key != QLatin1String("groups")) { load(); return; }
+        clearLayout(column);
         if(key=="privacy") {
             column->addWidget(new ui::Label(QStringLiteral("Сквозное шифрование"),18,QFont::DemiBold));
             auto *code=new ui::Label(profile.value("me").toBool()?QStringLiteral("Коды безопасности доступны в профилях собеседников"):profile.value("safety_number").toString(),17,QFont::DemiBold,ui::Label::Accent);
@@ -192,7 +256,7 @@ public:
             const auto groups=profile.value("groups").toArray();
             if(groups.isEmpty())column->addWidget(new ui::Label(QStringLiteral("Общих групп пока нет"),15,400,ui::Label::Muted));
             for(const auto &v:groups) {auto g=v.toObject();auto *b=new ui::Button(g.value("title").toString(),ui::Button::Secondary);column->addWidget(b);QObject::connect(b,&QAbstractButton::clicked,this,[=]{Sheet::closeAll(host.host);host.openChat(g.value("id").toString());});}
-        } else load();
+        }
     }
     void load() {
         const int gen=generation;
@@ -202,7 +266,8 @@ public:
             if(gen!=generation)return;
             if(!e.ok())return host.toast(e.message);
             for(const auto &m:v.toArray())items.append(m);
-            clearLayout(column);
+            const auto motion = slide < 0 ? ui::Motion::PullRight : ui::Motion::PullLeft;
+            ui::transition(this, rect(), motion, [=] { clearLayout(column);
             if(items.isEmpty())column->addWidget(new ui::Label(QStringLiteral("Общих материалов в этом разделе пока нет"),15,400,ui::Label::Muted));
             auto *grid=new QGridLayout;
             for(int i=0;i<items.size();++i) {
@@ -220,6 +285,7 @@ public:
             }
             if(kind=="media")column->addLayout(grid);else delete grid;
             if(v.toArray().size()==48){auto *b=new ui::Button(QStringLiteral("Показать ещё"),ui::Button::Flat);column->addWidget(b);QObject::connect(b,&QAbstractButton::clicked,this,[this]{load();});}
+            });
         });
     }
 };
@@ -276,16 +342,19 @@ void dialogs::personProfile(const DialogHost &h,const QString &userId)
         body->addWidget(info);
         auto *content=new ProfileContent(h,p);
         auto *tabScroll=new QScrollArea;tabScroll->setWidgetResizable(true);tabScroll->setFrameShape(QFrame::NoFrame);tabScroll->setFixedHeight(60);auto *tabBox=new QWidget;auto *tabs=new QHBoxLayout(tabBox);tabs->setContentsMargins(0,0,0,0);
+        auto *pill=new TabPill(tabBox);tabBox->installEventFilter(pill);
         auto buttons=std::make_shared<QList<ui::Button *>>();
         for(const auto &pair:{qMakePair("media",QStringLiteral("Медиа")),qMakePair("files",QStringLiteral("Файлы")),qMakePair("links",QStringLiteral("Ссылки")),qMakePair("groups",QStringLiteral("Группы")),qMakePair("privacy",QStringLiteral("Конфиденциальность"))}) {
-            auto *b=new ui::Button(pair.second,pair.first==QString("media")?ui::Button::Secondary:ui::Button::Flat);
+            auto *b=new ui::Button(pair.second,ui::Button::Flat);
             b->setCheckable(true);b->setChecked(pair.first==QString("media"));buttons->append(b);tabs->addWidget(b);
             QObject::connect(b,&QAbstractButton::clicked,content,[=] {
-                for(auto *tab:*buttons) {tab->setChecked(tab==b);tab->setKind(tab==b?ui::Button::Secondary:ui::Button::Flat);}
+                for(auto *tab:*buttons) tab->setChecked(tab==b);
+                pill->moveTo(b);
                 content->select(pair.first);
             });
         }
         tabScroll->setWidget(tabBox);body->addWidget(tabScroll);body->addWidget(content);content->select("media");
+        QTimer::singleShot(0, tabBox, [pill, buttons] { if (!buttons->isEmpty()) pill->moveTo(buttons->first()); });
     });
     sheet->open();
 }

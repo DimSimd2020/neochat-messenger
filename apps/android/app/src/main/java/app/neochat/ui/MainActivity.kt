@@ -253,6 +253,14 @@ class MainActivity : Activity(), Sheet.Host {
         val v = next.view
         if (v.parent == null) content.addView(v, FrameLayout.LayoutParams(MATCH, MATCH))
         v.visibility = View.VISIBLE
+        v.alpha = 1f
+        pv?.alpha = 1f
+        // Park the incoming screen off to the right before it is drawn. A translucent page
+        // (settings, chat) otherwise sits on top of the previous one for a frame.
+        if (slide && pv != null && !Theme.reducedMotion && shift > 0f) {
+            val w = content.width.toFloat().takeIf { it > 0f } ?: resources.displayMetrics.widthPixels.toFloat()
+            v.translationX = w
+        }
         v.bringToFront()
         next.applyInsets(top, bottom, ime)
         Theme.apply()
@@ -300,13 +308,30 @@ class MainActivity : Activity(), Sheet.Host {
         content.addView(shadow, FrameLayout.LayoutParams(dp(18), MATCH))
         val over = if (forward) v else pv
         val under = if (forward) pv else v
+        val plate = BackgroundView(this)
+        content.addView(plate, FrameLayout.LayoutParams(MATCH, MATCH))
         under.bringToFront()
         scrim.bringToFront()
+        plate.bringToFront()
         over.bringToFront()
         shadow.bringToFront()
+        // A newly added plate has no size until the next layout. Size it now so the first
+        // frame of a translucent screen does not show the previous one through it.
+        val wPx = w.toInt()
+        val hPx = content.height.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
+        val exactW = View.MeasureSpec.makeMeasureSpec(wPx, View.MeasureSpec.EXACTLY)
+        val exactH = View.MeasureSpec.makeMeasureSpec(hPx, View.MeasureSpec.EXACTLY)
+        for (layer in listOf(scrim, plate)) {
+            layer.measure(exactW, exactH)
+            layer.layout(0, 0, wPx, hPx)
+        }
+        shadow.measure(View.MeasureSpec.makeMeasureSpec(dp(18), View.MeasureSpec.EXACTLY), exactH)
+        shadow.layout(0, 0, dp(18), hPx)
         // p is how far the upper screen has come in: 0 off to the right, 1 at rest.
         val place = { p: Float ->
             over.translationX = (1f - p) * w
+            over.alpha = 1f
+            plate.translationX = over.translationX
             under.translationX = -p * 0.25f * w
             under.alpha = 1f
             scrim.alpha = 0.16f * p
@@ -326,6 +351,7 @@ class MainActivity : Activity(), Sheet.Host {
                 if (slideAnim === anim) slideAnim = null
                 content.removeView(scrim)
                 content.removeView(shadow)
+                content.removeView(plate)
                 over.translationX = 0f
                 under.translationX = 0f
                 over.alpha = 1f

@@ -1,10 +1,11 @@
 //! Mention recipients travel inside the authenticated E2EE message only.
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 
 use crate::engine::{Inner, s};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::outbox::Payload;
+use crate::store::kv_get_str;
 
 pub fn names(text: &str) -> Vec<String> {
     crate::markdown::spans(text).iter().filter_map(|s| s["mention"].as_str().map(str::to_lowercase)).collect()
@@ -28,6 +29,27 @@ impl Inner {
             names.iter().any(|n| m["username"].as_str().is_some_and(|u| u.eq_ignore_ascii_case(n))) ||
             (here && self.cached_presence(m["user_id"].as_str().unwrap_or("")).is_some_and(|p| p["online"] == true)))
             .filter_map(|m| m["user_id"].as_str().map(str::to_string)).take(200).collect())
+    }
+
+    /// A person behind an @tag. Broadcast tags are not profiles.
+    pub fn lookup_user(&self, p: &Value) -> Result<Value> {
+        let raw = s(p, "username")?.trim_start_matches('@').trim();
+        let name = raw.to_lowercase();
+        if name.is_empty() || name == "everyone" || name == "here" {
+            return Err(Error::Invalid("Это не профиль".into()));
+        }
+        let db = self.db();
+        if kv_get_str(&db.conn, "username")?.is_some_and(|own| own.eq_ignore_ascii_case(raw)) {
+            if let Some(id) = kv_get_str(&db.conn, "user_id")? {
+                return Ok(json!({"user_id": id}));
+            }
+        }
+        let uid: Option<String> = db.conn.query_row(
+            "SELECT user_id FROM contacts WHERE lower(username)=?1",
+            [name.as_str()],
+            |r| r.get(0),
+        ).optional()?;
+        uid.map(|id| json!({"user_id": id})).ok_or_else(|| Error::Invalid("Профиль не найден".into()))
     }
 
     pub fn mention_candidates(&self, p: &Value) -> Result<Value> {
