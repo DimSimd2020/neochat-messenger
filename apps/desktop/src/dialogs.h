@@ -2,6 +2,7 @@
 
 #include <QJsonArray>
 #include <QString>
+#include <QStringList>
 #include <functional>
 
 class QWidget;
@@ -29,4 +30,6 @@ void myQr(const DialogHost &h);
 void conversationInfo(const DialogHost &h, const QString &conversationId);
 void newPoll(const DialogHost &h, const QString &conversationId);
 void forward(const DialogHost &h, const QJsonArray &msgs);
+// Preview of the picked files with a caption field and "send as a file" for pictures; `send` gets the final set.
+void sendAttachments(const DialogHost &h, const QStringList &paths, bool asPhotos, std::function<void(const QStringList &paths, bool asPhotos, const QString &caption)> send);
 }

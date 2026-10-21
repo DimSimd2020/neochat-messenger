@@ -227,7 +227,7 @@ impl Inner {
         }
         drop(rows);
         let mut st = db.conn.prepare(
-            "SELECT id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll, fwd FROM messages
+            "SELECT id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll, fwd, edited_at FROM messages
              WHERE kind IN ('text','file','poll') AND status NOT IN ('queued','sending','failed') ORDER BY local_id",
         )?;
         let mut rows = st.query([])?;
@@ -235,7 +235,7 @@ impl Inner {
             let line = json!({"t": "message", "id": r.get::<_, String>(0)?, "conversation_id": r.get::<_, String>(1)?, "sender_user_id": r.get::<_, String>(2)?,
                 "sender_device_id": r.get::<_, String>(3)?, "outgoing": r.get::<_, i64>(4)?, "kind": r.get::<_, String>(5)?, "body": r.get::<_, String>(6)?,
                 "reply_to": r.get::<_, Option<String>>(7)?, "file": r.get::<_, Option<String>>(8)?, "status": r.get::<_, String>(9)?,
-                "server_id": r.get::<_, Option<String>>(10)?, "sent_at": r.get::<_, i64>(11)?, "poll": r.get::<_, Option<String>>(12)?, "fwd": r.get::<_, Option<String>>(13)?});
+                "server_id": r.get::<_, Option<String>>(10)?, "sent_at": r.get::<_, i64>(11)?, "poll": r.get::<_, Option<String>>(12)?, "fwd": r.get::<_, Option<String>>(13)?, "edited_at": r.get::<_, i64>(14)?});
             writeln!(w, "{line}")?;
         }
         drop(rows);
@@ -284,11 +284,11 @@ impl Inner {
                 }
                 "message" => {
                     tx.execute(
-                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll, fwd)
-                         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll, fwd, edited_at)
+                         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
                          WHERE NOT EXISTS(SELECT 1 FROM deleted_messages WHERE message_id=?1 AND conversation_id=?2 AND sender_user_id=?3)",
                         params![st("id"), st("conversation_id"), st("sender_user_id"), st("sender_device_id"), int("outgoing"), st("kind"), st("body"),
-                            v["reply_to"].as_str(), v["file"].as_str(), st("status"), v["server_id"].as_str(), int("sent_at"), v["poll"].as_str(), v["fwd"].as_str()],
+                            v["reply_to"].as_str(), v["file"].as_str(), st("status"), v["server_id"].as_str(), int("sent_at"), v["poll"].as_str(), v["fwd"].as_str(), int("edited_at")],
                     )?;
                 }
                 "delete" => {

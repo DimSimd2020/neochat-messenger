@@ -168,6 +168,7 @@ private slots:
     void registerAccount();
     void addContactAndOpenChat();
     void composeSendAndFile();
+    void editAndCaption();
     void receiptsAndGroup();
     void socialFeatures();
     void dialogsAndPickers();
@@ -217,6 +218,28 @@ private:
             if (!m->item(i).isDate)
                 ++n;
         return n;
+    }
+    // Picked files wait in the attach dialog; this presses its "Отправить" (optionally with a caption).
+    void confirmAttach(const QString &caption = {})
+    {
+        QAbstractButton *go = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT(
+            [&] {
+                for (auto *sheet : sheetHost()->findChildren<Sheet *>(QString(), Qt::FindDirectChildrenOnly))
+                    if (sheet->isVisible())
+                        for (auto *b : sheet->findChildren<QAbstractButton *>())
+                            if (b->text() == QStringLiteral("Отправить"))
+                                go = b;
+                return go != nullptr;
+            }(),
+            5000);
+        if (!caption.isEmpty()) {
+            auto *cap = field(QStringLiteral("Подпись"));
+            QVERIFY(cap);
+            cap->edit()->setText(caption);
+        }
+        go->click();
+        QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
     }
     QJsonObject lastMessage(MessageView *v)
     {
@@ -360,6 +383,8 @@ void UiTest::composeSendAndFile()
     f.write(data);
     f.close();
     emit composer->filesDropped({path});
+    shot("08b-attach-dialog-file");
+    confirmAttach();
     QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("kind").toString() == "file" && lastMessage(view).value("status").toString() == "sent", 20000);
     const QString fileId = lastMessage(view).value("id").toString();
 
@@ -390,6 +415,8 @@ void UiTest::composeSendAndFile()
     mime->setUrls(urls);
     QApplication::clipboard()->setMimeData(mime);
     QTest::keyClick(edit, Qt::Key_V, Qt::ControlModifier);
+    shot("09b-attach-dialog-photos");
+    confirmAttach();
     QTRY_VERIFY_WITH_TIMEOUT(messageCount(view) == beforePhotos + 3 && lastMessage(view).value("status") == "sent", 30000);
     m_alice->call("sync_now");
     QTRY_VERIFY_WITH_TIMEOUT(m_alice->call("list_messages", {{"conversation_id", m_conv}}).toArray().size() == beforePhotos + 3, 15000);
@@ -399,6 +426,82 @@ void UiTest::composeSendAndFile()
         QVERIFY(file.value("image").toBool());
         QCOMPARE(file.value("name").toString(), QString("batch-%1.png").arg(i));
     }
+}
+
+void UiTest::editAndCaption()
+{
+    auto *view = find<MessageView>([](MessageView *) { return true; });
+    auto *composer = find<Composer>([](Composer *) { return true; });
+    auto *edit = composer->findChild<ComposerEdit *>();
+
+    // A picture goes out with a caption typed in the dialog.
+    const QString photo = m_dir.path() + "/captioned.png";
+    QImage image(120, 90, QImage::Format_RGB32);
+    image.fill(QColor(200, 120, 60));
+    QVERIFY(image.save(photo));
+    const int beforeCaption = messageCount(view);
+    emit composer->filesDropped({photo});
+    confirmAttach(QStringLiteral("Вот и озеро"));
+    QTRY_VERIFY_WITH_TIMEOUT(messageCount(view) == beforeCaption + 1 && lastMessage(view).value("status").toString() == "sent", 20000);
+    QCOMPARE(lastMessage(view).value("kind").toString(), QStringLiteral("file"));
+    QCOMPARE(lastMessage(view).value("text").toString(), QStringLiteral("Вот и озеро"));
+
+    // Own text message → menu "Изменить" → composer in edit mode → new text replaces the old one.
+    edit->setFocus();
+    typeText(edit, "Встречаемся в девять");
+    QTest::keyClick(edit, Qt::Key_Return);
+    QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("text").toString() == QStringLiteral("Встречаемся в девять") && lastMessage(view).value("status").toString() == "sent", 15000);
+    const QString id = lastMessage(view).value("id").toString();
+    bool menuShown = false;
+    QTimer::singleShot(600, this, [this, &menuShown] {
+        auto *menu = dynamic_cast<PopupMenu *>(QApplication::activePopupWidget());
+        if (!menu)
+            return;
+        menuShown = true;
+        for (auto *a : menu->actions())
+            if (a->text() == QStringLiteral("Изменить")) {
+                a->trigger();
+                break;
+            }
+        menu->close();
+    });
+    const QRect row = view->visualRect(view->model()->index(view->model()->rowCount() - 1, 0));
+    const QPoint pos(view->viewport()->width() - 8, row.center().y());
+    QContextMenuEvent event(QContextMenuEvent::Mouse, pos, view->viewport()->mapToGlobal(pos));
+    QApplication::sendEvent(view->viewport(), &event);
+    QTRY_VERIFY_WITH_TIMEOUT(menuShown, 5000);
+    QTRY_VERIFY(composer->editing());
+    QCOMPARE(edit->toPlainText(), QStringLiteral("Встречаемся в девять"));
+    shot("08c-editing");
+    edit->selectAll();
+    typeText(edit, "Встречаемся в десять");
+    QTest::keyClick(edit, Qt::Key_Return);
+    QTRY_VERIFY(!composer->editing());
+    QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("text").toString() == QStringLiteral("Встречаемся в десять"), 10000);
+    QVERIFY(lastMessage(view).value("edited").toBool());
+    QCOMPARE(lastMessage(view).value("id").toString(), id);
+    QVERIFY(edit->toPlainText().isEmpty());
+    shot("08d-edited");
+
+    // The other side sees the same text with the edited mark.
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            const QJsonArray ms = m_alice->call("list_messages", {{"conversation_id", m_conv}}).toArray();
+            const QJsonObject last = ms.isEmpty() ? QJsonObject() : ms.last().toObject();
+            return last.value("text").toString() == QStringLiteral("Встречаемся в десять") && last.value("edited").toBool();
+        }(),
+        15000);
+
+    // Esc leaves edit mode and brings the unsent draft back.
+    edit->setFocus();
+    typeText(edit, "черновик");
+    composer->setEdit(lastMessage(view));
+    QVERIFY(composer->editing());
+    QTest::keyClick(edit, Qt::Key_Escape);
+    QTRY_VERIFY(!composer->editing());
+    QCOMPARE(edit->toPlainText(), QStringLiteral("черновик"));
+    edit->clear();
 }
 
 void UiTest::receiptsAndGroup()

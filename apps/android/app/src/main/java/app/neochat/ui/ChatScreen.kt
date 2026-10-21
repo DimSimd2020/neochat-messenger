@@ -277,8 +277,12 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     // composer
     private val composer = LinearLayout(ctx)
     private val replyBar = LinearLayout(ctx)
+    private var cancelReply: View? = null
     private val replyText = ctx.label("", 13.5f, 400, Theme.Role.MUTED)
     private var replyTo: JSONObject? = null
+    // Edit mode: the field holds the message text; the unsent draft waits in savedDraft.
+    private var editing: JSONObject? = null
+    private var savedDraft = ""
     private val capsule = LinearLayout(ctx)
     private val edit = ThemedEdit(ctx)
     private val send = IconButton(ctx, R.drawable.ic_send, "Отправить", 44, iconRole = Theme.Role.ON_ACCENT)
@@ -1033,7 +1037,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 bubble.background = bg
             }
             bindReactions(m, out && emoji == 0)
-            time.text = hhmm(m.optLong("sent_at"))
+            time.text = if (m.optBoolean("edited")) "изменено " + hhmm(m.optLong("sent_at")) else hhmm(m.optLong("sent_at"))
             val st = m.str("status")
             status.visibility = if (out) VISIBLE else GONE
             when (st) {
@@ -1151,32 +1155,79 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private var viewer: View? = null
 
+    /** Opens the photo among all pictures of the chat; swiping left and right moves between them. */
     private fun openPhoto(m: JSONObject) {
-        CoreClient.call("download_file", JSONObject().put("message_id", m.str("id"))) { v, e ->
-            if (e != null) return@call act.toast(e.message)
-            val path = (v as JSONObject).str("path")
-            val side = maxOf(ctx.resources.displayMetrics.widthPixels, ctx.resources.displayMetrics.heightPixels)
-            Thread {
-                val bmp = Photos.decode(path, side)
-                act.runOnUiThread { if (bmp == null) act.toast("Не удалось открыть фото") else showViewer(bmp) }
-            }.start()
-        }
+        val photos = messages.filter { isImage(it) }
+        val at = photos.indexOfFirst { it.str("id") == m.str("id") }
+        if (at < 0) showViewer(listOf(m), 0) else showViewer(photos, at)
     }
 
-    /** Full-screen photo over the chat: tap or Back closes; fades unless motion is reduced. */
-    private fun showViewer(bmp: Bitmap) {
+    private class PhotoPage(val img: ImageView) : RecyclerView.ViewHolder(img) {
+        var id = ""
+    }
+
+    /** Full-screen photos over the chat: tap or Back closes; fades unless motion is reduced. */
+    private fun showViewer(photos: List<JSONObject>, start: Int) {
         closeViewer()
         hideKeyboard()
         val v = FrameLayout(ctx)
         v.setBackgroundColor(0xF2040914.toInt())
         v.isClickable = true
-        v.contentDescription = "Просмотр фото. Нажмите, чтобы закрыть"
-        val img = ImageView(ctx)
-        img.setImageBitmap(bmp)
-        img.scaleType = ImageView.ScaleType.FIT_CENTER
-        img.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        v.addView(img, flp(MATCH, MATCH).apply { setMargins(dp(8), column.paddingTop + dp(8), dp(8), column.paddingBottom + dp(8)) })
-        v.setOnClickListener { closeViewer() }
+        val pager = RecyclerView(ctx)
+        val lm = LinearLayoutManager(ctx, LinearLayoutManager.HORIZONTAL, false)
+        pager.layoutManager = lm
+        androidx.recyclerview.widget.PagerSnapHelper().attachToRecyclerView(pager)
+        pager.itemAnimator = null
+        pager.adapter = object : RecyclerView.Adapter<PhotoPage>() {
+            override fun getItemCount() = photos.size
+            override fun onCreateViewHolder(parent: ViewGroup, type: Int): PhotoPage {
+                val img = ImageView(ctx)
+                img.scaleType = ImageView.ScaleType.FIT_CENTER
+                img.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                img.setPadding(dp(8), column.paddingTop + dp(8), dp(8), column.paddingBottom + dp(8))
+                img.layoutParams = RecyclerView.LayoutParams(MATCH, MATCH)
+                img.setOnClickListener { closeViewer() }
+                return PhotoPage(img)
+            }
+            override fun onBindViewHolder(h: PhotoPage, pos: Int) {
+                val m = photos[pos]
+                val id = m.str("id")
+                h.id = id
+                h.img.setImageBitmap(Photos.full.get(id) ?: Photos.thumb(m))
+                if (Photos.full.get(id) != null) return
+                CoreClient.call("download_file", JSONObject().put("message_id", id)) { r, e ->
+                    if (e != null) return@call if (pos == start) act.toast("Не удалось открыть фото") else Unit
+                    val path = (r as JSONObject).str("path")
+                    val side = maxOf(ctx.resources.displayMetrics.widthPixels, ctx.resources.displayMetrics.heightPixels)
+                    Thread {
+                        val bmp = Photos.decode(path, side)
+                        act.runOnUiThread { if (bmp != null && h.id == id) h.img.setImageBitmap(bmp) }
+                    }.start()
+                }
+            }
+        }
+        lm.scrollToPositionWithOffset(start, 0)
+        v.addView(pager, flp(MATCH, MATCH))
+        val counter = TextView(ctx)
+        counter.setTextColor(Theme.p.text)
+        counter.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        counter.typeface = weightFace(600)
+        counter.setPadding(dp(14), dp(6), dp(14), dp(6))
+        counter.background = GradientDrawable().apply { setColor(0x66000000); cornerRadius = ctx.dpf(16) }
+        fun describe(pos: Int) {
+            counter.text = "${pos + 1} из ${photos.size}"
+            v.contentDescription = if (photos.size > 1) "Просмотр фото ${pos + 1} из ${photos.size}. Листайте влево и вправо, нажмите, чтобы закрыть" else "Просмотр фото. Нажмите, чтобы закрыть"
+        }
+        describe(start)
+        if (photos.size > 1) {
+            v.addView(counter, flp(WRAP, WRAP, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = column.paddingTop + dp(12) })
+            pager.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                    val pos = lm.findFirstCompletelyVisibleItemPosition()
+                    if (pos >= 0) describe(pos)
+                }
+            })
+        }
         root.addView(v, flp(MATCH, MATCH))
         viewer = v
         v.alpha = 0f
@@ -1260,6 +1311,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (android.os.Build.VERSION.SDK_INT < 33) act.toast("Текст скопирован")
         }
         if (isImage(m)) pm.add("Открыть фото") { openPhoto(m) }
+        if (!gone && m.optBoolean("outgoing") && m.str("status") in setOf("sent", "delivered", "read") && m.str("kind") in setOf("text", "file"))
+            pm.add("Изменить") { setEdit(m) }
         if (m.str("kind") == "poll" && m.optBoolean("outgoing") && m.optJSONObject("poll")?.optBoolean("closed") != true) pm.add("Завершить опрос") {
             CoreClient.call("close_poll", JSONObject().put("message_id", m.str("id"))) { _, e -> if (e != null) act.toast(e.message) }
         }
@@ -1346,7 +1399,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         replyCol.addView(replyText)
         replyBar.addView(replyCol, lp(0, WRAP, 1f).apply { marginStart = dp(10) })
         val cancel = IconButton(ctx, R.drawable.ic_close, "Отменить ответ", 40)
-        cancel.setOnClickListener { setReply(null) }
+        cancelReply = cancel
+        cancel.setOnClickListener { if (editing != null) cancelEdit() else setReply(null) }
         replyBar.addView(cancel, lp(dp(40), dp(40)))
         replyBar.visibility = View.GONE
         composerBox.addView(replyBar, lp())
@@ -1408,11 +1462,12 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     /** The send button slides in 48 dp over 240 ms when there is text; reduced motion jumps. */
     private fun updateSend(animated: Boolean) {
-        val target = if (edit.text.isNotBlank()) 1f else 0f
+        // A caption may be emptied, so editing a file keeps the button.
+        val target = if (edit.text.isNotBlank() || editing?.str("kind") == "file") 1f else 0f
         send.isEnabled = !blocked
         send.alpha = if (blocked) 0.5f else 1f
         send.contentDescription = "Отправить"
-        send.stateDescription = if (blocked) "Отправка приостановлена: ключ собеседника изменился" else null
+        send.describeState(if (blocked) "Отправка приостановлена: ключ собеседника изменился" else null)
         if (target == sendShown && sendAnim == null) return applySend()
         sendAnim?.cancel()
         val d = if (animated) Theme.ms(240) else 0L
@@ -1451,7 +1506,44 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         setReply(m)
     }
 
+    private fun setEdit(m: JSONObject) {
+        if (editing == null) savedDraft = edit.text.toString()
+        editing = m
+        replyTo = null
+        composerBg.radius = ctx.dpf(24)
+        composerBox.invalidate()
+        (replyLine.background as GradientDrawable).setColor(Theme.p.accent)
+        val t = m.str("text").replace("\n", " ").ifEmpty { if (isImage(m)) "Фото" else "Файл" }
+        replyName.text = "Изменение сообщения"
+        replyText.text = t
+        replyBar.contentDescription = "Изменение сообщения: $t"
+        cancelReply?.contentDescription = "Отменить изменение"
+        edit.setText(m.str("text"))
+        edit.setSelection(edit.text.length)
+        edit.requestFocus()
+        edit.post { (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(edit, 0) }
+        updateSend(true)
+        expand(replyBar, true)
+    }
+
+    private fun leaveEdit() {
+        if (editing == null) return
+        editing = null
+        edit.setText(savedDraft)
+        savedDraft = ""
+        cancelReply?.contentDescription = "Отменить ответ"
+    }
+
+    private fun cancelEdit() {
+        leaveEdit()
+        composerBg.radius = ctx.dpf(31)
+        composerBox.invalidate()
+        expand(replyBar, false)
+        updateSend(true)
+    }
+
     private fun setReply(m: JSONObject?) {
+        leaveEdit()
         replyTo = m
         composerBg.radius = ctx.dpf(if (m != null) 24 else 31)
         composerBox.invalidate()
@@ -1476,6 +1568,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     private fun sendText() {
+        editing?.let { m ->
+            val changed = edit.text.toString().trim()
+            if (blocked || (m.str("kind") == "text" && changed.isEmpty())) return
+            cancelEdit()
+            if (changed != m.str("text")) CoreClient.call("edit_message", JSONObject().put("message_id", m.str("id")).put("text", changed)) { _, e -> if (e != null) act.toast(e.message) }
+            return
+        }
         val text = edit.text.toString().trim()
         if (text.isEmpty() || blocked) return
         val p = JSONObject().put("conversation_id", conversationId).put("text", text)
@@ -1577,7 +1676,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     private fun saveDraft() {
-        CoreClient.call("set_draft", JSONObject().put("conversation_id", conversationId).put("text", edit.text.toString()))
+        CoreClient.call("set_draft", JSONObject().put("conversation_id", conversationId).put("text", if (editing != null) savedDraft else edit.text.toString()))
     }
 
     override fun applyInsets(top: Int, bottom: Int, ime: Int) {

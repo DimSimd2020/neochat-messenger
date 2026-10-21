@@ -528,6 +528,67 @@ impl Inner {
         Ok(Value::Null)
     }
 
+    /// Replaces the text of an own message here and, in an E2EE control message, on every
+    /// other device. Text messages and photo or file captions only; a caption may be emptied.
+    pub fn edit_message(&self, p: &Value) -> Result<Value> {
+        let id = s(p, "message_id")?;
+        let text = s(p, "text")?.trim_end().to_string();
+        let (conv, kind, outgoing, status, old): (String, String, i64, String, String) = self
+            .db()
+            .conn
+            .query_row("SELECT conversation_id, kind, outgoing, status, body FROM messages WHERE id=?1 AND kind IN ('text','file')", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()?
+            .ok_or_else(|| Error::Invalid("Сообщение не найдено".into()))?;
+        if outgoing != 1 {
+            return Err(Error::Invalid("Изменить можно только свои сообщения".into()));
+        }
+        if matches!(status.as_str(), "queued" | "sending" | "failed") {
+            return Err(Error::Invalid("Дождитесь отправки сообщения".into()));
+        }
+        if kind == "text" && text.trim().is_empty() {
+            return Err(Error::Invalid("Пустое сообщение".into()));
+        }
+        if text.len() > MAX_TEXT {
+            return Err(Error::Invalid("Сообщение длиннее 4096 байт".into()));
+        }
+        if text == old {
+            return self.message_json(id);
+        }
+        self.check_can_send(&conv)?;
+        let (me, _) = self.me()?;
+        self.enqueue_control(&conv, "edit", json!({"id": id, "text": text}))?;
+        Self::apply_edit(&self.db().conn, &conv, &me, &json!({"id": id, "text": text}), now_ms())?;
+        self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
+        self.emit(json!({"type": "conversations_changed"}));
+        self.message_json(id)
+    }
+
+    /// An "edit" control: only the original sender changes a message. Returns whether anything changed.
+    pub fn apply_edit(conn: &rusqlite::Connection, conv: &str, sender: &str, g: &Value, at: i64) -> Result<bool> {
+        let id = g["id"].as_str().unwrap_or_default();
+        let text = g["text"].as_str().unwrap_or_default().trim_end();
+        if text.len() > MAX_TEXT {
+            return Ok(false);
+        }
+        let n = conn.execute(
+            "UPDATE messages SET body=?4, edited_at=?5 WHERE id=?1 AND conversation_id=?2 AND sender_user_id=?3 AND body<>?4
+             AND (kind='file' OR (kind='text' AND ?4<>''))",
+            params![id, conv, sender, text, at.max(1)],
+        )?;
+        if n > 0 {
+            // Photos and files keep their own preview; only a text message shows its text there.
+            conn.execute(
+                "UPDATE conversations SET last_preview=?3
+                 WHERE id=?1 AND (SELECT id FROM messages WHERE conversation_id=?1 ORDER BY local_id DESC LIMIT 1)=?2
+                 AND (SELECT kind FROM messages WHERE id=?2)='text'",
+                params![conv, id, preview(text)],
+            )?;
+        }
+        Ok(n > 0)
+    }
+
     /// The sender name shown on a forwarded message: the original author's.
     fn forward_name(&self, sconv: &str, sender: &str) -> Result<String> {
         let (me, _) = self.me()?;

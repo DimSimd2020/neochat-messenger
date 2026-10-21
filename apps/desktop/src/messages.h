@@ -113,6 +113,7 @@ public:
 
 signals:
     void replyRequested(const QJsonObject &msg);
+    void editRequested(const QJsonObject &msg);
     void forwardRequested(const QJsonArray &msgs);
     void toast(const QString &text);
     void readable(); // the newest messages are on screen

@@ -45,7 +45,9 @@ private:
     void setSidebarHidden(bool hidden, bool animated = true);
     void updateLayoutMode();
     void sendText(const QString &text, const QString &replyTo);
-    void sendFiles(const QStringList &paths, bool photos);
+    void editText(const QString &id, const QString &text);
+    void attachDialog(const QStringList &paths, bool photos);
+    void sendFiles(const QStringList &paths, bool photos, const QString &caption = {});
     void sendNextFile();
     void markRead();
     void toast(const QString &text);

@@ -16,7 +16,11 @@
 #include <memory>
 #include <QDateTime>
 #include <QGuiApplication>
+#include <QFileInfo>
 #include <QImageReader>
+#include <QMimeDatabase>
+#include <QPixmap>
+#include <algorithm>
 #include <QDir>
 #include <QTemporaryFile>
 #include <QThreadPool>
@@ -31,6 +35,102 @@
 #include <QVBoxLayout>
 
 namespace {
+
+// Preview of what is about to be sent: the first picture, or the first few file names.
+class AttachPreview : public QWidget {
+public:
+    explicit AttachPreview(QWidget *parent = nullptr) : QWidget(parent)
+    {
+        setAccessibleName(QStringLiteral("Что будет отправлено"));
+        connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
+    }
+
+    void setPaths(const QStringList &paths, bool asPhotos)
+    {
+        m_paths = paths;
+        m_image = {};
+        if (asPhotos && !paths.isEmpty()) {
+            QImageReader r(paths.first());
+            r.setAutoTransform(true);
+            const QSize s = r.size();
+            if (s.isValid()) {
+                r.setScaledSize(s.scaled(QSize(760, 520), Qt::KeepAspectRatioByExpanding));
+                m_image = QPixmap::fromImageReader(&r);
+            }
+        }
+        updateGeometry();
+        update();
+    }
+
+    int rows() const { return qMin(4, int(m_paths.size())); }
+    bool showsImage() const { return !m_image.isNull(); }
+    QSize sizeHint() const override { return {300, showsImage() ? 230 : rows() * 48 + (m_paths.size() > 4 ? 22 : 0) + 4}; }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        const Palette &c = Theme::p();
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        if (showsImage()) {
+            QPainterPath clip;
+            clip.addRoundedRect(QRectF(rect()), 14, 14);
+            p.fillPath(clip, c.raised);
+            p.setClipPath(clip);
+            const QSizeF box = size();
+            const qreal k = qMax(box.width() / m_image.width(), box.height() / m_image.height());
+            const QSizeF drawn(m_image.width() * k, m_image.height() * k);
+            p.drawPixmap(QRectF((box.width() - drawn.width()) / 2, (box.height() - drawn.height()) / 2, drawn.width(), drawn.height()), m_image, QRectF(m_image.rect()));
+            if (m_paths.size() > 1) {
+                const QString badge = QStringLiteral("+") + QString::number(m_paths.size() - 1);
+                p.setFont(Theme::instance()->font(13, QFont::DemiBold));
+                const QRectF b(width() - 12 - 46, height() - 12 - 28, 46, 28);
+                p.setPen(Qt::NoPen);
+                p.setBrush(QColor(0, 0, 0, 150));
+                p.drawRoundedRect(b, 14, 14);
+                p.setPen(Qt::white);
+                p.drawText(b, Qt::AlignCenter, badge);
+            }
+            return;
+        }
+        int y = 2;
+        for (int i = 0; i < rows(); ++i) {
+            const QFileInfo fi(m_paths.at(i));
+            const QRectF icon(4, y + 4, 40, 40);
+            p.setPen(Qt::NoPen);
+            p.setBrush(c.raised);
+            p.drawRoundedRect(icon, 12, 12);
+            ui::paintIcon(&p, icon.adjusted(9, 9, -9, -9), "file", c.accent, 1.8);
+            p.setFont(Theme::instance()->font(14.5, QFont::DemiBold));
+            p.setPen(c.text);
+            p.drawText(QRectF(54, y + 5, width() - 60, 20), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(fi.fileName(), Qt::ElideMiddle, width() - 60));
+            p.setFont(Theme::instance()->font(12.5));
+            p.setPen(c.muted);
+            p.drawText(QRectF(54, y + 25, width() - 60, 18), Qt::AlignLeft | Qt::AlignVCenter, sizeText(fi.size()));
+            y += 48;
+        }
+        if (m_paths.size() > 4) {
+            p.setFont(Theme::instance()->font(13));
+            p.setPen(c.muted);
+            p.drawText(QRectF(4, y, width() - 8, 20), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("и ещё ") + QString::number(m_paths.size() - 4));
+        }
+    }
+
+private:
+    static QString sizeText(qint64 b)
+    {
+        if (b < 1024)
+            return QString::number(b) + QStringLiteral(" Б");
+        if (b < 1024 * 1024)
+            return QString::number(b / 1024) + QStringLiteral(" КБ");
+        return QString::number(b / 1048576.0, 'f', 1).replace('.', ',') + QStringLiteral(" МБ");
+    }
+
+    QStringList m_paths;
+    QPixmap m_image;
+};
 
 // Avatar, name and a second line; optional check mark for multi-select.
 class PersonRow : public QAbstractButton {
@@ -1514,6 +1614,71 @@ void forward(const DialogHost &h, const QJsonArray &msgs)
     QObject::connect(search->edit(), &QLineEdit::textChanged, sheet, reload);
     reload();
     sheet->open();
+}
+
+
+// ---- attachments ----
+
+void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPhotos, std::function<void(const QStringList &, bool, const QString &)> send)
+{
+    if (initial.isEmpty())
+        return;
+    auto *sheet = new Sheet(h.host, QStringLiteral("Отправить"), 420);
+    auto paths = std::make_shared<QStringList>(initial);
+    auto *preview = new AttachPreview;
+    auto *asFile = new ui::Toggle(QStringLiteral("Отправить как файл"));
+    auto *caption = new ui::TextField(QStringLiteral("Подпись"));
+    caption->edit()->setMaxLength(1000);
+    auto *add = new ui::Button(QStringLiteral("Добавить"), ui::Button::Flat);
+    auto *cancel = new ui::Button(QStringLiteral("Отмена"), ui::Button::Secondary);
+    auto *go = new ui::Button(QStringLiteral("Отправить"));
+    auto *buttons = new QHBoxLayout;
+    buttons->setSpacing(8);
+    buttons->addWidget(add);
+    buttons->addStretch(1);
+    buttons->addWidget(cancel);
+    buttons->addWidget(go);
+    sheet->body()->addWidget(preview);
+    sheet->body()->addWidget(asFile);
+    sheet->body()->addWidget(caption);
+    sheet->body()->addLayout(buttons);
+
+    auto isImage = [](const QString &path) { return QMimeDatabase().mimeTypeForFile(path).name().startsWith("image/"); };
+    // Pictures can go as photos or as files; with anything else in the set there is no choice to offer.
+    auto refresh = [=] {
+        const bool images = std::all_of(paths->begin(), paths->end(), isImage);
+        asFile->setVisible(images);
+        const bool photos = images ? !asFile->isChecked() : asPhotos;
+        preview->setPaths(*paths, photos && images);
+        if (images && photos)
+            sheet->setTitle(paths->size() == 1 ? QStringLiteral("Отправить фото") : QStringLiteral("Отправить фото: %1").arg(paths->size()));
+        else
+            sheet->setTitle(paths->size() == 1 ? QStringLiteral("Отправить файл") : QStringLiteral("Отправить файлы: %1").arg(paths->size()));
+    };
+    asFile->setChecked(!asPhotos);
+    QObject::connect(asFile, &QAbstractButton::toggled, sheet, refresh);
+    QObject::connect(add, &QAbstractButton::clicked, sheet, [=] {
+        filepicker::open(sheet, QStringLiteral("Добавить файлы"), {}, true, [=](const QStringList &more) {
+            for (const QString &f : more)
+                if (!paths->contains(f))
+                    paths->append(f);
+            refresh();
+        });
+    });
+    QObject::connect(cancel, &QAbstractButton::clicked, sheet, &Sheet::close);
+    auto submit = [=] {
+        const bool images = std::all_of(paths->begin(), paths->end(), isImage);
+        const bool photos = images ? !asFile->isChecked() : asPhotos;
+        const QStringList chosen = *paths;
+        const QString text = caption->text().trimmed();
+        sheet->close();
+        send(chosen, photos, text);
+    };
+    QObject::connect(go, &QAbstractButton::clicked, sheet, submit);
+    QObject::connect(caption->edit(), &QLineEdit::returnPressed, sheet, submit);
+    refresh();
+    sheet->open();
+    caption->edit()->setFocus(Qt::OtherFocusReason);
 }
 
 } // namespace dialogs

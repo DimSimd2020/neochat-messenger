@@ -190,6 +190,41 @@ fn group_membership_and_files() {
 }
 
 #[test]
+fn edit_message_roundtrip() {
+    let Some(e) = env() else { return };
+    let (alice, _) = register(&e, &uname("alice"));
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let contact = alice.call("resolve_contact", json!({"username": bname, "first_name": "Боб"}));
+    let conv = alice.call("open_direct", json!({"user_id": contact["user_id"]}));
+    let cid = conv["id"].as_str().unwrap().to_string();
+
+    let sent = alice.call("send_text", json!({"conversation_id": cid, "text": "опечтка"}));
+    let id = sent["id"].as_str().unwrap().to_string();
+    alice.sync();
+    bob.sync();
+    // Only the sender edits; an empty text is refused.
+    assert!(bob.try_call("edit_message", json!({"message_id": id, "text": "чужое"})).is_err());
+    assert!(alice.try_call("edit_message", json!({"message_id": id, "text": "  "})).is_err());
+    let edited = alice.call("edit_message", json!({"message_id": id, "text": "опечатка исправлена"}));
+    assert_eq!(edited["text"], "опечатка исправлена");
+    assert_eq!(edited["edited"], true);
+    alice.sync();
+    bob.sync();
+    let seen = bob.messages(&cid).into_iter().find(|m| m["id"] == id).unwrap();
+    assert_eq!(seen["text"], "опечатка исправлена", "{seen}");
+    assert_eq!(seen["edited"], true);
+    // A forged edit control from the other side changes nothing.
+    bob.core.as_ref().unwrap().inner.enqueue_control(&cid, "edit", json!({"id": id, "text": "подделка"})).unwrap();
+    bob.sync();
+    alice.sync();
+    let mine = alice.messages(&cid).into_iter().find(|m| m["id"] == id).unwrap();
+    assert_eq!(mine["text"], "опечатка исправлена");
+    let list = bob.call("list_conversations", json!({}));
+    assert!(list.to_string().contains("опечатка исправлена"), "the chat preview follows the edit: {list}");
+}
+
+#[test]
 fn delete_everywhere_and_forward() {
     let Some(e) = env() else { return };
     let (alice, _) = register(&e, &uname("alice"));

@@ -564,7 +564,8 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     }
     const QFontMetricsF mf(metaFont());
     const QString time = QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm");
-    qreal metaW = mf.horizontalAdvance(time) + (out ? 24 : 0);
+    const QString stamp = (m.value("edited").toBool() ? QStringLiteral("изменено ") : QString()) + time;
+    qreal metaW = mf.horizontalAdvance(stamp) + (out ? 24 : 0);
     if (out && group && m.value("delivered_count").toInt() > 0)
         metaW += mf.horizontalAdvance(QString::number(m.value("delivered_count").toInt())) + 4;
     L.meta = QRectF(0, h, metaW, 16);
@@ -887,10 +888,11 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     p->setFont(metaFont());
     p->setPen(meta);
     const QString time = QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm");
-    p->drawText(L.meta, Qt::AlignLeft | Qt::AlignVCenter, time);
+    const QString stamp = (m.value("edited").toBool() ? QStringLiteral("изменено ") : QString()) + time;
+    p->drawText(L.meta, Qt::AlignLeft | Qt::AlignVCenter, stamp);
     if (out) {
         const QString st = m.value("status").toString();
-        const QRectF ir(L.meta.left() + QFontMetricsF(p->font()).horizontalAdvance(time) + 4, L.meta.center().y() - 9, 18, 18);
+        const QRectF ir(L.meta.left() + QFontMetricsF(p->font()).horizontalAdvance(stamp) + 4, L.meta.center().y() - 9, 18, 18);
         if (st == "queued")
             ui::paintIcon(p, ir, "clock", meta, 1.8);
         else if (st == "sent")
@@ -1638,6 +1640,9 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
     }
     if (kind != "undecryptable" && kind != "call" && !m_searching)
         menu->addAction(QStringLiteral("Ответить"), this, [this, m] { emit replyRequested(m); });
+    if (m.value("outgoing").toBool() && (kind == "text" || kind == "file") && !m_searching &&
+        QStringList{"sent", "delivered", "read"}.contains(m.value("status").toString()))
+        menu->addAction(QStringLiteral("Изменить"), this, [this, m] { emit editRequested(m); });
     if (!messageText(m).isEmpty())
         menu->addAction(QStringLiteral("Копировать текст"), this, [m] { QApplication::clipboard()->setText(messageText(m)); });
     if (isImage(m))

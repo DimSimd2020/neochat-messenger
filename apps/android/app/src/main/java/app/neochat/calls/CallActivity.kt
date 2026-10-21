@@ -22,6 +22,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import app.neochat.ui.weightFace
 import app.neochat.R
 import app.neochat.ui.AvatarView
 import app.neochat.ui.Palette
@@ -165,7 +166,7 @@ class CallActivity : Activity() {
     private fun text(sp: Float, bold: Boolean, color: Int) = TextView(this).apply {
         textSize = sp
         setTextColor(color)
-        if (bold) typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, 600, false)
+        if (bold) typeface = weightFace(600)
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
     }

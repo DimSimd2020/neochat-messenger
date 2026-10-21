@@ -308,6 +308,7 @@ impl Inner {
             "retry_message" => self.retry_message(p),
             "delete_local_message" => self.delete_local_message(p),
             "delete_everywhere" => self.delete_everywhere(p),
+            "edit_message" => self.edit_message(p),
             "forward_message" => self.forward_message(p),
             "download_file" => self.download_file(p),
             "export_file" => self.export_file(p),

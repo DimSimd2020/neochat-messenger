@@ -41,6 +41,20 @@ import android.widget.TextView
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+/** Variable font weights exist from Android 9; earlier versions get regular or bold. */
+fun weightFace(weight: Int): Typeface =
+    if (Build.VERSION.SDK_INT >= 28) Typeface.create(Typeface.DEFAULT, weight, false)
+    else if (weight >= 600) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+
+/** State descriptions for TalkBack exist from Android 11. */
+fun View.describeState(text: CharSequence?) {
+    if (Build.VERSION.SDK_INT >= 30) stateDescription = text
+}
+
+/** Screen coordinates of one pointer; the indexed getRawX/getRawY need Android 10. */
+fun MotionEvent.rawXOf(i: Int): Float = getX(i) + (rawX - x)
+fun MotionEvent.rawYOf(i: Int): Float = getY(i) + (rawY - y)
+
 fun Context.dp(v: Number): Int = (v.toFloat() * resources.displayMetrics.density).roundToInt()
 fun View.dp(v: Number): Int = context.dp(v)
 fun Context.dpf(v: Number): Float = v.toFloat() * resources.displayMetrics.density
@@ -69,7 +83,7 @@ fun <T : View> T.margins(l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0): T {
 fun Context.label(s: CharSequence, sp: Float, weight: Int = 400, role: Theme.Role = Theme.Role.TEXT): TextView = TextView(this).apply {
     text = s
     setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
-    typeface = Typeface.create(Typeface.DEFAULT, weight, false)
+    typeface = weightFace(weight)
     setTag(Theme.TAG_ROLE, role)
     setTextColor(role.color())
     includeFontPadding = false
@@ -244,7 +258,7 @@ class Chip(ctx: Context, text: String) : TextView(ctx), Themed {
     init {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        typeface = Typeface.create(Typeface.DEFAULT, 600, false)
+        typeface = weightFace(600)
         gravity = Gravity.CENTER
         minHeight = dp(44)
         setPadding(dp(16), 0, dp(16), 0)
@@ -397,7 +411,7 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
-        typeface = Typeface.create(Typeface.DEFAULT, 600, false)
+        typeface = weightFace(600)
     }
     private val r = RectF()
     private var photo: android.graphics.Bitmap? = null
@@ -527,7 +541,7 @@ class ThemeSlider(ctx: Context) : View(ctx), Themed {
         val nv = v.coerceIn(0, 2)
         val changed = nv != value
         value = nv
-        stateDescription = names[nv]
+        describeState(names[nv])
         anim?.cancel()
         val d = if (animated) Theme.ms(220) else 0L
         if (d == 0L) {
@@ -690,7 +704,7 @@ class ToggleRow(ctx: Context, text: String) : LinearLayout(ctx), Themed {
 
     fun setChecked(on: Boolean, animated: Boolean) {
         checked = on
-        stateDescription = if (on) "включено" else "выключено"
+        describeState(if (on) "включено" else "выключено")
         anim?.cancel()
         val d = if (animated) Theme.ms(220) else 0L
         if (d == 0L) {
@@ -836,8 +850,8 @@ class SwipeToReplyLayout(
                 if (!tracking || dragging) return dragging
                 val idx = e.findPointerIndex(pointerId)
                 if (idx < 0) return false
-                val dx = e.getRawX(idx) - downX
-                val dy = e.getRawY(idx) - downY
+                val dx = e.rawXOf(idx) - downX
+                val dy = e.rawYOf(idx) - downY
                 if (abs(dy) > slop && abs(dy) >= abs(dx)) {
                     tracking = false
                     return false
@@ -867,9 +881,9 @@ class SwipeToReplyLayout(
             MotionEvent.ACTION_MOVE -> {
                 val idx = e.findPointerIndex(pointerId)
                 if (idx < 0) return true
-                val dx = e.getRawX(idx) - downX
+                val dx = e.rawXOf(idx) - downX
                 if (!dragging) {
-                    val dy = e.getRawY(idx) - downY
+                    val dy = e.rawYOf(idx) - downY
                     if (abs(dx) > slop && abs(dx) > abs(dy) && !blockedByBackEdge(dx)) {
                         dragging = true
                         parent.requestDisallowInterceptTouchEvent(true)

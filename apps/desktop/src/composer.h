@@ -38,7 +38,10 @@ public:
     void setBlocked(bool blocked);
     void setReply(const QJsonObject &msg);
     void clearReply();
-    QString replyId() const { return m_reply.value("id").toString(); }
+    // Edit mode: the field holds the message text; send changes the message instead of sending a new one.
+    void setEdit(const QJsonObject &msg);
+    bool editing() const { return m_editing; }
+    QString replyId() const { return m_editing ? QString() : m_reply.value("id").toString(); }
     void setEnterSends(bool on) { m_edit->enterSends = on; }
     void focusInput() { m_edit->setFocus(Qt::OtherFocusReason); }
     QSize sizeHint() const override;
@@ -46,6 +49,7 @@ public:
 
 signals:
     void send(const QString &text, const QString &replyTo);
+    void edited(const QString &id, const QString &text);
     void attach();
     void filesDropped(const QStringList &paths);
     void imagePasted(const QImage &image);
@@ -73,6 +77,8 @@ private:
     QVariantAnimation m_progress;
     QVariantAnimation m_replyAnim;
     QJsonObject m_reply;
+    bool m_editing = false;
+    QString m_savedDraft;
     bool m_hasText = false;
     bool m_blocked = false;
     bool m_settingDraft = false;

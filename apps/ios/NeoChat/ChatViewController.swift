@@ -205,6 +205,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private var peerOnline = false
     private var presenceTimer: Timer?
     private var replyTo: JSON?
+    // Edit mode: the field holds the message text; the unsent draft waits in savedDraft.
+    private var editing: JSON?
+    private var savedDraft = ""
+    private weak var cancelButton: UIButton?
     private var blocked = false
     private let goneLabel = label("", 15, color: Theme.muted)
     private var previewURL: URL?
@@ -439,7 +443,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         if Notifier.visibleConversation == conversationId { Notifier.visibleConversation = nil }
         presenceTimer?.invalidate()
         presenceTimer = nil
-        Core.shared.call("set_draft", ["conversation_id": conversationId, "text": input.text ?? ""])
+        Core.shared.call("set_draft", ["conversation_id": conversationId, "text": editing != nil ? savedDraft : (input.text ?? "")])
     }
 
     private func scheduleReload() {
@@ -520,7 +524,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         cancel.accessibilityLabel = "Отменить ответ"
         cancel.widthAnchor.constraint(equalToConstant: 36).isActive = true
         cancel.heightAnchor.constraint(equalToConstant: 36).isActive = true
-        cancel.addAction(UIAction { [weak self] _ in self?.setReply(nil) }, for: .touchUpInside)
+        cancelButton = cancel
+        cancel.addAction(UIAction { [weak self] _ in if self?.editing != nil { self?.cancelEdit() } else { self?.setReply(nil) } }, for: .touchUpInside)
         replyBar.addArrangedSubview(line)
         replyBar.addArrangedSubview(col)
         replyBar.addArrangedSubview(cancel)
@@ -550,7 +555,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     /// The send button slides in over 240 ms when there is text.
     private func updateSend(animated: Bool) {
-        let show = !(input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // A caption may be emptied, so editing a file keeps the button.
+        let show = !(input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editing?.str("kind") == "file"
         let target: CGFloat = show ? 40 : 0
         send.isEnabled = !blocked
         send.alpha = blocked ? 0.5 : 1
@@ -560,7 +566,40 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         if animated { Theme.animate(0.24) { self.composer.layoutIfNeeded() } }
     }
 
+    private func setEdit(_ m: JSON) {
+        if editing == nil { savedDraft = input.text ?? "" }
+        editing = m
+        replyTo = nil
+        let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
+        replyTitle.text = "Изменение сообщения"
+        replyText.text = t.isEmpty ? (isImage(m) ? "Фото" : "Файл") : t
+        replyBar.accessibilityLabel = "Изменение сообщения: " + (replyText.text ?? "")
+        cancelButton?.accessibilityLabel = "Отменить изменение"
+        input.text = m.str("text")
+        textViewDidChange(input)
+        input.becomeFirstResponder()
+        Theme.animate(0.18) {
+            self.replyBar.isHidden = false
+            self.view.layoutIfNeeded()
+        }
+    }
+
+    private func leaveEdit() {
+        guard editing != nil else { return }
+        editing = nil
+        input.text = savedDraft
+        savedDraft = ""
+        textViewDidChange(input)
+        cancelButton?.accessibilityLabel = "Отменить ответ"
+    }
+
+    private func cancelEdit() {
+        leaveEdit()
+        setReply(nil)
+    }
+
     private func setReply(_ m: JSON?) {
+        leaveEdit()
         replyTo = m
         if let m {
             let t = m.str("kind") == "file" ? "Файл" : m.str("text").replacingOccurrences(of: "\n", with: " ")
@@ -576,6 +615,17 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     private func sendText() {
+        if let m = editing {
+            let changed = (input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if blocked || (m.str("kind") == "text" && changed.isEmpty) { return }
+            cancelEdit()
+            if changed != m.str("text") {
+                Core.shared.call("edit_message", ["message_id": m.str("id"), "text": changed]) { [weak self] r in
+                    if case .failure(let e) = r { self?.toast(e.message) }
+                }
+            }
+            return
+        }
         let text = (input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !blocked else { return }
         var p: JSON = ["conversation_id": conversationId, "text": text]
@@ -967,6 +1017,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             if let u = URL(string: l) { acts.append(MenuAction(title: "Открыть ссылку: " + (u.host ?? l), icon: "safari") { UIApplication.shared.open(u) }) }
         }
         if isImage(m) { acts.append(MenuAction(title: "Открыть фото", icon: "photo") { [weak self] in self?.openPhoto(m) }) }
+        if !composer.isHidden && m.bool("outgoing") && ["sent", "delivered", "read"].contains(m.str("status")) && ["text", "file"].contains(m.str("kind")) {
+            acts.append(MenuAction(title: "Изменить", icon: "pencil") { [weak self] in self?.setEdit(m) })
+        }
         if m.str("kind") == "poll", let p = m.obj("poll") {
             let who = p.arr("options").compactMap { o -> String? in
                 let v = o["voters"] as? [String] ?? []
@@ -1044,22 +1097,11 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
     }
 
+    /// Opens the photo among all pictures of the chat; swiping left and right moves between them.
     private func openPhoto(_ m: JSON) {
-        Core.shared.call("download_file", ["message_id": m.str("id")]) { [weak self] r in
-            switch r {
-            case .failure(let e): self?.toast(e.message)
-            case .success(let v):
-                let url = URL(fileURLWithPath: (v as? JSON)?.str("path") ?? "")
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let img = Photos.decode(url, maxSide: 2732)
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        guard let img else { return self.toast("Не удалось открыть фото") }
-                        self.present(PhotoViewerController(image: img), animated: !Theme.reducedMotion)
-                    }
-                }
-            }
-        }
+        let photos = messages.filter { isImage($0) }
+        let at = photos.firstIndex { $0.str("id") == m.str("id") }
+        present(PhotoGalleryController(photos: at == nil ? [m] : photos, start: at ?? 0), animated: !Theme.reducedMotion)
     }
 
     private func retry(_ m: JSON) {
@@ -1455,7 +1497,7 @@ final class BubbleCell: UITableViewCell {
         bindReactions(m.arr("reactions"), out: out && !big, fg: fg)
         text.isHidden = body.isEmpty || kind == "poll"
         let st = m.str("status")
-        meta.text = hhmm(m.int64("sent_at"))
+        meta.text = (m.bool("edited") ? "изменено " : "") + hhmm(m.int64("sent_at"))
         delivery.isHidden = !out
         delivery.status = st
         delivery.color = st == "failed" ? Theme.warning : (big ? Theme.muted : (st == "read" ? .white : muted))
@@ -1633,15 +1675,64 @@ final class PollRow: UIControl {
     }
 }
 
-/// Full-screen photo: pinch to zoom, tap closes; cross-fades unless motion is reduced.
+/// One picture of the gallery: pinch to zoom, tap closes. The thumbnail shows until the original is decrypted.
 final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
-    private let image: UIImage
+    let message: JSON
+    let index: Int
+    var onClose: (() -> Void)?
     private let scroll = UIScrollView()
     private let imageView = UIImageView()
 
-    init(image: UIImage) {
-        self.image = image
+    init(message: JSON, index: Int) {
+        self.message = message
+        self.index = index
         super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        scroll.frame = view.bounds
+        scroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        scroll.delegate = self
+        scroll.minimumZoomScale = 1
+        scroll.maximumZoomScale = 4
+        scroll.showsVerticalScrollIndicator = false
+        scroll.showsHorizontalScrollIndicator = false
+        imageView.image = Photos.cache.object(forKey: message.str("id") as NSString) ?? Photos.thumb(message)
+        imageView.contentMode = .scaleAspectFit
+        imageView.frame = scroll.bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        imageView.isAccessibilityElement = true
+        imageView.accessibilityLabel = "Фото"
+        imageView.accessibilityHint = "Коснитесь, чтобы закрыть"
+        scroll.addSubview(imageView)
+        view.addSubview(scroll)
+        view.addGestureRecognizer(TapGesture { [weak self] in self?.onClose?() })
+        Core.shared.call("download_file", ["message_id": message.str("id")]) { [weak self] r in
+            guard case .success(let v) = r, let path = (v as? JSON)?.str("path") else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let img = Photos.decode(URL(fileURLWithPath: path), maxSide: 2732)
+                DispatchQueue.main.async { if let img { self?.imageView.image = img } }
+            }
+        }
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+}
+
+/// Full-screen photos of a chat in one pager: swipe left and right, cross-fades unless motion is reduced.
+final class PhotoGalleryController: UIPageViewController, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
+    private let photos: [JSON]
+    private var current: Int
+    private let counter = UILabel()
+
+    init(photos: [JSON], start: Int) {
+        self.photos = photos
+        self.current = start
+        super.init(transitionStyle: .scroll, navigationOrientation: .horizontal, options: [.interPageSpacing: 16])
         modalPresentationStyle = .overFullScreen
         modalTransitionStyle = .crossDissolve
     }
@@ -1651,27 +1742,54 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.016, green: 0.035, blue: 0.08, alpha: 0.96)
-        scroll.frame = view.bounds
-        scroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        scroll.delegate = self
-        scroll.minimumZoomScale = 1
-        scroll.maximumZoomScale = 4
-        scroll.showsVerticalScrollIndicator = false
-        scroll.showsHorizontalScrollIndicator = false
-        imageView.image = image
-        imageView.contentMode = .scaleAspectFit
-        imageView.frame = scroll.bounds
-        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        imageView.isAccessibilityElement = true
-        imageView.accessibilityLabel = "Фото"
-        imageView.accessibilityHint = "Коснитесь, чтобы закрыть"
-        scroll.addSubview(imageView)
-        view.addSubview(scroll)
+        dataSource = self
+        delegate = self
+        setViewControllers([page(current)], direction: .forward, animated: false)
+        counter.font = .systemFont(ofSize: 14, weight: .semibold)
+        counter.textColor = .white
+        counter.textAlignment = .center
+        counter.backgroundColor = UIColor(white: 0, alpha: 0.4)
+        counter.layer.cornerRadius = 15
+        counter.layer.masksToBounds = true
+        counter.translatesAutoresizingMaskIntoConstraints = false
+        counter.isHidden = photos.count < 2
+        view.addSubview(counter)
+        NSLayoutConstraint.activate([
+            counter.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            counter.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            counter.heightAnchor.constraint(equalToConstant: 30),
+            counter.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
+        ])
         view.accessibilityViewIsModal = true
-        view.addGestureRecognizer(TapGesture { [weak self] in self?.dismiss(animated: !Theme.reducedMotion) })
+        updateCounter()
     }
 
-    func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+    private func page(_ i: Int) -> PhotoViewerController {
+        let p = PhotoViewerController(message: photos[i], index: i)
+        p.onClose = { [weak self] in self?.dismiss(animated: !Theme.reducedMotion) }
+        return p
+    }
+
+    private func updateCounter() {
+        counter.text = "\(current + 1) из \(photos.count)"
+        counter.accessibilityLabel = "Фото \(current + 1) из \(photos.count)"
+    }
+
+    func pageViewController(_ pvc: UIPageViewController, viewControllerBefore vc: UIViewController) -> UIViewController? {
+        guard let i = (vc as? PhotoViewerController)?.index, i > 0 else { return nil }
+        return page(i - 1)
+    }
+
+    func pageViewController(_ pvc: UIPageViewController, viewControllerAfter vc: UIViewController) -> UIViewController? {
+        guard let i = (vc as? PhotoViewerController)?.index, i + 1 < photos.count else { return nil }
+        return page(i + 1)
+    }
+
+    func pageViewController(_ pvc: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
+        guard completed, let i = (viewControllers?.first as? PhotoViewerController)?.index else { return }
+        current = i
+        updateCounter()
+    }
 
     override func accessibilityPerformEscape() -> Bool {
         dismiss(animated: !Theme.reducedMotion)

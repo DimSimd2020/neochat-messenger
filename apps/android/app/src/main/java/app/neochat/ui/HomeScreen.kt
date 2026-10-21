@@ -81,7 +81,7 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
         subtitle.ellipsize = TextUtils.TruncateAt.END
         bottom.addView(subtitle, lp(0, WRAP, 1f))
         badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        badge.typeface = Typeface.create(Typeface.DEFAULT, 700, false)
+        badge.typeface = weightFace(700)
         badge.gravity = Gravity.CENTER
         badge.minWidth = dp(20)
         badge.setPadding(dp(6), 0, dp(6), 0)
@@ -616,7 +616,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
             val tv = TextView(ctx).apply {
                 this.text = text
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                typeface = Typeface.create(Typeface.DEFAULT, 600, false)
+                typeface = weightFace(600)
                 maxLines = 1
                 importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
             }

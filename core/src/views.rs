@@ -10,7 +10,7 @@ use crate::outbox::FileMeta;
 
 const COLUMNS: &str = "m.local_id, m.id, m.conversation_id, m.sender_user_id, m.outgoing, m.kind, m.body, m.reply_to, m.file, m.status, m.error, m.sent_at,
     COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END, CASE WHEN m.sender_user_id='system' THEN 'NeoChat' ELSE '' END),
-    COALESCE(c.last_name, ''), COALESCE(c.username, ''), m.poll, m.fwd";
+    COALESCE(c.last_name, ''), COALESCE(c.username, ''), m.poll, m.fwd, m.edited_at";
 
 impl Inner {
     /// Runs a message query; `me` is appended as the last positional parameter.
@@ -44,8 +44,9 @@ impl Inner {
                 sender_name: display_name(&r.get::<_, String>(12)?, &r.get::<_, String>(13)?, &r.get::<_, String>(14)?),
                 poll: r.get(15)?,
                 fwd: r.get(16)?,
-                delivered: r.get(17)?,
-                read: r.get(18)?,
+                edited_at: r.get(17)?,
+                delivered: r.get(18)?,
+                read: r.get(19)?,
             })
         })?;
         let rows: Vec<Row> = rows.collect::<std::result::Result<_, _>>()?;
@@ -134,6 +135,7 @@ impl Inner {
                 "fwd": r.fwd.map(|f| serde_json::from_str::<Value>(&f).unwrap_or(Value::Null)),
                 "error": r.error.filter(|_| r.status == "failed"),
                 "sent_at": r.sent_at,
+                "edited": r.edited_at > 0,
                 "delivered_count": r.delivered,
                 "read_count": r.read,
             }));
@@ -209,6 +211,7 @@ struct Row {
     sender_name: String,
     poll: Option<String>,
     fwd: Option<String>,
+    edited_at: i64,
     delivered: i64,
     read: i64,
 }

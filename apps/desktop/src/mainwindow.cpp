@@ -483,7 +483,7 @@ MainWindow::MainWindow()
             dialogs::conversationInfo(host(), m_current.value("id").toString());
     });
     connect(m_composer, &Composer::send, this, &MainWindow::sendText);
-    connect(m_composer, &Composer::filesDropped, this, [this](const QStringList &paths) { sendFiles(paths, true); });
+    connect(m_composer, &Composer::filesDropped, this, [this](const QStringList &paths) { attachDialog(paths, true); });
     connect(m_composer, &Composer::imagePasted, this, [this](const QImage &image) {
         if (m_current.isEmpty() || !m_current.value("can_media").toBool()) return;
         const QString cid = m_current.value("id").toString();
@@ -511,10 +511,10 @@ MainWindow::MainWindow()
         auto *menu = new PopupMenu(this);
         menu->addAction(QStringLiteral("Фото"), this, [this] {
             filepicker::open(this, QStringLiteral("Выберите фото"), {"jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"}, true,
-                             [this](const QStringList &files) { sendFiles(files, true); });
+                             [this](const QStringList &files) { attachDialog(files, true); });
         });
         menu->addAction(QStringLiteral("Файл"), this, [this] {
-            filepicker::open(this, QStringLiteral("Прикрепить файл"), {}, true, [this](const QStringList &files) { sendFiles(files, false); });
+            filepicker::open(this, QStringLiteral("Прикрепить файл"), {}, true, [this](const QStringList &files) { attachDialog(files, false); });
         });
         if (m_current.value("can_polls").toBool() && m_current.value("kind").toString() != "direct")
             menu->addAction(QStringLiteral("Опрос"), this, [this] { dialogs::newPoll(host(), m_current.value("id").toString()); });
@@ -525,6 +525,8 @@ MainWindow::MainWindow()
             Core::instance()->call("set_draft", {{"conversation_id", m_current.value("id")}, {"text", text}});
     });
     connect(m_view, &MessageView::replyRequested, m_composer, &Composer::setReply);
+    connect(m_view, &MessageView::editRequested, m_composer, &Composer::setEdit);
+    connect(m_composer, &Composer::edited, this, &MainWindow::editText);
     connect(m_view, &MessageView::forwardRequested, this, [this](const QJsonArray &msgs) { dialogs::forward(host(), msgs); });
     connect(m_view, &MessageView::toast, this, &MainWindow::toast);
     connect(m_view, &MessageView::readable, this, &MainWindow::markRead);
@@ -690,8 +692,8 @@ void MainWindow::onEvent(const QJsonObject &ev)
     } else if (type == "history_cleared") {
         if (ev.value("conversation_id") == m_current.value("id")) {
             m_messagesTimer->stop();
-            m_composer->setDraft({});
             m_composer->clearReply();
+            m_composer->setDraft({});
             m_search->edit()->clear();
             m_view->setConversation(ev.value("hidden").toBool() ? QString() : m_current.value("id").toString(), m_current.value("kind") == "group");
             if (ev.value("hidden").toBool()) {
@@ -945,14 +947,37 @@ void MainWindow::sendText(const QString &text, const QString &replyTo)
     });
 }
 
-void MainWindow::sendFiles(const QStringList &paths, bool photos)
+void MainWindow::editText(const QString &id, const QString &text)
+{
+    Core::instance()->call("edit_message", {{"message_id", id}, {"text", text}}, this, [this](const QJsonValue &, const CoreError &e) {
+        if (!e.ok())
+            return toast(e.message);
+        m_composer->clearReply();
+    });
+}
+
+void MainWindow::attachDialog(const QStringList &paths, bool photos)
+{
+    if (m_current.isEmpty() || paths.isEmpty() || !m_current.value("can_media").toBool())
+        return;
+    dialogs::sendAttachments(host(), paths, photos, [this](const QStringList &chosen, bool asPhotos, const QString &caption) { sendFiles(chosen, asPhotos, caption); });
+}
+
+void MainWindow::sendFiles(const QStringList &paths, bool photos, const QString &caption)
 {
     if (m_current.isEmpty())
         return;
     if (m_files.size() + paths.size() > 100)
         return toast(QStringLiteral("Можно прикрепить до 100 файлов за раз. Дождитесь подготовки текущих вложений"));
-    for (const auto &path : paths)
-        m_files.enqueue({{"conversation_id", m_current.value("id")}, {"path", path}, {"photo", photos}});
+    // The caption belongs to the first file of the set.
+    bool first = true;
+    for (const auto &path : paths) {
+        QJsonObject item{{"conversation_id", m_current.value("id")}, {"path", path}, {"photo", photos}};
+        if (first && !caption.isEmpty())
+            item["caption"] = caption;
+        first = false;
+        m_files.enqueue(item);
+    }
     if (!m_preparingFile) sendNextFile();
 }
 
@@ -966,6 +991,8 @@ void MainWindow::sendNextFile()
         const QString path = file.value("path").toString();
         const QString type = QMimeDatabase().mimeTypeForFile(path).name();
         QJsonObject p{{"conversation_id", file.value("conversation_id")}, {"path", path}, {"mime", type}};
+        if (file.contains("caption"))
+            p["caption"] = file.value("caption");
         QSize size;
         const QString thumb = file.value("photo").toBool() && type.startsWith("image/") ? photoThumb(path, &size) : QString();
         if (!thumb.isEmpty()) {

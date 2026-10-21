@@ -151,7 +151,7 @@ class ChatSwipe(
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = act.dpf(13)
-        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, 600, false)
+        typeface = weightFace(600)
     }
 
     override fun getSwipeDirs(rv: RecyclerView, vh: RecyclerView.ViewHolder): Int {

@@ -214,7 +214,7 @@ void Composer::onTextChanged()
         m_hasText = has;
         updateSendState(!m_settingDraft);
     }
-    if (!m_settingDraft) {
+    if (!m_settingDraft && !m_editing) {
         m_draftTimer->start();
         if (has)
             emit typing();
@@ -243,21 +243,50 @@ void Composer::updateSendState(bool animated)
 void Composer::submit()
 {
     const QString t = m_edit->toPlainText().trimmed();
-    if (t.isEmpty() || m_blocked)
+    if (m_blocked)
+        return;
+    if (m_editing) {
+        // A photo or file may lose its caption; a text message may not become empty.
+        if (t.isEmpty() && m_reply.value("kind").toString() != "file")
+            return;
+        emit edited(m_reply.value("id").toString(), t);
+        return;
+    }
+    if (t.isEmpty())
         return;
     emit send(t, replyId());
 }
 
 void Composer::setReply(const QJsonObject &msg)
 {
+    clearReply();
     m_reply = msg;
     m_cancelReply->show();
     ui::animate(m_replyAnim, 1, Theme::ms(180));
     focusInput();
 }
 
+void Composer::setEdit(const QJsonObject &msg)
+{
+    const QString saved = m_editing ? m_savedDraft : m_edit->toPlainText();
+    clearReply();
+    m_savedDraft = saved;
+    m_editing = true;
+    m_reply = msg;
+    m_cancelReply->show();
+    setDraft(msg.value("text").toString());
+    ui::animate(m_replyAnim, 1, Theme::ms(180));
+    focusInput();
+}
+
 void Composer::clearReply()
 {
+    if (m_editing) {
+        // Leaving edit mode puts back what was typed before.
+        m_editing = false;
+        setDraft(m_savedDraft);
+        m_savedDraft.clear();
+    }
     if (m_reply.isEmpty())
         return;
     m_reply = {};
@@ -320,10 +349,10 @@ void Composer::paintEvent(QPaintEvent *)
         p.drawRoundedRect(QRectF(r.left(), r.top() + 4, 3, r.height() - 8), 1.5, 1.5);
         p.setFont(Theme::instance()->font(12.5, QFont::DemiBold));
         p.setPen(c.accent);
-        p.drawText(r.adjusted(14, 2, -44, -20), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("В ответ ") + m_reply.value("sender_name").toString());
+        p.drawText(r.adjusted(14, 2, -44, -20), Qt::AlignLeft | Qt::AlignVCenter, m_editing ? QStringLiteral("Изменение сообщения") : QStringLiteral("В ответ ") + m_reply.value("sender_name").toString());
         p.setFont(Theme::instance()->font(13));
         p.setPen(c.muted);
-        const QString t = m_reply.value("kind").toString() == "file" ? m_reply.value("file").toObject().value("name").toString() : m_reply.value("text").toString().simplified();
+        const QString t = m_reply.value("kind").toString() == "file" && !m_editing ? m_reply.value("file").toObject().value("name").toString() : m_reply.value("text").toString().simplified();
         p.drawText(r.adjusted(14, 20, -44, -2), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(t, Qt::ElideRight, int(r.width()) - 60));
         p.setOpacity(1);
     }
@@ -333,5 +362,9 @@ bool Composer::eventFilter(QObject *o, QEvent *e)
 {
     if (o == m_edit && (e->type() == QEvent::FocusIn || e->type() == QEvent::FocusOut))
         update();
+    if (o == m_edit && m_editing && e->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(e)->key() == Qt::Key_Escape) {
+        clearReply();
+        return true;
+    }
     return QWidget::eventFilter(o, e);
 }

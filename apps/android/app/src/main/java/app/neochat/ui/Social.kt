@@ -381,17 +381,20 @@ object AppLock {
     /** Needs Android 10: the system prompt can fall back to the screen lock only from there on. */
     fun available(ctx: Context): Boolean {
         if (Build.VERSION.SDK_INT < 29) return false
-        if (Build.VERSION.SDK_INT >= 30) {
-            val bm = ctx.getSystemService(android.hardware.biometrics.BiometricManager::class.java) ?: return false
-            val auth = android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_WEAK or
-                android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
-            return bm.canAuthenticate(auth) == android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS
-        }
-        return ctx.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceSecure == true
+        // A lock that cannot be asked for is treated as absent rather than allowed to crash the app.
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= 30) {
+                val bm = ctx.getSystemService(android.hardware.biometrics.BiometricManager::class.java) ?: return@runCatching false
+                val auth = android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                    android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                bm.canAuthenticate(auth) == android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS
+            } else ctx.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceSecure == true
+        }.getOrDefault(false)
     }
 
-    fun appLock(ctx: Context) = available(ctx) && Prefs.of(ctx).getBoolean("lock_app", false)
-    fun archiveLock(ctx: Context) = available(ctx) && Prefs.of(ctx).getBoolean("lock_archive", false)
+    // The saved choice is read first: the system is asked only when a lock was switched on.
+    fun appLock(ctx: Context) = Prefs.of(ctx).getBoolean("lock_app", false) && available(ctx)
+    fun archiveLock(ctx: Context) = Prefs.of(ctx).getBoolean("lock_archive", false) && available(ctx)
 
     /** The passcode of 0.6.3 is gone: its hash is wiped and the switches now mean the system lock. */
     fun migrate(ctx: Context) {
@@ -422,7 +425,7 @@ object AppLock {
 
     /** Asks the system once; no screen of our own. [done] gets whether the user passed. */
     fun confirm(act: MainActivity, title: String, done: (Boolean) -> Unit) {
-        if (!available(act) || authenticating) return done(false)
+        if (Build.VERSION.SDK_INT < 29 || !available(act) || authenticating) return done(false)
         authenticating = true
         val exec = act.mainExecutor
         val b = android.hardware.biometrics.BiometricPrompt.Builder(act).setTitle(title).setSubtitle("NeoChat")
@@ -503,7 +506,7 @@ fun reactionChip(ctx: Context, r: JSONObject, outgoing: Boolean, onClick: () -> 
     val mine = r.optBoolean("mine")
     text = r.str("emoji") + " " + r.optInt("count")
     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-    typeface = Typeface.create(Typeface.DEFAULT, 600, false)
+    typeface = weightFace(600)
     gravity = Gravity.CENTER
     setPadding(ctx.dp(9), ctx.dp(3), ctx.dp(10), ctx.dp(3))
     minHeight = ctx.dp(28)

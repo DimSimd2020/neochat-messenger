@@ -4,10 +4,23 @@ import UniformTypeIdentifiers
 
 /// Navigation with a guarded swipe-back: the gesture may only start on a real
 /// stacked screen and never while another transition is still running.
-final class ChatNavController: UINavigationController, UIGestureRecognizerDelegate {
+final class ChatNavController: UINavigationController, UIGestureRecognizerDelegate, UINavigationControllerDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
         interactivePopGestureRecognizer?.delegate = self
+        delegate = self
+    }
+
+    // Leaving a chat brings the tab bar back by sliding it in over the list, and its translucent
+    // glass shows as a green slab on the way. It stays hidden until the chat is gone.
+    func navigationController(_ nc: UINavigationController, willShow vc: UIViewController, animated: Bool) {
+        guard let bar = tabBarController?.tabBar else { return }
+        let leavingChat = animated && !vc.hidesBottomBarWhenPushed && nc.transitionCoordinator?.viewController(forKey: .from)?.hidesBottomBarWhenPushed == true
+        bar.alpha = leavingChat ? 0 : 1
+    }
+
+    func navigationController(_ nc: UINavigationController, didShow vc: UIViewController, animated: Bool) {
+        if !vc.hidesBottomBarWhenPushed { tabBarController?.tabBar.alpha = 1 }
     }
 
     func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
