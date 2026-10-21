@@ -179,7 +179,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         val selected = tabs.getChildAt(tabIndex) ?: return
         for (i in 0 until tabs.childCount) {
             val child = tabs.getChildAt(i)
-            (child.getChildAt(0) as? android.widget.TextView)?.role(if (child === selected) Theme.Role.TEXT else Theme.Role.MUTED)
+            ((child as? ViewGroup)?.getChildAt(0) as? android.widget.TextView)?.role(if (child === selected) Theme.Role.TEXT else Theme.Role.MUTED)
         }
         if (selected.width == 0) {
             selected.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {

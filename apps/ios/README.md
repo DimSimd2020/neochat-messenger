@@ -24,9 +24,10 @@ xcodebuild -project NeoChat.xcodeproj -scheme NeoChat -configuration Release -sd
 
 ```bash
 git push
-gh workflow run ios.yml --ref calls-0.6.3
-gh run list --workflow ios.yml --branch calls-0.6.3
-gh run download RUN_ID --name NeoChat-unsigned-ipa --dir dist/ios-ci
+gh workflow run ios.yml --ref <branch>
+gh run list --workflow ios.yml --branch <branch>
+gh run download RUN_ID --name NeoChat-unsigned-ipa --dir "$TEMP/neochat-ipa"
+cp "$TEMP/neochat-ipa/NeoChat-unsigned.ipa" dist/NeoChat-<версия>-ios-unsigned.ipa
 ```
 
 Ручной запуск сохраняет IPA только в артефакт `NeoChat-unsigned-ipa` и не публикует GitHub Release. Проверки ядра на host и UI-тест на симуляторе включаются опцией `run_tests=true`; по умолчанию выключены. При их запуске `ios-simulator-shots` содержит снимки теста.

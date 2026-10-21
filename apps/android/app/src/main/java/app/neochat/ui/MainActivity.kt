@@ -251,6 +251,7 @@ class MainActivity : Activity(), Sheet.Host {
         current = next
         prev?.onHidden()
         val v = next.view
+        val pv = prev?.view
         if (v.parent == null) content.addView(v, FrameLayout.LayoutParams(MATCH, MATCH))
         v.visibility = View.VISIBLE
         v.alpha = 1f
@@ -265,7 +266,6 @@ class MainActivity : Activity(), Sheet.Host {
         next.applyInsets(top, bottom, ime)
         Theme.apply()
         next.onShown()
-        val pv = prev?.view
         // Home and an open archive stay alive under a conversation.
         val drop = { if (pv != null && pv !== v) { if (prev === home || (prev === archive && next is ChatScreen)) pv.visibility = View.GONE else content.removeView(pv) } }
         v.animate().cancel()
