@@ -446,6 +446,30 @@ void UiTest::editAndCaption()
     QCOMPARE(lastMessage(view).value("kind").toString(), QStringLiteral("file"));
     QCOMPARE(lastMessage(view).value("text").toString(), QStringLiteral("Вот и озеро"));
 
+    // A picture from the clipboard (a screenshot) waits in the same dialog instead of going out at once.
+    {
+        QImage shotImage(200, 120, QImage::Format_RGB32);
+        shotImage.fill(QColor(60, 160, 90));
+        QApplication::clipboard()->setImage(shotImage);
+        const int before = messageCount(view);
+        edit->setFocus();
+        QTest::keyClick(edit, Qt::Key_V, Qt::ControlModifier);
+        QTRY_VERIFY_WITH_TIMEOUT(Sheet::anyOpen(sheetHost()), 5000);
+        QCOMPARE(messageCount(view), before);
+        shot("08e-paste-dialog");
+        confirmAttach(QStringLiteral("Скриншот"));
+        QTRY_VERIFY_WITH_TIMEOUT(messageCount(view) == before + 1 && lastMessage(view).value("status").toString() == "sent", 20000);
+        QCOMPARE(lastMessage(view).value("file").toObject().value("name").toString(), QStringLiteral("Изображение.png"));
+        QCOMPARE(lastMessage(view).value("text").toString(), QStringLiteral("Скриншот"));
+        // Dismissing the dialog sends nothing.
+        QApplication::clipboard()->setImage(shotImage);
+        QTest::keyClick(edit, Qt::Key_V, Qt::ControlModifier);
+        QTRY_VERIFY_WITH_TIMEOUT(Sheet::anyOpen(sheetHost()), 5000);
+        Sheet::closeAll(sheetHost());
+        QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
+        QCOMPARE(messageCount(view), before + 1);
+    }
+
     // Own text message → menu "Изменить" → composer in edit mode → new text replaces the old one.
     edit->setFocus();
     typeText(edit, "Встречаемся в девять");

@@ -19,8 +19,8 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 15
-        versionName = "0.6.5"
+        versionCode = 16
+        versionName = "0.6.5.1"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 

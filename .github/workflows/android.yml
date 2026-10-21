@@ -9,7 +9,7 @@ on:
       tag:
         description: "Existing GitHub release tag to upload to"
         required: true
-        default: "v0.6.5-preview"
+        default: "v0.6.5.1-preview"
 
 permissions:
   contents: write

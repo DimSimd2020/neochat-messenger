@@ -912,3 +912,168 @@ final class WhatsNewViewController: SheetViewController {
         }
     }
 }
+
+/// A file or picture waiting to be sent: a private copy in the outgoing folder.
+struct OutgoingFile {
+    let url: URL
+    let name: String
+    let mime: String
+    var size: Int64 { Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+    var isImage: Bool { mime.hasPrefix("image/") }
+}
+
+/// The window every attachment passes through: preview, "send as a file" for pictures, a caption.
+final class AttachViewController: SheetViewController {
+    private var files: [OutgoingFile]
+    private let asPhotos: Bool
+    private let more: (@escaping ([OutgoingFile]) -> Void) -> Void
+    private let send: ([OutgoingFile], Bool, String) -> Void
+    private let preview = UIStackView()
+    private let caption = Field("Подпись")
+    private var asFileRow: UIStackView?
+    private var asFile: Bool
+    private var sent = false
+    private var loadToken = 0
+
+    init(files: [OutgoingFile], asPhotos: Bool, more: @escaping (@escaping ([OutgoingFile]) -> Void) -> Void, send: @escaping ([OutgoingFile], Bool, String) -> Void) {
+        self.files = files
+        self.asPhotos = asPhotos
+        self.asFile = !asPhotos
+        self.more = more
+        self.send = send
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private var allImages: Bool { files.allSatisfy { $0.isImage } }
+    // Pictures can go as photos or as files; with anything else in the set there is no choice to offer.
+    private var photosNow: Bool { allImages ? !asFile : asPhotos }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        preview.axis = .vertical
+        preview.spacing = 6
+        stack.addArrangedSubview(preview)
+        let row = switchRow("Отправить как файл", on: asFile) { [weak self] on in
+            self?.asFile = on
+            self?.refresh()
+        }
+        asFileRow = row
+        stack.addArrangedSubview(row)
+        caption.autocapitalizationType = .sentences
+        caption.autocorrectionType = .default
+        caption.returnKeyType = .send
+        caption.addAction(UIAction { [weak self] _ in self?.submit() }, for: .editingDidEndOnExit)
+        stack.addArrangedSubview(caption)
+        let add = PillButton("Добавить", primary: false)
+        add.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.more { [weak self] extra in
+                guard let self else { return }
+                for f in extra where !self.files.contains(where: { $0.url == f.url }) { self.files.append(f) }
+                self.refresh()
+            }
+        }, for: .touchUpInside)
+        let go = PillButton("Отправить")
+        go.addAction(UIAction { [weak self] _ in self?.submit() }, for: .touchUpInside)
+        let buttons = UIStackView(arrangedSubviews: [add, go])
+        buttons.spacing = 10
+        buttons.distribution = .fillEqually
+        stack.addArrangedSubview(buttons)
+        refresh()
+    }
+
+    private func submit() {
+        guard !sent, !files.isEmpty else { return }
+        sent = true
+        send(files, photosNow, (caption.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+        dismiss(animated: !Theme.reducedMotion)
+    }
+
+    /// Files nobody sent are removed together with the window.
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        guard !sent, isBeingDismissed || navigationController?.isBeingDismissed == true else { return }
+        sent = true
+        files.forEach { try? FileManager.default.removeItem(at: $0.url) }
+    }
+
+    private func refresh() {
+        let images = allImages
+        asFileRow?.isHidden = !images
+        let photos = photosNow && images
+        title = photos ? (files.count == 1 ? "Отправить фото" : "Отправить фото: \(files.count)")
+            : (files.count == 1 ? "Отправить файл" : "Отправить файлы: \(files.count)")
+        preview.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if photos { addImagePreview() } else { addFileRows() }
+    }
+
+    private func addImagePreview() {
+        let box = UIView()
+        box.heightAnchor.constraint(equalToConstant: 220).isActive = true
+        box.layer.cornerRadius = 14
+        box.layer.cornerCurve = .continuous
+        box.clipsToBounds = true
+        box.backgroundColor = Theme.rim
+        let img = UIImageView()
+        img.contentMode = .scaleAspectFill
+        img.clipsToBounds = true
+        img.translatesAutoresizingMaskIntoConstraints = false
+        img.isAccessibilityElement = true
+        img.accessibilityLabel = files.count > 1 ? "Первое из \(files.count) фото" : "Фото"
+        box.addSubview(img)
+        NSLayoutConstraint.activate([
+            img.topAnchor.constraint(equalTo: box.topAnchor), img.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            img.leadingAnchor.constraint(equalTo: box.leadingAnchor), img.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+        ])
+        if files.count > 1 {
+            let badge = label("+\(files.count - 1)", 13, .semibold, color: .white)
+            badge.textAlignment = .center
+            badge.backgroundColor = UIColor(white: 0, alpha: 0.6)
+            badge.layer.cornerRadius = 14
+            badge.clipsToBounds = true
+            badge.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(badge)
+            NSLayoutConstraint.activate([
+                badge.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
+                badge.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -10),
+                badge.heightAnchor.constraint(equalToConstant: 28), badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
+            ])
+        }
+        preview.addArrangedSubview(box)
+        loadToken += 1
+        let token = loadToken
+        let url = files[0].url
+        DispatchQueue.global(qos: .userInitiated).async {
+            let decoded = Photos.decode(url, maxSide: 900)
+            DispatchQueue.main.async { [weak self] in
+                if let self, self.loadToken == token { img.image = decoded }
+            }
+        }
+    }
+
+    private func addFileRows() {
+        for f in files.prefix(4) {
+            let icon = UIImageView(image: UIImage(systemName: "doc.fill"))
+            icon.tintColor = Theme.accent
+            icon.contentMode = .center
+            icon.backgroundColor = Theme.rim
+            icon.layer.cornerRadius = 12
+            icon.layer.cornerCurve = .continuous
+            icon.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            icon.heightAnchor.constraint(equalToConstant: 44).isActive = true
+            let name = label(f.name, 15, .semibold)
+            name.lineBreakMode = .byTruncatingMiddle
+            let col = UIStackView(arrangedSubviews: [name, label(sizeText(f.size), 13, color: Theme.muted)])
+            col.axis = .vertical
+            let row = UIStackView(arrangedSubviews: [icon, col])
+            row.spacing = 12
+            row.alignment = .center
+            row.isAccessibilityElement = true
+            row.accessibilityLabel = f.name + ", " + sizeText(f.size)
+            preview.addArrangedSubview(row)
+        }
+        if files.count > 4 { preview.addArrangedSubview(label("и ещё \(files.count - 4)", 13, color: Theme.muted)) }
+    }
+}

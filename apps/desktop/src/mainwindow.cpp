@@ -16,6 +16,8 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
+#include <QFileInfo>
+#include <QUuid>
 #include <QCursor>
 #include <QDateTime>
 #include <QSet>
@@ -38,6 +40,13 @@
 #include <QVBoxLayout>
 
 namespace {
+
+// Pictures pasted from the clipboard live in a temp folder of their own until they are sent or dismissed.
+void dropPasted(const QString &path)
+{
+    if (path.startsWith(QDir::tempPath() + "/neochat-paste-"))
+        QFileInfo(path).dir().removeRecursively();
+}
 
 QString participants(int n)
 {
@@ -486,23 +495,17 @@ MainWindow::MainWindow()
     connect(m_composer, &Composer::filesDropped, this, [this](const QStringList &paths) { attachDialog(paths, true); });
     connect(m_composer, &Composer::imagePasted, this, [this](const QImage &image) {
         if (m_current.isEmpty() || !m_current.value("can_media").toBool()) return;
-        const QString cid = m_current.value("id").toString();
         const QPointer<MainWindow> guard(this);
-        QThreadPool::globalInstance()->start([guard, image, cid] {
-            auto tmp = std::make_shared<QTemporaryFile>(QDir::tempPath() + "/neochat-paste-XXXXXX.png");
-            const bool ok = tmp->open() && image.save(tmp.get(), "PNG");
-            tmp->close();
+        // The picture waits in the same preview window as picked files; the file lives in its own temp folder.
+        QThreadPool::globalInstance()->start([guard, image] {
+            const QString dir = QDir::tempPath() + "/neochat-paste-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+            const QString path = dir + QStringLiteral("/Изображение.png");
+            const bool ok = QDir().mkpath(dir) && image.save(path, "PNG");
             if (!guard) return;
-            QSize size;
-            const QString thumb = ok ? photoThumb(tmp->fileName(), &size) : QString();
-            QMetaObject::invokeMethod(guard, [guard, tmp, cid, thumb, size, ok] {
+            QMetaObject::invokeMethod(guard, [guard, path, ok] {
                 if (!guard) return;
                 if (!ok) return guard->toast(QStringLiteral("Не удалось вставить изображение"));
-                QJsonObject p{{"conversation_id", cid}, {"path", tmp->fileName()}, {"name", QStringLiteral("Изображение.png")}, {"mime", "image/png"}};
-                if (!thumb.isEmpty()) { p["thumb"] = thumb; p["width"] = size.width(); p["height"] = size.height(); }
-                Core::instance()->call("send_file", p, guard, [guard, tmp](const QJsonValue &, const CoreError &e) {
-                    if (guard && !e.ok()) guard->toast(e.message);
-                });
+                guard->attachDialog({path}, true);
             }, Qt::QueuedConnection);
         });
     });
@@ -960,7 +963,8 @@ void MainWindow::attachDialog(const QStringList &paths, bool photos)
 {
     if (m_current.isEmpty() || paths.isEmpty() || !m_current.value("can_media").toBool())
         return;
-    dialogs::sendAttachments(host(), paths, photos, [this](const QStringList &chosen, bool asPhotos, const QString &caption) { sendFiles(chosen, asPhotos, caption); });
+    dialogs::sendAttachments(host(), paths, photos, [this](const QStringList &chosen, bool asPhotos, const QString &caption) { sendFiles(chosen, asPhotos, caption); },
+                             [paths] { for (const QString &p : paths) dropPasted(p); });
 }
 
 void MainWindow::sendFiles(const QStringList &paths, bool photos, const QString &caption)
@@ -1002,7 +1006,8 @@ void MainWindow::sendNextFile()
         }
         if (guard) QMetaObject::invokeMethod(guard, [guard, p] {
             if (!guard) return;
-            Core::instance()->call("send_file", p, guard, [guard](const QJsonValue &, const CoreError &e) {
+            Core::instance()->call("send_file", p, guard, [guard, path = p.value("path").toString()](const QJsonValue &, const CoreError &e) {
+                dropPasted(path);
                 if (!guard) return;
                 if (!e.ok()) guard->toast(e.message);
                 guard->sendNextFile();

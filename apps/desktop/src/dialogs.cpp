@@ -1619,7 +1619,7 @@ void forward(const DialogHost &h, const QJsonArray &msgs)
 
 // ---- attachments ----
 
-void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPhotos, std::function<void(const QStringList &, bool, const QString &)> send)
+void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPhotos, std::function<void(const QStringList &, bool, const QString &)> send, std::function<void()> cancelled)
 {
     if (initial.isEmpty())
         return;
@@ -1666,7 +1666,13 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
         });
     });
     QObject::connect(cancel, &QAbstractButton::clicked, sheet, &Sheet::close);
+    auto sent = std::make_shared<bool>(false);
+    QObject::connect(sheet, &Sheet::closed, sheet, [=] {
+        if (!*sent && cancelled)
+            cancelled();
+    });
     auto submit = [=] {
+        *sent = true;
         const bool images = std::all_of(paths->begin(), paths->end(), isImage);
         const bool photos = images ? !asFile->isChecked() : asPhotos;
         const QStringList chosen = *paths;

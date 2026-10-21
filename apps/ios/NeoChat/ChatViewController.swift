@@ -24,7 +24,7 @@ private func dateTitle(_ ms: Int64) -> String {
     return day
 }
 
-private func sizeText(_ b: Int64) -> String {
+func sizeText(_ b: Int64) -> String {
     if b < 1024 { return "\(b) Б" }
     if b < 1024 * 1024 { return String(format: "%.0f КБ", Double(b) / 1024) }
     return String(format: "%.1f МБ", Double(b) / 1048576).replacingOccurrences(of: ".", with: ",")
@@ -172,6 +172,24 @@ private enum Item {
 }
 
 /// One conversation: history, composer and header with details.
+/// The message field: pasting pictures (a screenshot, a copied photo) goes to the attach window, text pastes as usual.
+final class ComposerTextView: UITextView {
+    var onPasteImages: (([UIImage]) -> Void)?
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)), onPasteImages != nil, UIPasteboard.general.hasImages { return true }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        if let onPasteImages, UIPasteboard.general.hasImages, let images = UIPasteboard.general.images, !images.isEmpty {
+            onPasteImages(images)
+            return
+        }
+        super.paste(sender)
+    }
+}
+
 final class ChatViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UITextViewDelegate, UIDocumentPickerDelegate, QLPreviewControllerDataSource,
     PHPickerViewControllerDelegate, UIPopoverPresentationControllerDelegate {
     let conversationId: String
@@ -190,7 +208,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private let noticeText = label("", 14, color: Theme.warning)
     private let composer = UIView()
     private let attach = UIButton(type: .system)
-    private let input = UITextView()
+    private let input = ComposerTextView()
     private let placeholder = label("Написать сообщение…", 17, color: Theme.muted)
     private let send = UIButton(type: .system)
     private var sendWidth: NSLayoutConstraint!
@@ -471,6 +489,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         input.adjustsFontForContentSizeCategory = true
         input.textColor = Theme.text
         input.delegate = self
+        input.onPasteImages = { [weak self] images in self?.pasted(images) }
         input.accessibilityLabel = "Текст сообщения"
         input.isScrollEnabled = false
         input.textContainerInset = UIEdgeInsets(top: 12, left: 4, bottom: 12, right: 4)
@@ -660,21 +679,71 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         attach.menu = UIMenu(children: acts)
     }
 
-    private func pickPhotos() {
+    // Asked for by the attach window ("Добавить"): the next picker result goes there instead of opening a new window.
+    private var pendingPick: (([OutgoingFile]) -> Void)?
+
+    private func pickPhotos(more: (([OutgoingFile]) -> Void)? = nil) {
+        pendingPick = more
         var cfg = PHPickerConfiguration()
         cfg.filter = .images
         cfg.selectionLimit = 10
         let picker = PHPickerViewController(configuration: cfg)
         picker.delegate = self
-        present(picker, animated: true)
+        (presentedViewController ?? self).present(picker, animated: true)
+    }
+
+    private func deliver(_ files: [OutgoingFile], photos: Bool) {
+        if let done = pendingPick {
+            pendingPick = nil
+            done(files)
+        } else {
+            attach(files, photos: photos)
+        }
+    }
+
+    /// Everything that is about to be sent waits in the attach window: preview, "as a file", caption.
+    private func attach(_ files: [OutgoingFile], photos: Bool) {
+        guard !files.isEmpty, !composer.isHidden else {
+            files.forEach { try? FileManager.default.removeItem(at: $0.url) }
+            return
+        }
+        input.resignFirstResponder()
+        presentSheet(AttachViewController(files: files, asPhotos: photos, more: { [weak self] done in
+            if photos && files.allSatisfy({ $0.isImage }) { self?.pickPhotos(more: done) } else { self?.pickFile(more: done) }
+        }, send: { [weak self] chosen, asPhotos, caption in
+            for (n, f) in chosen.enumerated() { self?.sendOutgoing(f, photo: asPhotos, caption: n == 0 ? caption : "") }
+        }))
+    }
+
+    /// Pictures pasted into the field wait in the same window.
+    private func pasted(_ images: [UIImage]) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("outgoing", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var files: [OutgoingFile] = []
+        for img in images {
+            // Large pictures (photos) go as JPEG to stay within the size limit; screenshots stay lossless.
+            let big = img.size.width * img.scale * img.size.height * img.scale > 4_000_000
+            guard let data = big ? img.jpegData(compressionQuality: 0.9) : img.pngData() else { continue }
+            let name = big ? "Изображение.jpg" : "Изображение.png"
+            let url = dir.appendingPathComponent(UUID().uuidString + "-" + name)
+            guard (try? data.write(to: url)) != nil else { continue }
+            files.append(OutgoingFile(url: url, name: name, mime: big ? "image/jpeg" : "image/png"))
+        }
+        if files.isEmpty { return toast("Не удалось вставить изображение") }
+        attach(files, photos: true)
     }
 
     func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
         picker.dismiss(animated: true)
-        for r in results {
+        let group = DispatchGroup()
+        var found = [OutgoingFile?](repeating: nil, count: results.count)
+        let lock = NSLock()
+        for (n, r) in results.enumerated() {
             let prov = r.itemProvider
             guard prov.hasItemConformingToTypeIdentifier(UTType.image.identifier) else { continue }
-            prov.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] url, _ in
+            group.enter()
+            prov.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { url, _ in
+                defer { group.leave() }
                 guard let url else { return }
                 // The provider removes its file after this block: keep a copy, as JPEG when the format is not portable (HEIC).
                 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("outgoing", isDirectory: true)
@@ -692,14 +761,30 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                     dest = dir.appendingPathComponent(UUID().uuidString + "-" + name)
                     guard (try? data.write(to: dest)) != nil else { return }
                 }
-                let thumb = Photos.makeThumb(dest)
-                DispatchQueue.main.async { self?.sendPhoto(dest, name: name, mime: mime, thumb: thumb) }
+                lock.lock()
+                found[n] = OutgoingFile(url: dest, name: name, mime: mime)
+                lock.unlock()
             }
+        }
+        group.notify(queue: .main) { [weak self] in
+            let files = found.compactMap { $0 }
+            guard let self else { return }
+            if files.isEmpty { self.pendingPick = nil; return }
+            self.deliver(files, photos: true)
         }
     }
 
-    private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?) {
+    /// The thumbnail is made only for pictures that go as photos.
+    private func sendOutgoing(_ f: OutgoingFile, photo: Bool, caption: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let thumb = photo && f.isImage ? Photos.makeThumb(f.url) : nil
+            DispatchQueue.main.async { self?.sendPhoto(f.url, name: f.name, mime: f.mime, thumb: thumb, caption: caption) }
+        }
+    }
+
+    private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?, caption: String = "") {
         var p: JSON = ["conversation_id": conversationId, "path": url.path, "mime": mime, "name": name]
+        if !caption.isEmpty { p["caption"] = caption }
         if let t = thumb {
             p["thumb"] = t.0
             p["width"] = t.1
@@ -719,25 +804,28 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
     }
 
-    private func pickFile() {
+    private func pickFile(more: (([OutgoingFile]) -> Void)? = nil) {
+        pendingPick = more
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
         picker.allowsMultipleSelection = true
         picker.delegate = self
-        present(picker, animated: true)
+        (presentedViewController ?? self).present(picker, animated: true)
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         if controller.documentPickerMode == .exportToService { toast("Файл сохранён"); return }
+        var files: [OutgoingFile] = []
         for u in urls {
             let size = (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             if size > 25 * 1024 * 1024 { toast("Файл больше 25 МБ"); continue }
             let mime = UTType(filenameExtension: u.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-            Core.shared.call("send_file", ["conversation_id": conversationId, "path": u.path, "mime": mime, "name": u.lastPathComponent]) { [weak self] r in
-                try? FileManager.default.removeItem(at: u)
-                if case .failure(let e) = r { self?.toast(e.message) }
-            }
+            files.append(OutgoingFile(url: u, name: u.lastPathComponent, mime: mime))
         }
+        if files.isEmpty { pendingPick = nil; return }
+        deliver(files, photos: false)
     }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { pendingPick = nil }
 
     // MARK: data
 

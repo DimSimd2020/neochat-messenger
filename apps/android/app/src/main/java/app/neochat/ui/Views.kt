@@ -285,8 +285,32 @@ class Chip(ctx: Context, text: String) : TextView(ctx), Themed {
 
 /** Edit field whose text and hint follow the palette. */
 class ThemedEdit(ctx: Context) : EditText(ctx), Themed {
+    /** Pictures pasted into the field (Paste menu, keyboard); text still pastes as usual. */
+    var onImages: ((List<android.net.Uri>) -> Unit)? = null
+
     init {
         applyTheme()
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            setOnReceiveContentListener(arrayOf("image/*", "text/*"), android.view.OnReceiveContentListener { _: View, payload: android.view.ContentInfo ->
+                val clip = payload.clip
+                val uris = (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }.filter { isImage(it) }
+                if (uris.isEmpty() || onImages == null) payload else { onImages?.invoke(uris); null }
+            })
+        }
+    }
+
+    private fun isImage(uri: android.net.Uri) = context.contentResolver.getType(uri)?.startsWith("image/") == true
+
+    override fun onTextContextMenuItem(id: Int): Boolean {
+        if (id == android.R.id.paste || id == android.R.id.pasteAsPlainText) {
+            val clip = context.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip
+            val uris = (0 until (clip?.itemCount ?: 0)).mapNotNull { clip!!.getItemAt(it).uri }.filter { isImage(it) }
+            if (uris.isNotEmpty() && onImages != null) {
+                onImages?.invoke(uris)
+                return true
+            }
+        }
+        return super.onTextContextMenuItem(id)
     }
 
     override fun applyTheme() {

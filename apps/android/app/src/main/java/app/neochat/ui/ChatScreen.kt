@@ -1433,6 +1433,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             edit.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
             edit.setOnEditorActionListener { _, _, _ -> sendText(); true }
         }
+        edit.onImages = { pastedImages(it) }
         edit.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
                 updateSend(true)
@@ -1594,61 +1595,65 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
     }
 
-    private fun pickPhotos() {
-        val intent = if (android.os.Build.VERSION.SDK_INT >= 33) Intent(MediaStore.ACTION_PICK_IMAGES).putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, 10)
-        else Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+    private fun pickUris(photos: Boolean, got: (List<Pick>) -> Unit) {
+        val intent = if (photos) {
+            if (android.os.Build.VERSION.SDK_INT >= 33) Intent(MediaStore.ACTION_PICK_IMAGES).putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, 10)
+            else Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        } else {
+            Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
         act.startForResult(intent) { code, data ->
             if (code != Activity.RESULT_OK || data == null) return@startForResult
             val uris = ArrayList<Uri>()
-            data.clipData?.let { c -> for (i in 0 until c.itemCount) uris += c.getItemAt(i).uri }
+            data.clipData?.let { c -> for (i in 0 until c.itemCount) c.getItemAt(i).uri?.let { uris += it } }
             data.data?.let { if (uris.isEmpty()) uris += it }
-            for (u in uris) sendUri(u, photo = true)
+            got(uris.map { ctx.pickOf(it) })
         }
     }
 
-    private fun pickFile() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
-            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        act.startForResult(intent) { code, data ->
-            if (code != Activity.RESULT_OK || data == null) return@startForResult
-            val uris = ArrayList<Uri>()
-            data.clipData?.let { c -> for (i in 0 until c.itemCount) uris += c.getItemAt(i).uri }
-            data.data?.let { if (uris.isEmpty()) uris += it }
-            for (u in uris) sendUri(u)
-        }
+    private fun pickPhotos() = pickUris(true) { attach(it, true) }
+
+    private fun pickFile() = pickUris(false) { attach(it, false) }
+
+    /** Everything that is about to be sent waits in the attach window: preview, "as a file", caption. */
+    private fun attach(picks: List<Pick>, photos: Boolean) {
+        if (picks.isEmpty() || composer.visibility != View.VISIBLE) return
+        val big = picks.firstOrNull { it.size > 25L * 1024 * 1024 }
+        if (big != null) return act.toast("Файл больше 25 МБ: ${big.name}")
+        hideKeyboard()
+        AttachSheet(act, picks, photos, { added -> pickUris(photos && picks.all { it.image }) { added(it) } }) { chosen, asPhotos, caption ->
+            chosen.forEachIndexed { n, p -> sendPick(p, asPhotos, if (n == 0) caption else "") }
+        }.show()
+    }
+
+    /** Pictures pasted into the field (the Paste menu or a keyboard) wait in the same window. */
+    private fun pastedImages(uris: List<Uri>) {
+        val picks = uris.map { ctx.pickOf(it) }.filter { it.image }
+        if (picks.isNotEmpty()) attach(picks, true)
     }
 
     /** Copies the picked document to app storage, hands it to the core, then removes the copy. */
-    private fun sendUri(uri: Uri, photo: Boolean = false) {
+    private fun sendPick(p: Pick, photo: Boolean, caption: String) {
         val cr = ctx.contentResolver
-        var name = "file"
-        var size = -1L
-        cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
-            if (c.moveToFirst()) {
-                name = c.getString(0) ?: name
-                if (!c.isNull(1)) size = c.getLong(1)
-            }
-        }
-        if (size > 25L * 1024 * 1024) return act.toast("Файл больше 25 МБ")
-        val mime = cr.getType(uri) ?: "application/octet-stream"
         Thread {
             val dir = File(ctx.cacheDir, "outgoing").apply { mkdirs() }
             val tmp = File.createTempFile("send", ".bin", dir)
-            val copied = runCatching { cr.openInputStream(uri)!!.use { i -> tmp.outputStream().use { i.copyTo(it) } } }.isSuccess
-            val thumb = if (copied && photo && mime.startsWith("image/")) Photos.makeThumb(tmp.absolutePath) else null
+            val copied = runCatching { cr.openInputStream(p.uri)!!.use { i -> tmp.outputStream().use { i.copyTo(it) } } }.isSuccess
+            val thumb = if (copied && photo && p.image) Photos.makeThumb(tmp.absolutePath) else null
             act.runOnUiThread {
                 if (!copied) {
                     tmp.delete()
                     return@runOnUiThread act.toast("Не удалось прочитать файл")
                 }
-                dispatchFile(tmp, mime, name, thumb)
+                dispatchFile(tmp, p.mime, p.name, thumb, caption)
             }
         }.start()
     }
 
     /** Hands a prepared file to the core and removes it afterwards. */
-    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?) {
+    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?, caption: String = "") {
         val p = JSONObject().put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
+        if (caption.isNotEmpty()) p.put("caption", caption)
         if (thumb != null) p.put("thumb", thumb.first).put("width", thumb.second).put("height", thumb.third)
         CoreClient.call("send_file", p) { _, e ->
             tmp.delete()
