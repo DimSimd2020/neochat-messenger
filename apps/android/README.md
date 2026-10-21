@@ -2,7 +2,7 @@
 
 Kotlin-клиент на Android Views без Compose и WebView. Шифрование, хранилище, синхронизация и очередь отправки находятся в общем Rust-ядре (`core/`). Ядро подключено через JNI как `libneocore.so`.
 
-- minSdk 26, targetSdk 35, ABI `arm64-v8a` и `x86_64`.
+- minSdk 26, targetSdk 35. Release APK — `arm64-v8a`; debug для эмулятора также поддерживает `x86_64`, если ядро собрано для обеих архитектур.
 - Ключ базы SQLCipher: 32 случайных байта, обёрнутые AES-GCM-ключом из Android Keystore.
 - Резервное копирование отключено (`allowBackup=false`, `dataExtractionRules`).
 - Экран с кодом восстановления защищён `FLAG_SECURE`.

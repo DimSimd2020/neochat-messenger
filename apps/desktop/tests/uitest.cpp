@@ -171,6 +171,7 @@ private slots:
     void editAndCaption();
     void receiptsAndGroup();
     void socialFeatures();
+    void archiveNavigation();
     void dialogsAndPickers();
     void groupSheet();
     void calls();
@@ -793,6 +794,40 @@ void UiTest::socialFeatures()
     QTest::qWait(120);
     m_window->grab().save(m_shots + "/11g2-archive-leaving.png");
     QTRY_VERIFY_WITH_TIMEOUT(!panel->conversation(gid).value("in_archive").toBool() && !list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("_archive").toBool(), 10000);
+}
+
+// A short navigation check that only needs the direct chat created by addContactAndOpenChat.
+void UiTest::archiveNavigation()
+{
+    auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
+    QVERIFY(panel);
+    auto *list = panel->findChild<QListView *>();
+    Core::instance()->call("set_archived", {{"conversation_id", m_conv}, {"archived", true}});
+    auto first = [&] { return list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject(); };
+    QTRY_VERIFY(first().value("_archive").toBool());
+    QVERIFY(!first().contains("titles"));
+    QCOMPARE(first().value("count").toInt(), 1);
+    shot("hotfix-archive-row");
+    panel->setArchiveMode(true);
+    QTest::qWait(120);
+    QVERIFY(Theme::reducedMotion() || panel->findChild<QWidget *>(QStringLiteral("ui-transition")));
+    m_window->grab().save(m_shots + "/hotfix-archive-enter.png");
+    QTRY_COMPARE(first().value("id").toString(), m_conv);
+    QTest::qWait(350);
+    panel->setArchiveMode(false);
+    QTest::qWait(120);
+    QVERIFY(Theme::reducedMotion() || panel->findChild<QWidget *>(QStringLiteral("ui-transition")));
+    m_window->grab().save(m_shots + "/hotfix-archive-exit.png");
+    QTRY_VERIFY(first().value("_archive").toBool());
+    Core::instance()->call("set_archived", {{"conversation_id", m_conv}, {"archived", false}});
+    QTRY_VERIFY(!first().value("_archive").toBool());
+    button("Звонки")->click();
+    QTRY_VERIFY(find<dialogs::Page>([](dialogs::Page *) { return true; }));
+    QVERIFY(!Sheet::anyOpen(sheetHost()));
+    QVERIFY(!panel->isVisible());
+    shot("hotfix-calls-page");
+    button("Чаты")->click();
+    QTRY_VERIFY(panel->isVisible());
 }
 
 // Settings sub-pages with a back arrow, the 5x7 reaction grid, a group sheet that scrolls

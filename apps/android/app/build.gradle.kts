@@ -21,7 +21,6 @@ android {
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
         versionCode = 17
         versionName = "0.6.5.2"
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     signingConfigs {
@@ -42,7 +41,10 @@ android {
     }
 
     buildTypes {
+        debug { ndk { abiFilters += listOf("arm64-v8a", "x86_64") } }
         release {
+            // CI builds the Rust core for arm64; WebRTC must use the same ABI.
+            ndk { abiFilters += listOf("arm64-v8a") }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
