@@ -206,7 +206,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private var presenceTimer: Timer?
     private var replyTo: JSON?
     // Edit mode: the field holds the message text; the unsent draft waits in savedDraft.
-    private var editing: JSON?
+    private var editTarget: JSON?
     private var savedDraft = ""
     private weak var cancelButton: UIButton?
     private var blocked = false
@@ -443,7 +443,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         if Notifier.visibleConversation == conversationId { Notifier.visibleConversation = nil }
         presenceTimer?.invalidate()
         presenceTimer = nil
-        Core.shared.call("set_draft", ["conversation_id": conversationId, "text": editing != nil ? savedDraft : (input.text ?? "")])
+        Core.shared.call("set_draft", ["conversation_id": conversationId, "text": editTarget != nil ? savedDraft : (input.text ?? "")])
     }
 
     private func scheduleReload() {
@@ -525,7 +525,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         cancel.widthAnchor.constraint(equalToConstant: 36).isActive = true
         cancel.heightAnchor.constraint(equalToConstant: 36).isActive = true
         cancelButton = cancel
-        cancel.addAction(UIAction { [weak self] _ in if self?.editing != nil { self?.cancelEdit() } else { self?.setReply(nil) } }, for: .touchUpInside)
+        cancel.addAction(UIAction { [weak self] _ in if self?.editTarget != nil { self?.cancelEdit() } else { self?.setReply(nil) } }, for: .touchUpInside)
         replyBar.addArrangedSubview(line)
         replyBar.addArrangedSubview(col)
         replyBar.addArrangedSubview(cancel)
@@ -556,7 +556,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     /// The send button slides in over 240 ms when there is text.
     private func updateSend(animated: Bool) {
         // A caption may be emptied, so editing a file keeps the button.
-        let show = !(input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editing?.str("kind") == "file"
+        let show = !(input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editTarget?.str("kind") == "file"
         let target: CGFloat = show ? 40 : 0
         send.isEnabled = !blocked
         send.alpha = blocked ? 0.5 : 1
@@ -567,8 +567,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     private func setEdit(_ m: JSON) {
-        if editing == nil { savedDraft = input.text ?? "" }
-        editing = m
+        if editTarget == nil { savedDraft = input.text ?? "" }
+        editTarget = m
         replyTo = nil
         let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
         replyTitle.text = "Изменение сообщения"
@@ -585,8 +585,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     private func leaveEdit() {
-        guard editing != nil else { return }
-        editing = nil
+        guard editTarget != nil else { return }
+        editTarget = nil
         input.text = savedDraft
         savedDraft = ""
         textViewDidChange(input)
@@ -615,7 +615,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     private func sendText() {
-        if let m = editing {
+        if let m = editTarget {
             let changed = (input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if blocked || (m.str("kind") == "text" && changed.isEmpty) { return }
             cancelEdit()
