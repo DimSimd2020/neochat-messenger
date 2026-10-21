@@ -158,12 +158,13 @@ final class PillButton: UIButton {
         }
         heightAnchor.constraint(greaterThanOrEqualToConstant: 50).isActive = true
         contentEdgeInsets = UIEdgeInsets(top: 10, left: 18, bottom: 10, right: 18)
+        springPress()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override var isHighlighted: Bool {
-        didSet { UIView.animate(withDuration: Theme.ms(0.14)) { self.alpha = self.isHighlighted ? 0.75 : 1 } }
+        didSet { UIView.animate(withDuration: Theme.ms(0.14)) { self.alpha = self.isHighlighted ? 0.85 : 1 } }
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -325,6 +326,7 @@ extension UIViewController {
         let hide = DispatchWorkItem { [weak box] in
             guard let box else { return }
             box.isUserInteractionEnabled = false
+            Motion.animate(0.3, 1) { box.transform = CGAffineTransform(translationX: 0, y: 16).scaledBy(x: 0.94, y: 0.94) }
             UIView.animate(withDuration: Theme.ms(0.18), animations: { box.alpha = 0 }) { _ in box.removeFromSuperview() }
         }
         if let actionTitle, let action {
@@ -347,7 +349,11 @@ extension UIViewController {
         }
         box.alpha = 0
         UIAccessibility.post(notification: .announcement, argument: text)
-        UIView.animate(withDuration: Theme.ms(0.18)) { box.alpha = 1 }
+        UIView.animate(withDuration: Theme.ms(0.16)) { box.alpha = 1 }
+        if !Theme.reducedMotion {
+            box.transform = CGAffineTransform(translationX: 0, y: 28).scaledBy(x: 0.86, y: 0.86)
+            Motion.animate(0.44, 0.7) { box.transform = .identity }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + (action == nil ? 3.2 : 5), execute: hide)
     }
 

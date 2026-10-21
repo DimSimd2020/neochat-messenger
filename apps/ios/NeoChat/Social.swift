@@ -892,7 +892,7 @@ func bindChatCell(_ cell: RowCell, _ c: JSON) {
     cell.avatar.online = kind == "direct" && (c.obj("presence")?.bool("online") ?? false)
     cell.title.text = c.str("title")
     cell.time.text = formatListTime(c.int64("last_activity"))
-    cell.badge.set(c.int("unread"),mentions:c.int("mention_count"))
+    cell.badge.set(c.int("unread"),mentions:c.int("mention_count"),chat:c.str("id"))
     cell.pin.isHidden = !(c.bool("pinned") && c.int("unread") == 0)
     var preview = c.str("last_preview").replacingOccurrences(of: "\n", with: " ")
     var color = Theme.muted

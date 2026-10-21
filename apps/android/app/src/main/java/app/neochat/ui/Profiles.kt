@@ -196,15 +196,16 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             if (targetW == 0) return@post
             val lp = indicator.layoutParams as FrameLayout.LayoutParams
             if (!animated || Theme.reducedMotion || lp.width <= 1) {
-                indicator.animate().cancel()
+                indicator.stopSprings(Prop.X)
                 lp.width = targetW
                 indicator.layoutParams = lp
                 indicator.translationX = targetX
                 return@post
             }
-            indicator.animate().translationX(targetX).setDuration(Theme.ms(280)).setInterpolator(Theme.surfaceCurve).start()
+            Haptics.select(tabs)
+            indicator.springTo(Prop.X, targetX, 0.42f, 0.74f)
             ValueAnimator.ofInt(indicator.width.coerceAtLeast(1), targetW).apply {
-                duration = Theme.ms(280)
+                duration = Theme.ms(300)
                 interpolator = Theme.surfaceCurve
                 addUpdateListener {
                     lp.width = it.animatedValue as Int
@@ -216,14 +217,16 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     }
     private fun reveal(dir: Int, animated: Boolean) {
         content.animate().cancel()
+        content.stopSprings(Prop.X)
         if (!animated || Theme.reducedMotion) {
             content.alpha = 1f
             content.translationX = 0f
             return
         }
         content.alpha = 0f
-        content.translationX = dir * dp(16).toFloat()
-        content.animate().alpha(1f).translationX(0f).setDuration(Theme.ms(220)).setInterpolator(Theme.surfaceCurve).start()
+        content.translationX = dir * dp(24).toFloat()
+        content.springTo(Prop.X, 0f, 0.42f, 0.86f)
+        content.animate().alpha(1f).setDuration(Theme.ms(200)).setInterpolator(Theme.surfaceCurve).start()
     }
     private fun loadItems(dir: Int = 0, animated: Boolean = false) {
         val fresh = before == null

@@ -10,6 +10,8 @@
 	</array>
 	<key>CFBundleAllowMixedLocalizations</key>
 	<true/>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Камера нужна для видеозвонков, фотографий в чате и чтобы отсканировать QR-код при привязке нового устройства или добавлении контакта.</string>
 	<key>NSMicrophoneUsageDescription</key>

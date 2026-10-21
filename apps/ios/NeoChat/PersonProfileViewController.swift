@@ -213,13 +213,17 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
             return
         }
         let apply = { self.indicator.frame = frame }
-        if animated && !Theme.reducedMotion { Theme.animate(0.28, apply) } else { apply() }
+        if animated && !Theme.reducedMotion {
+            Haptics.select()
+            Motion.animate(0.42, 0.74, apply)
+        } else { apply() }
     }
     private func reveal(_ dir: Int, _ animated: Bool) {
         guard animated, !Theme.reducedMotion else { content.alpha = 1; content.transform = .identity; return }
         content.alpha = 0
-        content.transform = CGAffineTransform(translationX: CGFloat(dir) * 16, y: 0)
-        Theme.animate(0.22) { self.content.alpha = 1; self.content.transform = .identity }
+        content.transform = CGAffineTransform(translationX: CGFloat(dir) * 24, y: 0)
+        Theme.animate(0.2) { self.content.alpha = 1 }
+        Motion.animate(0.42, 0.86) { self.content.transform = .identity }
     }
     private func verify(_ method: String) {
         Core.shared.call(method,["user_id":profile.str("user_id")]) { [weak self] r in if case .failure(let e) = r { self?.toast(e.message) } else { self?.reload() } }

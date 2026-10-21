@@ -41,36 +41,49 @@ final class ChatNavController: UINavigationController, UIGestureRecognizerDelega
     }
 }
 
-/// Chats, contacts and profile behind a floating glass tab bar, as on Android.
+/// Chats, contacts and profile behind a floating glass tab bar with a lens, as on Android.
 final class MainTabController: UITabBarController, UITabBarControllerDelegate, UIGestureRecognizerDelegate {
-    private let pill = UIView()
+    private let lens = LensTabBar(items: [("Чаты", "bubble.left.and.bubble.right"), ("Контакты", "person.2"), ("Профиль", "person.crop.circle")])
     private var tabHistory: [Int] = []
     private var activeTab = 0
 
+    override var selectedIndex: Int {
+        didSet { lens.setSelected(selectedIndex) }
+    }
+
+    override var selectedViewController: UIViewController? {
+        didSet { if let i = viewControllers?.firstIndex(where: { $0 === selectedViewController }) { lens.setSelected(i) } }
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        if pill.superview == nil {
-            pill.glass(28)
-            pill.isUserInteractionEnabled = false
-            pill.layer.shadowColor = UIColor.black.cgColor
-            pill.layer.shadowOpacity = 0.12
-            pill.layer.shadowRadius = 14
-            pill.layer.shadowOffset = CGSize(width: 0, height: 4)
-            tabBar.insertSubview(pill, at: 0)
+        if lens.superview == nil {
+            lens.onSelect = { [weak self] i in self?.selectFromBar(i) }
+            lens.onReselect = { [weak self] in
+                (self?.selectedViewController as? UINavigationController)?.popToRootViewController(animated: !Theme.reducedMotion)
+            }
+            tabBar.addSubview(lens)
         }
-        // During the pop the tab bar's height is briefly the whole screen. An animated pill of
+        // During the pop the tab bar's height is briefly the whole screen. An animated bar of
         // that size is the green slab at the bottom of the chat list.
         let contentH = tabBar.bounds.height - tabBar.safeAreaInsets.bottom
         let h = min(56, max(0, contentH))
+        let bar = CGRect(x: 12, y: -6, width: max(0, tabBar.bounds.width - 24), height: h + 10)
         UIView.performWithoutAnimation {
-            pill.frame = CGRect(x: 12, y: -6, width: max(0, tabBar.bounds.width - 24), height: h + 10)
+            lens.frame = bar.insetBy(dx: -LensTabBar.room.width, dy: -LensTabBar.room.height)
         }
-        tabBar.sendSubviewToBack(pill)
+        // Above the system items: the lens takes the touches, the transparent items keep VoiceOver.
+        tabBar.bringSubviewToFront(lens)
     }
 
-    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-        super.traitCollectionDidChange(previous)
-        pill.layer.borderColor = Theme.rim.resolvedColor(with: traitCollection).cgColor
+    private func selectFromBar(_ i: Int) {
+        guard let vcs = viewControllers, vcs.indices.contains(i) else { return }
+        let change = {
+            self.selectedIndex = i
+            self.tabBarController(self, didSelect: vcs[i])
+        }
+        guard let container = selectedViewController?.view.superview, !Theme.reducedMotion else { return change() }
+        UIView.transition(with: container, duration: 0.2, options: [.transitionCrossDissolve, .allowUserInteraction], animations: change)
     }
 
     override func viewDidLoad() {
@@ -85,9 +98,17 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
         back.edges = .left; back.delegate = self; view.addGestureRecognizer(back)
         let a = UITabBarAppearance()
         a.configureWithTransparentBackground()
+        // The lens bar draws the items; the system ones stay for layout and VoiceOver only.
+        for layout in [a.stackedLayoutAppearance, a.inlineLayoutAppearance, a.compactInlineLayoutAppearance] {
+            for state in [layout.normal, layout.selected] {
+                state.iconColor = .clear
+                state.titleTextAttributes = [.foregroundColor: UIColor.clear]
+            }
+        }
         tabBar.standardAppearance = a
         tabBar.scrollEdgeAppearance = a
-        tabBar.tintColor = Theme.action
+        tabBar.tintColor = .clear
+        tabBar.unselectedItemTintColor = .clear
         NotificationCenter.default.addObserver(forName: .openConversation, object: nil, queue: .main) { [weak self] n in
             guard let id = n.userInfo?["id"] as? String else { return }
             self?.open(id)
@@ -211,9 +232,16 @@ final class PaddedBadge: UILabel {
         return CGSize(width: max(20, s.width + 12), height: 20)
     }
 
-    func set(_ n: Int, mentions: Int = 0) {
+    private var shownFor = ""
+    private var shownCount = 0
+
+    /// `chat` lets a recycled cell tell its own new messages, which make the badge hop, from another chat's count.
+    func set(_ n: Int, mentions: Int = 0, chat: String = "") {
         isHidden = n == 0
         text = (mentions > 0 ? "@ " : "") + (n > 99 ? "99+" : "\(n)")
+        if n > shownCount && shownFor == chat && !chat.isEmpty { pop(from: 0.55, response: 0.36, damping: 0.45) }
+        shownFor = chat
+        shownCount = n
     }
 }
 
@@ -521,7 +549,8 @@ final class ChatsViewController: ChatListViewController {
     }
 
     private func updateBarItems() {
-        let compose = UIBarButtonItem(image: UIImage(systemName: "square.and.pencil"), primaryAction: UIAction { [weak self] _ in
+        let compose = UIBarButtonItem(image: UIImage(systemName: "square.and.pencil"), primaryAction: UIAction { [weak self] action in
+            (action.sender as? UIBarButtonItem)?.play(.wiggle)
             self?.presentSheet(NewChatViewController())
         })
         compose.accessibilityLabel = "Новый чат"
@@ -668,6 +697,7 @@ final class ChatsViewController: ChatListViewController {
 
 extension ChatsViewController: UISearchBarDelegate {
     func searchBar(_ searchBar: UISearchBar, selectedScopeButtonIndexDidChange selectedScope: Int) {
+        Haptics.select()
         filter = selectedScope
         applyFilter()
     }

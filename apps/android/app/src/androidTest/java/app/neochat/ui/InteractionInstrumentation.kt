@@ -65,7 +65,7 @@ class InteractionInstrumentation : Instrumentation() {
             }
             if (archive) archiveInteraction()
             if (fixes) screenAndFileRegressions()
-            result.putString("stream", "OK: reply gestures; archive follows finger, partial/cancelled pull, scroll hiding, navigation cleanup, inline undo\n")
+            result.putString("stream", "OK: reply gestures; archive follows finger, partial/cancelled pull, scroll hiding, navigation cleanup, inline undo; tab bar lens lifts, follows and lands\n")
             finish(-1, result)
         } catch (e: Throwable) {
             result.putString("stream", "FAIL: ${e.message}\n")
@@ -232,6 +232,25 @@ class InteractionInstrumentation : Instrumentation() {
                 activity.toast("Чат в архиве", "Отмена") {}
             }
             pause(); capture("undo")
+            // The tab bar lens: a touch lifts it, a drag carries it, letting go picks the item under the finger.
+            lateinit var nav: BottomNav
+            runOnMainSync { activity.overlay.findViewWithTag<View>("toast")?.let { activity.overlay.removeView(it) }; nav = field(home, "nav") as BottomNav }
+            val navStart = SystemClock.uptimeMillis()
+            fun navTouch(action: Int, item: Float) = runOnMainSync {
+                val x = nav.paddingLeft + (nav.width - nav.paddingLeft - nav.paddingRight) * item / 3f
+                val e = MotionEvent.obtain(navStart, SystemClock.uptimeMillis(), action, x, nav.height / 2f, 0)
+                nav.dispatchTouchEvent(e)
+                e.recycle()
+            }
+            navTouch(MotionEvent.ACTION_DOWN, 0.5f); SystemClock.sleep(220)
+            for (k in 1..6) { navTouch(MotionEvent.ACTION_MOVE, 0.5f + k / 6f); SystemClock.sleep(16) }
+            SystemClock.sleep(120)
+            runOnMainSync { check((field(nav, "lift") as Float) > 0.5f && field(home, "tab") == 0) { "Lens did not lift, or chose before release" } }
+            capture("lens-drag")
+            for (k in 1..6) { navTouch(MotionEvent.ACTION_MOVE, 1.5f + k / 6f); SystemClock.sleep(16) }
+            navTouch(MotionEvent.ACTION_UP, 2.5f); pause(); pause()
+            runOnMainSync { check(field(home, "tab") == 2 && (field(nav, "lift") as Float) < 0.05f) { "Lens did not land on the profile" } }
+            capture("lens-landed")
             if (profileServer.isNotEmpty()) {
                 runOnMainSync { activity.overlay.findViewWithTag<View>("toast")?.let {activity.overlay.removeView(it)} }
                 check(profileServer == "http://127.0.0.1:8097")

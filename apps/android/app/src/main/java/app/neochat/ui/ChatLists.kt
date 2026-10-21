@@ -76,6 +76,7 @@ fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
     row.time.text = formatListTime(c.optLong("last_activity"))
     row.pin.visibility = if (c.optBoolean("pinned")) View.VISIBLE else View.GONE
     val unread = c.optInt("unread")
+    row.bound = c.str("id")
     row.setBadge(unread, c.optInt("mention_count"))
     var preview = c.str("last_preview")
     var role = Theme.Role.MUTED
@@ -152,6 +153,9 @@ class ChatSwipe(
         textSize = act.dpf(13)
         typeface = weightFace(600)
     }
+    /** The row whose swipe is past the threshold; releasing it acts. */
+    private var armed: RecyclerView.ViewHolder? = null
+    private val grow = android.view.animation.OvershootInterpolator(2.2f)
 
     override fun getSwipeDirs(rv: RecyclerView, vh: RecyclerView.ViewHolder): Int {
         if (selectionActive()) return 0
@@ -182,6 +186,7 @@ class ChatSwipe(
             val pin = !c.optBoolean("pinned")
             CoreClient.call("set_pinned", JSONObject().put("conversation_id", id).put("pinned", pin)) { _, e ->
                 if (e != null) return@call act.toast(e.message)
+                Haptics.confirm(act.overlay)
                 done()
             }
         }
@@ -189,6 +194,11 @@ class ChatSwipe(
 
     override fun onChildDraw(c: Canvas, rv: RecyclerView, vh: RecyclerView.ViewHolder, dx: Float, dy: Float, state: Int, active: Boolean) {
         val v = vh.itemView
+        if (active) {
+            val past = kotlin.math.abs(dx) >= v.width * getSwipeThreshold(vh)
+            if (past && armed !== vh) Haptics.threshold(v)
+            armed = if (past) vh else if (armed === vh) null else armed
+        }
         if (dx != 0f) {
             val left = dx > 0
             val item = rowAt(vh.bindingAdapterPosition)
@@ -209,10 +219,16 @@ class ChatSwipe(
             val tw = text.measureText(label)
             val x = if (left) v.left + act.dp(28) else v.right - act.dp(28) - maxOf(s, tw.toInt())
             val ix = x + ((maxOf(s.toFloat(), tw) - s) / 2).toInt()
-            d.setBounds(ix, cy - s + act.dp(2), ix + s, cy + act.dp(2))
-            if (kotlin.math.abs(dx) > act.dp(72)) {
+            // The icon grows with the finger and overshoots a little as it arrives.
+            val k = ((kotlin.math.abs(dx) - act.dpf(56)) / act.dpf(44)).coerceIn(0f, 1f)
+            if (k > 0f) {
+                val size = s * (if (Theme.reducedMotion) 1f else grow.getInterpolation(k))
+                val icx = ix + s / 2f
+                val icy = cy - s / 2f + act.dp(2)
+                d.setBounds((icx - size / 2).toInt(), (icy - size / 2).toInt(), (icx + size / 2).toInt(), (icy + size / 2).toInt())
                 d.draw(c)
                 text.color = android.graphics.Color.WHITE
+                text.alpha = (255 * k).toInt()
                 c.drawText(label, x + (maxOf(s.toFloat(), tw) - tw) / 2, cy + act.dpf(20), text)
             }
         }

@@ -1,6 +1,5 @@
 package app.neochat.ui
 
-import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -310,7 +309,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val send = IconButton(ctx, R.drawable.ic_send, "Отправить", 44, iconRole = Theme.Role.ON_ACCENT)
     private val sendSlot = FrameLayout(ctx)
     private var sendShown = 0f
-    private var sendAnim: ValueAnimator? = null
+    private val sendSpring = Spring(0.38f, 0.62f, 0.001f) { sendShown = it; applySend() }
     private var blocked = false
     private val gone = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private var shown = false
@@ -592,13 +591,16 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             return
         }
         if (on) {
-            jump.visibility = View.VISIBLE
-            jump.alpha = 0f
-            jump.scaleX = 0.7f
-            jump.scaleY = 0.7f
-            jump.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180).setInterpolator(Theme.surfaceCurve).start()
+            if (jump.visibility != View.VISIBLE) {
+                jump.visibility = View.VISIBLE
+                jump.alpha = 0f
+                jump.spring(Prop.SCALE).snap(0.5f)
+            }
+            jump.animate().alpha(1f).setDuration(140).start()
+            jump.springTo(Prop.SCALE, 1f, 0.4f, 0.55f)
         } else {
-            jump.animate().alpha(0f).scaleX(0.7f).scaleY(0.7f).setDuration(150).withEndAction { jump.visibility = View.GONE }.start()
+            jump.springTo(Prop.SCALE, 0.6f, 0.26f, 1f)
+            jump.animate().alpha(0f).setDuration(150).withEndAction { jump.visibility = View.GONE }.start()
         }
     }
 
@@ -761,6 +763,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 )
                 swipe.attach(row)
                 swipe.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
+                // A new bubble grows out of its own bottom corner.
+                swipe.addOnLayoutChangeListener { v, l, t, r, b, _, _, _, _ ->
+                    v.pivotX = if (row.message.optBoolean("outgoing")) (r - l).toFloat() else 0f
+                    v.pivotY = (b - t).toFloat()
+                }
                 MessageHolder(swipe, row)
             }
 
@@ -775,13 +782,21 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val id = item.m.str("id")
             if (id in animate && !Theme.reducedMotion) {
                 animate = animate - id
+                appear.pivotX = if (item.m.optBoolean("outgoing")) appear.width.toFloat() else 0f
+                appear.pivotY = appear.height.toFloat()
                 appear.alpha = 0f
-                appear.translationY = ctx.dpf(12)
-                appear.animate().alpha(1f).translationY(0f).setDuration(220).setInterpolator(Theme.surfaceCurve).start()
+                appear.animate().alpha(1f).setDuration(120).start()
+                appear.spring(Prop.Y).snap(ctx.dpf(22))
+                appear.spring(Prop.SCALE).snap(0.82f)
+                appear.springTo(Prop.Y, 0f, 0.46f, 0.74f)
+                appear.springTo(Prop.SCALE, 1f, 0.42f, 0.62f)
             } else {
                 appear.animate().cancel()
+                appear.stopSprings(Prop.Y, Prop.SCALE)
                 appear.alpha = 1f
                 appear.translationY = 0f
+                appear.scaleX = 1f
+                appear.scaleY = 1f
             }
         }
 
@@ -843,6 +858,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private var m = JSONObject()
         private var reactsId = ""
         private var reactsSig = ""
+        private var statusId = ""
+        private var statusSig = ""
         private var pendingTap: Runnable? = null
 
         /**
@@ -858,7 +875,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (p != null) {
                 removeCallbacks(p)
                 pendingTap = null
-                performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                Haptics.confirm(this)
                 react(m, QuickReaction.current(ctx))
                 return
             }
@@ -1089,6 +1106,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             )
             status.alpha = if (st == "delivered") 0.75f else 1f
             if (emoji > 0 && st != "failed") status.imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.muted)
+            // The mark hops when this message moves on: sent, delivered, read.
+            if (out && statusId == m.str("id") && statusSig != st && st != "queued") status.pop(0.4f, 0.36f, 0.42f)
+            statusId = m.str("id")
+            statusSig = st
             retry.visibility = if (out && st == "failed") VISIBLE else GONE
             bubble.contentDescription = buildString {
                 append(m.str("sender_name")).append(", ").append(time.text).append(": ")
@@ -1111,12 +1132,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val pop = reactsId == m.str("id") && reactsSig != sig
             reactsId = m.str("id")
             reactsSig = sig
-            for (r in list) reactRow.addView(reactionChip(ctx, r, onAccent) { react(m, r.str("emoji")) }.apply {
-                if (pop && Theme.ms(200) > 0) {
+            for (r in list) reactRow.addView(reactionChip(ctx, r, onAccent) { Haptics.tick(reactRow); react(m, r.str("emoji")) }.apply {
+                if (pop && !Theme.reducedMotion) {
                     alpha = 0f
-                    scaleX = 0.4f
-                    scaleY = 0.4f
-                    animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(Theme.ms(200)).start()
+                    animate().alpha(1f).setDuration(120).start()
+                    pop(0.3f, 0.42f, 0.45f)
                 }
             })
         }
@@ -1336,7 +1356,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 background = if (e == mine) GradientDrawable().apply { setColor((Theme.p.accent and 0x00FFFFFF) or 0x40000000); cornerRadius = ctx.dpf(18) }
                 else GlassDrawable(ctx, GlassDrawable.Kind.NONE, ctx.dpf(18), rim = false)
                 pressFeedback()
-                setOnClickListener { close(); react(m, e) }
+                setOnClickListener { Haptics.confirm(this); close(); react(m, e) }
             }
             row.addView(tv, lp(0, dp(42), 1f))
         }
@@ -1538,7 +1558,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         edit.text.replace(minOf(st, en), maxOf(st, en), s)
     }
 
-    /** The send button slides in 48 dp over 240 ms when there is text; reduced motion jumps. */
+    /**
+     * With text the send button springs in: the slot opens, the arrow grows and turns into
+     * place with a little overshoot. Emptied, it folds away without bouncing.
+     */
     private fun updateSend(animated: Boolean) {
         // A caption may be emptied, so editing a file keeps the button.
         val target = if (edit.text.isNotBlank() || editing?.str("kind") == "file") 1f else 0f
@@ -1546,33 +1569,22 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         send.alpha = if (blocked) 0.5f else 1f
         send.contentDescription = "Отправить"
         send.describeState(if (blocked) "Отправка приостановлена: ключ собеседника изменился" else null)
-        if (target == sendShown && sendAnim == null) return applySend()
-        sendAnim?.cancel()
-        val d = if (animated) Theme.ms(240) else 0L
-        if (d == 0L) {
-            sendAnim = null
-            sendShown = target
-            return applySend()
-        }
-        sendAnim = ValueAnimator.ofFloat(sendShown, target).apply {
-            duration = d
-            interpolator = Theme.surfaceCurve
-            addUpdateListener { sendShown = it.animatedValue as Float; applySend() }
-            addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(a: android.animation.Animator) {
-                    if (sendAnim === a) sendAnim = null
-                }
-            })
-            start()
-        }
+        if (target == sendSpring.target && (sendSpring.running || target == sendShown)) return applySend()
+        sendSpring.damping = if (target > 0f) 0.62f else 1f
+        if (animated) sendSpring.to(target) else sendSpring.snap(target)
     }
 
     private fun applySend() {
+        val open = sendShown.coerceIn(0f, 1f)
         val lpSlot = sendSlot.layoutParams
-        lpSlot.width = (dp(48) * sendShown).toInt()
+        lpSlot.width = (dp(48) * open).toInt()
         sendSlot.layoutParams = lpSlot
-        send.translationX = ctx.dpf(48) * (1 - sendShown)
-        sendSlot.visibility = if (sendShown == 0f) View.GONE else View.VISIBLE
+        send.translationX = ctx.dpf(20) * (1 - open)
+        val grow = 0.4f + 0.6f * sendShown
+        send.scaleX = grow
+        send.scaleY = grow
+        send.rotation = -70f * (1 - sendShown)
+        sendSlot.visibility = if (open == 0f) View.GONE else View.VISIBLE
         send.importantForAccessibility = if (sendShown < 1f && edit.text.isBlank()) View.IMPORTANT_FOR_ACCESSIBILITY_NO else View.IMPORTANT_FOR_ACCESSIBILITY_YES
     }
 
@@ -1657,6 +1669,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         if (text.isEmpty() || blocked) return
         val p = JSONObject().put("conversation_id", conversationId).put("text", text)
         replyTo?.let { p.put("reply_to", it.str("id")) }
+        Haptics.confirm(send)
+        // The arrow leaps up as the button folds away; the fold owns its scale from here.
+        send.stopSprings(Prop.SCALE)
+        send.kick(Prop.Y, -ctx.dpf(9), 0.32f, 0.55f)
         // Stored locally first: the field clears at once and the queue delivers it.
         edit.setText("")
         setReply(null)
