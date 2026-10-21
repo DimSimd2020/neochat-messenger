@@ -384,50 +384,35 @@ final class MessageMenuViewController: UIViewController {
 /// QR with round dots, rounded eyes and the avatar in the middle (error correction Q).
 final class PrettyQrView: UIView {
     private var rows: [[Bool]] = []
-    private let avatar = AvatarView(size: 54)
     var dot = Theme.rgb(0x16233C)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
         isOpaque = false
-        addSubview(avatar)
-        NSLayoutConstraint.activate([avatar.centerXAnchor.constraint(equalTo: centerXAnchor), avatar.centerYAnchor.constraint(equalTo: centerYAnchor)])
         isAccessibilityElement = true
         accessibilityLabel = "QR-код профиля"
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func set(_ r: [String], name: String, seed: String) {
+    func set(_ r: [String]) {
         rows = r.map { $0.map { $0 == "1" } }
-        avatar.set(name, seed: seed)
         setNeedsDisplay()
     }
 
     override func draw(_ rect: CGRect) {
         let n = rows.count
         guard n > 0, let ctx = UIGraphicsGetCurrentContext() else { return }
-        let cell = bounds.width / CGFloat(n)
-        var hole = Int(ceil(66 / cell))
-        if (n - hole) % 2 == 1 { hole += 1 }
-        let h0 = (n - hole) / 2, h1 = h0 + hole
-        func eye(_ x: Int, _ y: Int) -> Bool { (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7) }
+        UIColor.white.setFill(); ctx.fill(bounds)
+        let cell = max(1,floor(min(bounds.width,bounds.height)/CGFloat(n+8)))
+        let left = (bounds.width-CGFloat(n)*cell)/2, top = (bounds.height-CGFloat(n)*cell)/2
+        ctx.setShouldAntialias(false)
         dot.setFill()
-        dot.setStroke()
         for y in 0..<n {
-            for x in 0..<n where rows[y][x] && !eye(x, y) && !(x >= h0 && x < h1 && y >= h0 && y < h1) {
-                ctx.fillEllipse(in: CGRect(x: CGFloat(x) * cell + cell * 0.05, y: CGFloat(y) * cell + cell * 0.05, width: cell * 0.9, height: cell * 0.9))
+            for x in 0..<n where rows[y][x] {
+                ctx.fill(CGRect(x:left+CGFloat(x)*cell,y:top+CGFloat(y)*cell,width:cell,height:cell))
             }
-        }
-        for (ex, ey) in [(0, 0), (n - 7, 0), (0, n - 7)] {
-            let l = CGFloat(ex) * cell, t = CGFloat(ey) * cell
-            // Only slightly rounded finder eyes: strongly rounded ones break many decoders.
-            let ring = UIBezierPath(roundedRect: CGRect(x: l, y: t, width: 7 * cell, height: 7 * cell), cornerRadius: cell * 0.35)
-            ring.append(UIBezierPath(roundedRect: CGRect(x: l + cell, y: t + cell, width: 5 * cell, height: 5 * cell), cornerRadius: cell * 0.15))
-            ring.usesEvenOddFillRule = true
-            ring.fill()
-            UIBezierPath(roundedRect: CGRect(x: l + 2 * cell, y: t + 2 * cell, width: 3 * cell, height: 3 * cell), cornerRadius: cell * 0.3).fill()
         }
     }
 }
@@ -462,11 +447,11 @@ final class QrCardView: UIView {
         addSubview(plate)
         plate.addSubview(col)
         NSLayoutConstraint.activate([
-            qr.widthAnchor.constraint(equalToConstant: 236), qr.heightAnchor.constraint(equalToConstant: 236),
-            handle.widthAnchor.constraint(lessThanOrEqualToConstant: 236),
+            qr.widthAnchor.constraint(equalTo:col.widthAnchor), qr.heightAnchor.constraint(equalTo:qr.widthAnchor),
+            handle.widthAnchor.constraint(equalTo:col.widthAnchor),
             col.topAnchor.constraint(equalTo: plate.topAnchor, constant: 20), col.bottomAnchor.constraint(equalTo: plate.bottomAnchor, constant: -18),
             col.leadingAnchor.constraint(equalTo: plate.leadingAnchor, constant: 20), col.trailingAnchor.constraint(equalTo: plate.trailingAnchor, constant: -20),
-            plate.centerXAnchor.constraint(equalTo: centerXAnchor),
+            plate.leadingAnchor.constraint(equalTo:leadingAnchor,constant:20), plate.trailingAnchor.constraint(equalTo:trailingAnchor,constant:-20),
             plate.topAnchor.constraint(equalTo: topAnchor, constant: 34), plate.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -34),
         ])
     }
@@ -484,14 +469,17 @@ final class QrCardView: UIView {
 }
 
 final class MyQrViewController: SheetViewController {
+    private let userId: String?
+    init(userId: String? = nil) { self.userId = userId; super.init(nibName:nil,bundle:nil) }
+    required init?(coder:NSCoder) { fatalError() }
     private let card = QrCardView()
     private var link = ""
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Мой QR-код"
+        title = userId == nil ? "Мой QR-код" : "QR-код профиля"
         stack.addArrangedSubview(card)
-        muted("Покажите код собеседнику: он отсканирует его в NeoChat и сразу добавит вас в контакты. Код содержит отпечаток вашего ключа, поэтому ключ сразу считается сверенным.")
+        muted(userId == nil ? "Покажите код собеседнику: он отсканирует его в NeoChat и сразу добавит вас в контакты. Код содержит отпечаток вашего ключа, поэтому ключ сразу считается сверенным." : "QR-код содержит имя пользователя и отпечаток ключа владельца профиля.")
         let share = PillButton("Поделиться")
         share.addAction(UIAction { [weak self] _ in self?.share() }, for: .touchUpInside)
         stack.addArrangedSubview(share)
@@ -501,7 +489,7 @@ final class MyQrViewController: SheetViewController {
             ContactQr.scan(from: self)
         }, for: .touchUpInside)
         stack.addArrangedSubview(scan)
-        Core.shared.call("my_qr") { [weak self] r in
+        Core.shared.call("profile_qr",userId.map { ["user_id":$0] } ?? [:]) { [weak self] r in
             guard let self else { return }
             guard case .success(let v) = r, let o = v as? JSON else {
                 if case .failure(let e) = r { self.toast(e.message) }
@@ -509,11 +497,7 @@ final class MyQrViewController: SheetViewController {
             }
             self.link = o.str("link")
             self.card.handle.text = "@" + o.str("username")
-            Core.shared.call("status") { sr in
-                guard case .success(let sv) = sr, let s = sv as? JSON else { return }
-                let name = s.str("display_name").isEmpty ? s.str("username") : s.str("display_name")
-                self.card.qr.set(o["qr_rows"] as? [String] ?? [], name: name, seed: s.str("user_id"))
-            }
+            self.card.qr.set(o["qr_rows"] as? [String] ?? [])
         }
     }
 
@@ -876,7 +860,9 @@ func chatSwipe(_ host: UIViewController, _ c: JSON, archive: Bool) -> UISwipeAct
     let back = archive || c.bool("in_archive")
     let a = UIContextualAction(style: .normal, title: back ? "Вернуть" : "В архив") { _, _, done in
         Core.shared.call("set_archived", ["conversation_id": c.str("id"), "archived": !back]) { r in
-            if case .failure(let e) = r { host.toast(e.message) } else if !back { host.toast("Чат в архиве") }
+            if case .failure(let e) = r { host.toast(e.message); done(false); return }
+            replyHaptic()
+            if !back { archiveUndo(host, ids: [c.str("id")]) }
             done(true)
         }
     }
@@ -906,7 +892,7 @@ func bindChatCell(_ cell: RowCell, _ c: JSON) {
     cell.avatar.online = kind == "direct" && (c.obj("presence")?.bool("online") ?? false)
     cell.title.text = c.str("title")
     cell.time.text = formatListTime(c.int64("last_activity"))
-    cell.badge.set(c.int("unread"))
+    cell.badge.set(c.int("unread"),mentions:c.int("mention_count"))
     cell.pin.isHidden = !(c.bool("pinned") && c.int("unread") == 0)
     var preview = c.str("last_preview").replacingOccurrences(of: "\n", with: " ")
     var color = Theme.muted
@@ -1053,6 +1039,7 @@ final class EditProfileViewController: SheetViewController {
         super.viewDidLoad()
         title = "Профиль"
         let name = Field("Имя")
+        let username = Field("Имя пользователя")
         name.autocapitalizationType = .words
         let bio = Field("О себе")
         bio.autocapitalizationType = .sentences
@@ -1064,7 +1051,8 @@ final class EditProfileViewController: SheetViewController {
             count.text = "\(bio.text?.count ?? 0)/100"
         }, for: .editingChanged)
         stack.addArrangedSubview(name)
-        muted("Имя видят ваши собеседники. Никнейм и ID не меняются.")
+        muted("Имя видят ваши собеседники.")
+        stack.addArrangedSubview(username)
         stack.addArrangedSubview(bio)
         stack.addArrangedSubview(count)
         muted("Короткое описание, до 100 символов. Его видят ваши контакты и участники общих групп.")
@@ -1073,6 +1061,7 @@ final class EditProfileViewController: SheetViewController {
         Core.shared.call("status") { r in
             guard case .success(let v) = r, let s = v as? JSON else { return }
             name.text = s.str("display_name")
+            username.text = "@"+s.str("username")
             bio.text = s.str("bio")
             count.text = "\(s.str("bio").count)/100"
         }
@@ -1080,7 +1069,7 @@ final class EditProfileViewController: SheetViewController {
             let n = (name.text ?? "").trimmingCharacters(in: .whitespaces)
             guard !n.isEmpty else { self?.toast("Введите имя"); return }
             save.isEnabled = false
-            Core.shared.call("set_profile", ["display_name": n, "bio": (bio.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)]) { r in
+            Core.shared.call("set_profile", ["display_name": n, "username":username.text ?? "", "bio": (bio.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)]) { r in
                 save.isEnabled = true
                 switch r {
                 case .failure(let e): self?.toast(e.message)

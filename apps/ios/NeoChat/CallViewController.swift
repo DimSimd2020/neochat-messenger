@@ -17,6 +17,7 @@ final class CallViewController: UIViewController {
     private let topStatus = label("", 14, color: UIColor.white.withAlphaComponent(0.8))
     private let topShade = CAGradientLayer()
     private let flip = UIButton(type: .system)
+    private let back = UIButton(type: .system)
     private let controls = UIStackView()
     private lazy var mic = CallButton("mic.fill", "Микрофон") { CallManager.shared.setMic(!CallManager.shared.micOn) }
     private lazy var camera = CallButton("video.fill", "Камера") { [weak self] in self?.toggleCamera() }
@@ -82,11 +83,25 @@ final class CallViewController: UIViewController {
         flip.accessibilityLabel = "Сменить камеру"
         flip.addAction(UIAction { _ in CallManager.shared.switchCamera() }, for: .touchUpInside)
 
+        back.setImage(UIImage(systemName: "chevron.left", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)), for: .normal)
+        back.tintColor = .white
+        back.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        back.layer.cornerRadius = 22
+        back.accessibilityLabel = "Вернуться в чат, продолжая звонок"
+        back.addAction(UIAction { [weak self] _ in
+            let id = CallManager.shared.call.str("conversation_id")
+            guard !id.isEmpty else { return }
+            CallManager.shared.minimized = true
+            self?.dismiss(animated: !Theme.reducedMotion) {
+                NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": id])
+            }
+        }, for: .touchUpInside)
+
         for b in [mic, camera, speaker, end, decline, acceptVideo, accept] { controls.addArrangedSubview(b) }
         controls.distribution = .fillEqually
         controls.alignment = .top
 
-        for v in [remote, center, top, local, flip, controls] as [UIView] {
+        for v in [remote, center, top, local, flip, controls, back] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
@@ -98,11 +113,14 @@ final class CallViewController: UIViewController {
             center.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -60),
             center.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
             top.topAnchor.constraint(equalTo: safe.topAnchor, constant: 12),
-            top.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 20),
+            top.leadingAnchor.constraint(equalTo: back.trailingAnchor, constant: 12),
             top.trailingAnchor.constraint(lessThanOrEqualTo: flip.leadingAnchor, constant: -12),
             flip.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
             flip.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
             flip.widthAnchor.constraint(equalToConstant: 44), flip.heightAnchor.constraint(equalToConstant: 44),
+            back.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
+            back.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 16),
+            back.widthAnchor.constraint(equalToConstant: 44), back.heightAnchor.constraint(equalToConstant: 44),
             local.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
             local.bottomAnchor.constraint(equalTo: controls.topAnchor, constant: -24),
             local.widthAnchor.constraint(equalToConstant: 108), local.heightAnchor.constraint(equalToConstant: 144),

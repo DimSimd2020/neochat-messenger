@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NeoChat VERSION 0.6.5.2 LANGUAGES CXX)
+project(NeoChat VERSION 0.6.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,6 +36,7 @@ add_library(neochat_ui STATIC
     src/composer.cpp src/composer.h
     src/emoji.cpp src/emoji.h
     src/dialogs.cpp src/dialogs.h
+    src/profiles.cpp src/profiles.h
     src/mainwindow.cpp src/mainwindow.h
     src/calls.cpp src/calls.h
     src/style.cpp src/style.h

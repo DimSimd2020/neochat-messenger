@@ -63,22 +63,26 @@ object Dialogs {
      * Settings keeps both switches for later.
      */
     fun callReadiness(act: MainActivity) {
-        val prefs = Prefs.of(act)
-        if (prefs.getBoolean("readiness_asked", false)) return
+        if (act.readinessPrompted) return
+        act.readinessPrompted = true
+        if (android.os.Build.VERSION.SDK_INT >= 33) act.withPermission(android.Manifest.permission.POST_NOTIFICATIONS) { callReadinessSettings(act) }
+        else callReadinessSettings(act)
+    }
+
+    private fun callReadinessSettings(act: MainActivity) {
         val battery = !act.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(act.packageName)
         val screen = !app.neochat.calls.CallNotifications.canShowOnLockScreen(act)
         if (!battery && !screen) return
-        prefs.edit().putBoolean("readiness_asked", true).apply()
         val s = Sheet(act, "Чтобы звонки приходили сразу")
         s.muted("Без этих разрешений Android может задержать входящий звонок или не показать его на заблокированном экране.", 4)
         if (battery) {
             val b = PillButton(s.ctx, "Работа в фоне без ограничений")
-            b.setOnClickListener { s.dismiss(); SettingsPage.openBatterySettings(act) }
+            b.setOnClickListener { SettingsPage.openBatterySettings(act) }
             s.add(b, 16)
         }
         if (screen) {
             val b = PillButton(s.ctx, "Показывать звонки на заблокированном экране", primary = !battery)
-            b.setOnClickListener { s.dismiss(); SettingsPage.openLockScreenCalls(act) }
+            b.setOnClickListener { SettingsPage.openLockScreenCalls(act) }
             s.add(b, 10)
         }
         val later = PillButton(s.ctx, "Позже", primary = false)
@@ -435,6 +439,15 @@ object Dialogs {
     // ---- conversation info ----
 
     fun conversationInfo(act: MainActivity, cid: String) {
+        CoreClient.call("get_conversation",JSONObject().put("conversation_id",cid)) { v,e ->
+            if(e!=null) return@call act.toast(e.message)
+            val c=v as JSONObject
+            if(c.str("kind")=="direct") act.openPage(PersonProfilePage(act,c.str("peer_user_id")))
+            else groupInfo(act,cid)
+        }
+    }
+
+    private fun groupInfo(act: MainActivity, cid: String) {
         val s = Sheet(act, "Сведения")
         val ctx = s.ctx
         val content = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }

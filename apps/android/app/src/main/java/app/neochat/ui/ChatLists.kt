@@ -76,7 +76,7 @@ fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
     row.time.text = formatListTime(c.optLong("last_activity"))
     row.pin.visibility = if (c.optBoolean("pinned")) View.VISIBLE else View.GONE
     val unread = c.optInt("unread")
-    row.setBadge(unread)
+    row.setBadge(unread, c.optInt("mention_count"))
     var preview = c.str("last_preview")
     var role = Theme.Role.MUTED
     val draft = c.str("draft").trim().replace('\n', ' ')
@@ -109,19 +109,18 @@ fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
 }
 
 /** The "Архив" entry at the top of the main list. */
-fun bindArchiveRow(act: MainActivity, row: ListRow, a: JSONObject) {
-    row.avatar.setIcon(R.drawable.ic_archive)
+fun bindArchiveRow(act: MainActivity, row: ListRow, icon: ArchiveIcon) {
+    row.avatar.setIcon(icon)
     row.avatar.online = false
     row.title.text = "Архив"
     row.time.text = ""
     row.pin.visibility = View.GONE
-    // Names of archived chats stay out of sight; only the count shows.
-    row.subtitle.text = "Чатов: ${a.optInt("count")}"
-    row.subtitle.role(Theme.Role.MUTED)
-    row.setBadge(a.optInt("unread"))
+    (row.subtitle.parent as View).visibility = View.GONE
+    row.time.visibility = View.GONE
+    row.setBadge(0)
     row.setChecked(null)
     row.setOnLongClickListener(null)
-    row.contentDescription = "Архив, чатов: ${a.optInt("count")}" + if (a.optInt("unread") > 0) ", непрочитанных: ${a.optInt("unread")}" else ""
+    row.contentDescription = "Архив"
     row.setOnClickListener {
         if (AppLock.archiveLock(act)) AppLock.prompt(act, "Вход в архив", cancellable = true) { act.openArchive() }
         else act.openArchive()
@@ -174,7 +173,9 @@ class ChatSwipe(
             val toArchive = !archive
             CoreClient.call("set_archived", JSONObject().put("conversation_id", id).put("archived", toArchive)) { _, e ->
                 if (e != null) return@call act.toast(e.message)
-                act.toast(if (toArchive) "Чат перенесён в архив" else "Чат возвращён из архива")
+                act.overlay.replyHaptic()
+                if (toArchive) archiveUndo(act, listOf(id), done)
+                else act.toast("Чат возвращён из архива")
                 done()
             }
         } else {
@@ -219,6 +220,20 @@ class ChatSwipe(
     }
 }
 
+fun archiveUndo(act: MainActivity, ids: List<String>, done: () -> Unit) {
+    if (ids.isEmpty()) return
+    act.toast(if (ids.size == 1) "Чат в архиве" else "Чаты в архиве", "Отмена") {
+        fun restore(i: Int) {
+            if (i == ids.size) { act.overlay.replyHaptic(); done(); return }
+            CoreClient.call("set_archived", JSONObject().put("conversation_id", ids[i]).put("archived", false)) { _, e ->
+                if (e != null) { act.toast(e.message); done(); return@call }
+                restore(i + 1)
+            }
+        }
+        restore(0)
+    }
+}
+
 /** Archived chats with their own sort order; swipe left returns a chat. */
 class ArchiveScreen(private val act: MainActivity) : Screen {
     private val ctx: Context = act
@@ -236,6 +251,7 @@ class ArchiveScreen(private val act: MainActivity) : Screen {
 
     init {
         column.orientation = LinearLayout.VERTICAL
+        root.addView(BackgroundView(ctx), FrameLayout.LayoutParams(MATCH, MATCH))
         root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
         val h = LinearLayout(ctx)
         h.gravity = Gravity.CENTER_VERTICAL

@@ -213,21 +213,15 @@ object Emoji {
  */
 class PrettyQrView(ctx: Context) : View(ctx) {
     private var rows: List<String> = emptyList()
-    private var name = ""
-    private var seed = ""
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val avatar = AvatarView(ctx, 56)
+    private val paint = Paint()
     var dark = 0xFF16233C.toInt()
 
     init {
         contentDescription = "QR-код профиля"
     }
 
-    fun set(r: List<String>, name: String, seed: String) {
+    fun set(r: List<String>) {
         rows = r
-        this.name = name
-        this.seed = seed
-        avatar.set(name, seed)
         invalidate()
     }
 
@@ -239,40 +233,14 @@ class PrettyQrView(ctx: Context) : View(ctx) {
     override fun onDraw(c: Canvas) {
         val n = rows.size
         if (n == 0) return
-        val cell = width.toFloat() / n
-        val hole = (n * 0.22f).toInt().let { if ((n - it) % 2 == 1) it + 1 else it }
-        val h0 = (n - hole) / 2
-        val h1 = h0 + hole
-        fun eye(x: Int, y: Int) = x < 7 && y < 7 || x >= n - 7 && y < 7 || x < 7 && y >= n - 7
+        c.drawColor(android.graphics.Color.WHITE)
+        val cell = (minOf(width,height) / (n+8)).coerceAtLeast(1).toFloat()
+        val left = (width-n*cell)/2
+        val top = (height-n*cell)/2
         paint.color = dark
         for (y in 0 until n) for (x in 0 until n) {
-            if (rows[y][x] != '1' || eye(x, y)) continue
-            if (x in h0 until h1 && y in h0 until h1) continue
-            val cx = (x + 0.5f) * cell
-            val cy = (y + 0.5f) * cell
-            c.drawCircle(cx, cy, cell * 0.45f, paint)
+            if (rows[y][x] == '1') c.drawRect(left+x*cell,top+y*cell,left+(x+1)*cell,top+(y+1)*cell,paint)
         }
-        for ((ex, ey) in listOf(0 to 0, n - 7 to 0, 0 to n - 7)) {
-            val l = ex * cell
-            val t = ey * cell
-            // Only slightly rounded finder eyes: strongly rounded ones break many decoders.
-            val ring = Path().apply {
-                fillType = Path.FillType.EVEN_ODD
-                addRoundRect(RectF(l, t, l + 7 * cell, t + 7 * cell), cell * 0.35f, cell * 0.35f, Path.Direction.CW)
-                addRoundRect(RectF(l + cell, t + cell, l + 6 * cell, t + 6 * cell), cell * 0.15f, cell * 0.15f, Path.Direction.CW)
-            }
-            c.drawPath(ring, paint)
-            c.drawRoundRect(RectF(l + 2 * cell, t + 2 * cell, l + 5 * cell, t + 5 * cell), cell * 0.3f, cell * 0.3f, paint)
-        }
-        // Avatar in the middle.
-        val size = (hole - 1) * cell
-        val left = (width - size) / 2
-        c.save()
-        c.translate(left, left)
-        avatar.measure(MeasureSpec.makeMeasureSpec(size.toInt(), MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(size.toInt(), MeasureSpec.EXACTLY))
-        avatar.layout(0, 0, size.toInt(), size.toInt())
-        avatar.draw(c)
-        c.restore()
     }
 }
 
@@ -297,7 +265,7 @@ class QrCard(ctx: Context) : FrameLayout(ctx), Themed {
             setPadding(ctx.dp(18), ctx.dp(18), ctx.dp(18), ctx.dp(18))
             addView(qr, LayoutParams(MATCH, WRAP))
         }
-        inner.addView(white, lp(ctx.dp(260), WRAP))
+        inner.addView(white, lp(MATCH, WRAP))
         handle.gravity = Gravity.CENTER
         handle.setTextColor(android.graphics.Color.WHITE)
         inner.addView(handle, lp(WRAP, WRAP).apply { topMargin = ctx.dp(16) })
@@ -333,10 +301,7 @@ object Qr {
             val o = v as JSONObject
             link = o.str("link")
             val rows = o.optJSONArray("qr_rows")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList()
-            CoreClient.call("status") { sv, _ ->
-                val st = sv as? JSONObject ?: JSONObject()
-                card.qr.set(rows, st.str("display_name").ifEmpty { o.str("username") }, st.str("user_id"))
-            }
+            card.qr.set(rows)
             card.handle.text = "@" + o.str("username")
         }
         share.setOnClickListener {

@@ -85,6 +85,7 @@ public:
 signals:
     void activated(const QString &id);
     void newChat();
+    void archived(const QStringList &ids);
 
 protected:
     void paintEvent(QPaintEvent *) override;

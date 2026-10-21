@@ -90,11 +90,22 @@ class ChatSelection(private val act: MainActivity, private val changed: () -> Un
     private fun run(method: String, key: String, value: Boolean) {
         if (busy || !active) return
         val ids = selected.keys.toList()
+        val toUndo = selected.values.filter { !it.optBoolean("in_archive") }.map { it.str("id") }
+        val archived = arrayListOf<String>()
         busy = true
         fun next(i: Int) {
-            if (i == ids.size) { busy = false; update(); return }
+            if (i == ids.size) {
+                busy = false
+                update()
+                if (method == "set_archived") {
+                    act.overlay.replyHaptic()
+                    if (value) archiveUndo(act, archived) { changed() }
+                }
+                return
+            }
             CoreClient.call(method, JSONObject().put("conversation_id", ids[i]).put(key, value)) { _, e ->
                 if (e != null) { busy = false; update(); act.toast(e.message); return@call }
+                if (method == "set_archived" && value && ids[i] in toUndo) archived += ids[i]
                 selected.remove(ids[i])
                 next(i + 1)
             }

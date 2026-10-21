@@ -115,6 +115,7 @@ signals:
     void replyRequested(const QJsonObject &msg);
     void editRequested(const QJsonObject &msg);
     void forwardRequested(const QJsonArray &msgs);
+    void profileRequested(const QString &userId);
     void toast(const QString &text);
     void readable(); // the newest messages are on screen
 

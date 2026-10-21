@@ -147,6 +147,7 @@ impl Db {
             "ALTER TABLE conversations ADD COLUMN avatar TEXT NOT NULL DEFAULT ''",
             // Time of the last edit of a message (0 = never edited).
             "ALTER TABLE messages ADD COLUMN edited_at INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN mentioned INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(sql, []);
         }

@@ -16,6 +16,7 @@ final class CallManager {
     static let changed = Notification.Name("NeoChatCallChanged")
 
     private(set) var phase = Phase.idle
+    var minimized = false
     private(set) var call: JSON = [:]
     private(set) var micOn = true
     private(set) var cameraOn = false
@@ -435,6 +436,7 @@ final class CallManager {
     }
 
     func openScreen(retries: Int = 8) {
+        minimized = false
         guard let top = topController(), !(top is CallViewController) else { return }
         // A screen that is still sliding in or out cannot present another one: try again shortly.
         if top.isBeingPresented || top.isBeingDismissed || top.isMovingToParent || top.isMovingFromParent {
@@ -496,6 +498,7 @@ final class CallManager {
     }
 
     private func reset(_ video: Bool) {
+        minimized = false
         micOn = true
         cameraOn = false
         peerCamera = video
@@ -596,7 +599,7 @@ final class CallManager {
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["call"])
             if player == nil { ring() }
             openScreen()
-        } else if live {
+        } else if live && !minimized {
             openScreen()
         }
     }

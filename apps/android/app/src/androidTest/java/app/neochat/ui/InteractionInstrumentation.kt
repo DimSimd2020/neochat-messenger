@@ -1,15 +1,23 @@
 package app.neochat.ui
 
 import android.app.Instrumentation
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
+import androidx.recyclerview.widget.RecyclerView
+import org.json.JSONObject
+import java.io.File
 
 /** Real Android touch dispatch, without a network account or additional test libraries. */
 class InteractionInstrumentation : Instrumentation() {
-    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
+    private var archive = false
+    private var profileServer = ""
+    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); archive = arguments?.getString("archive") == "true"; profileServer=arguments?.getString("profile_server") ?: ""; start() }
 
     override fun onStart() {
         val result = Bundle()
@@ -54,11 +62,143 @@ class InteractionInstrumentation : Instrumentation() {
                     check(replies == 2) { "Cancelled gesture triggered a reply" }
                 } finally { Theme.forceReduced = oldReduced; row.reset() }
             }
-            result.putString("stream", "OK: whitespace swipes in both directions, vertical scroll, back edge, cancellation\n")
+            if (archive) archiveInteraction()
+            result.putString("stream", "OK: reply gestures; archive follows finger, partial/cancelled pull, scroll hiding, navigation cleanup, inline undo\n")
             finish(-1, result)
         } catch (e: Throwable) {
             result.putString("stream", "FAIL: ${e.message}\n")
             finish(0, result)
         }
+    }
+
+    private fun archiveInteraction() {
+        uiAutomation.grantRuntimePermission("app.neochat", "android.permission.POST_NOTIFICATIONS")
+        val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra("test_server", "http://127.0.0.1:1")
+        }) as MainActivity
+        waitForIdleSync()
+        SystemClock.sleep(300)
+        fun field(host: Any, name: String): Any = host.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(host)!!
+        fun pause() { SystemClock.sleep(360); waitForIdleSync() }
+        try {
+            lateinit var home: HomeScreen
+            lateinit var list: RecyclerView
+            lateinit var wrap: View
+            runOnMainSync {
+                activity.readinessPrompted = true
+                activity.showMain()
+                activity.readinessPrompted = true
+            }
+            pause()
+            runOnMainSync {
+                home = field(activity, "home") as HomeScreen
+                home.javaClass.getDeclaredField("allChats").apply { isAccessible = true }.set(home, (0..29).map {
+                    JSONObject().put("id", "archive-fixture-$it").put("kind", "direct").put("title", "Тестовый чат")
+                })
+                home.javaClass.getDeclaredField("archiveRow").apply { isAccessible = true }.set(home, JSONObject().put("count", 3))
+                home.javaClass.getDeclaredMethod("applyChats", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(home, false)
+                list = field(home, "chatList") as RecyclerView
+                wrap = field(home, "archiveWrap") as View
+            }
+            pause()
+            fun capture(name: String) = runOnMainSync {
+                val root = activity.window.decorView
+                val bitmap = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)
+                root.draw(Canvas(bitmap))
+                val dir = File(activity.filesDir, "archive-shots").apply { mkdirs() }
+                File(dir, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                bitmap.recycle()
+            }
+            val start = SystemClock.uptimeMillis()
+            fun touch(action: Int, dy: Int) {
+                runOnMainSync {
+                    val e = MotionEvent.obtain(start, SystemClock.uptimeMillis(), action, activity.dpf(180), activity.dpf(90 + dy), 0)
+                    list.dispatchTouchEvent(e)
+                    e.recycle()
+                }
+                SystemClock.sleep(25)
+                waitForIdleSync()
+            }
+            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 64)
+            runOnMainSync { check(wrap.height in 1 until activity.dp(72)) { "Archive did not follow the finger" } }
+            capture("partial-pull")
+            touch(MotionEvent.ACTION_UP, 64); pause()
+            runOnMainSync { check(wrap.layoutParams.height == 0 && wrap.visibility == View.GONE) { "Short pull exposed the archive" } }
+            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 150); touch(MotionEvent.ACTION_CANCEL, 150); pause()
+            runOnMainSync { check(wrap.layoutParams.height == 0 && wrap.visibility == View.GONE) { "Cancelled pull exposed the archive" } }
+            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 150); touch(MotionEvent.ACTION_UP, 150); pause()
+            runOnMainSync {
+                check(wrap.height == activity.dp(72)) { "Full pull did not settle" }
+                val row = field(home, "archiveEntry") as ListRow
+                check(row.contentDescription == "Архив" && (row.subtitle.parent as View).visibility == View.GONE) { "Archive still exposes counters" }
+            }
+            capture("revealed")
+            runOnMainSync { list.scrollBy(0, activity.dp(100)) }; pause()
+            runOnMainSync { check(wrap.layoutParams.height == 0 && wrap.visibility == View.GONE) { "Scrolling did not hide the archive" }; activity.openArchive() }
+            SystemClock.sleep(85); capture("opening")
+            pause()
+            runOnMainSync { activity.closeArchive() }
+            SystemClock.sleep(85); capture("closing")
+            pause()
+            runOnMainSync {
+                check((field(activity, "content") as FrameLayout).childCount == 1) { "Navigation left transition layers behind" }
+                var undone = 0
+                activity.toast("Чат в архиве", "Отмена") { undone++ }
+                val bubble = activity.overlay.findViewWithTag<View>("toast")
+                val buttons = arrayListOf<View>()
+                bubble.findViewsWithText(buttons, "Отмена", View.FIND_VIEWS_WITH_TEXT)
+                check(buttons.size == 1) { "Undo is not inside the archive bubble" }
+                buttons.single().performClick(); buttons.single().performClick()
+                check(undone == 1) { "Undo did not run exactly once" }
+                activity.toast("Чат в архиве", "Отмена") {}
+            }
+            pause(); capture("undo")
+            if (profileServer.isNotEmpty()) {
+                runOnMainSync { activity.overlay.findViewWithTag<View>("toast")?.let {activity.overlay.removeView(it)} }
+                check(profileServer == "http://127.0.0.1:8097")
+                fun core(method:String,p:JSONObject=JSONObject()):Any? {
+                    val (value,error)=app.neochat.core.CoreClient.callBlocking(method,p)
+                    check(error==null) { "$method failed: ${error?.code}" };return value
+                }
+                val suffix=java.util.UUID.randomUUID().toString().take(8)
+                core("register",JSONObject().put("server",profileServer).put("username","preview_$suffix").put("display_name","Андрей").put("password","local preview password").put("platform","android").put("device_name","Preview emulator"))
+                val peerDir=File(targetContext.cacheDir,"profile-peer-$suffix")
+                val peer=app.neochat.core.NativeCore.open(JSONObject().put("data_dir",peerDir.absolutePath).put("db_key","b".repeat(64)).put("foreground",false).toString()) {}
+                try {
+                    fun remote(method:String,p:JSONObject):Any? {
+                        val result=JSONObject(app.neochat.core.NativeCore.call(peer,method,p.toString()))
+                        check(!result.has("error")) { "$method failed" };return result.opt("ok")
+                    }
+                    remote("register",JSONObject().put("server",profileServer).put("username","friend_$suffix").put("display_name","Дмитрий").put("password","local preview password").put("platform","ios").put("device_name","Preview peer"))
+                    remote("set_profile",JSONObject().put("bio","На связи в NeoChat"))
+                    val contact=core("resolve_contact",JSONObject().put("username","@friend_$suffix")) as JSONObject
+                    val uid=contact.str("user_id")
+                    core("open_direct",JSONObject().put("user_id",uid))
+                    core("set_profile_note",JSONObject().put("user_id",uid).put("note","Встретиться в выходные"))
+                    runOnMainSync {activity.showMain();activity.readinessPrompted=true;activity.openPage(PersonProfilePage(activity,uid))}
+                    pause();capture("profile-067")
+                    runOnMainSync {
+                        val found=arrayListOf<View>();activity.window.decorView.findViewsWithText(found,"QR-код профиля",View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION)
+                        check(found.isNotEmpty()) { "Profile QR button missing" };found.first().performClick()
+                    }
+                    pause();capture("profile-067-qr")
+                    runOnMainSync {activity.onBackPressed()};pause()
+                    runOnMainSync {
+                        val found=arrayListOf<View>();activity.window.decorView.findViewsWithText(found,"Конфиденциальность",View.FIND_VIEWS_WITH_TEXT)
+                        check(found.isNotEmpty()) { "Profile tabs missing" }
+                        (found.first().parent as View).performClick()
+                    }
+                    pause();capture("profile-067-privacy")
+                    runOnMainSync {activity.closePage()};pause()
+                    runOnMainSync {
+                        val current=field(activity,"home") as HomeScreen
+                        current.javaClass.getDeclaredMethod("selectTab",Int::class.javaPrimitiveType).apply {isAccessible=true}.invoke(current,2)
+                        (field(current,"nav") as BottomNav).select(2)
+                    }
+                    pause();capture("profile-067-own")
+                } finally {app.neochat.core.NativeCore.close(peer);core("logout")}
+            }
+        } finally { runOnMainSync { activity.finish() } }
     }
 }

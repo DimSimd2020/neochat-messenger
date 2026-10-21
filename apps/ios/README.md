@@ -29,7 +29,7 @@ gh run list --workflow ios.yml --branch calls-0.6.3
 gh run download RUN_ID --name NeoChat-unsigned-ipa --dir dist/ios-ci
 ```
 
-Ручной запуск также выполняет UI-тест на симуляторе. Артефакт `NeoChat-unsigned-ipa` содержит IPA; `ios-simulator-shots` — снимки теста. Сборка ветки не публикует GitHub Release.
+Ручной запуск сохраняет IPA только в артефакт `NeoChat-unsigned-ipa` и не публикует GitHub Release. Проверки ядра на host и UI-тест на симуляторе включаются опцией `run_tests=true`; по умолчанию выключены. При их запуске `ios-simulator-shots` содержит снимки теста.
 
 ## Проверка
 

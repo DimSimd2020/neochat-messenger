@@ -39,6 +39,18 @@ func (s *Server) replaceAvatar(r *http.Request, a *authCtx, id string) error {
 		if err := tx.QueryRow(r.Context(), `SELECT avatar FROM users WHERE id=$1 FOR UPDATE`, a.UserID).Scan(&old); err != nil {
 			return err
 		}
+		if id != "" {
+			var count int
+			if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM profile_photos WHERE user_id=$1`, a.UserID).Scan(&count); err != nil {
+				return err
+			}
+			if count >= maxProfilePhotos {
+				return errf(409, "photo_limit", "Можно хранить до 20 фото. Удалите одно из старых")
+			}
+			if _, err := tx.Exec(r.Context(), `INSERT INTO profile_photos(id,user_id) VALUES($1,$2)`, id, a.UserID); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(r.Context(), `UPDATE users SET avatar=$2 WHERE id=$1`, a.UserID, id); err != nil {
 			return err
 		}
@@ -48,10 +60,6 @@ func (s *Server) replaceAvatar(r *http.Request, a *authCtx, id string) error {
 	})
 	if err != nil {
 		return err
-	}
-	// Every upload has a new UUID: an old file can never be reused by a later update.
-	if isUUID(old) {
-		os.Remove(s.avatarPath(old))
 	}
 	s.hub.notify(notify)
 	return nil
@@ -89,11 +97,17 @@ func (s *Server) handleUploadAvatar(w http.ResponseWriter, r *http.Request, a *a
 }
 
 func (s *Server) handleDeleteAvatar(w http.ResponseWriter, r *http.Request, a *authCtx) {
-	if err := s.replaceAvatar(r, a, ""); err != nil {
+	var id string
+	if err := s.db.QueryRow(r.Context(), `SELECT avatar FROM users WHERE id=$1`, a.UserID).Scan(&id); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	if id == "" {
+		writeJSON(w, 200, map[string]bool{"ok": true})
+		return
+	}
+	r.SetPathValue("photo", id)
+	s.handleDeletePhoto(w, r, a)
 }
 
 func (s *Server) handleGetAvatar(w http.ResponseWriter, r *http.Request, a *authCtx) {
@@ -109,7 +123,7 @@ func (s *Server) handleGetAvatar(w http.ResponseWriter, r *http.Request, a *auth
 	}
 	var current bool
 	if allowed {
-		err = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND avatar=$2)`, nullUUID(id), avatar).Scan(&current)
+		err = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM profile_photos WHERE user_id=$1 AND id=$2)`, nullUUID(id), avatar).Scan(&current)
 	}
 	if err != nil {
 		s.fail(w, r, err)

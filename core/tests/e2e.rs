@@ -94,6 +94,53 @@ fn uid(c: &Client) -> String {
 }
 
 #[test]
+fn profiles_mentions_and_username_067() {
+    let Some(e) = env() else { return };
+    let an = uname("profile_owner");
+    let bn = uname("profile_peer");
+    let (alice, _) = register(&e, &an);
+    let (bob, _) = register(&e, &bn);
+    let b = alice.call("resolve_contact", json!({"username":format!("@{bn}")}));
+    let a = bob.call("resolve_contact", json!({"username":an}));
+    let cid = alice.call("open_direct",json!({"user_id":b["user_id"]}))["id"].as_str().unwrap().to_string();
+    let message = alice.call("send_text",json!({"conversation_id":cid,"text":format!("Пинг @{bn}")}));
+    alice.sync(); bob.sync();
+    assert_eq!(bob.call("get_conversation",json!({"conversation_id":cid}))["mention_count"],1);
+    assert_eq!(bob.messages(&cid).last().unwrap()["unread_mention"],true);
+    bob.call("send_text",json!({"conversation_id":cid,"text":"Ответ","reply_to":message["id"]}));
+    assert_eq!(bob.call("get_conversation",json!({"conversation_id":cid}))["mention_count"],0);
+    assert_eq!(bob.messages(&cid).iter().find(|m|m["id"]==message["id"]).unwrap()["unread_mention"],false);
+    alice.call("set_profile_note",json!({"user_id":b["user_id"],"note":"Личная заметка"}));
+    assert_eq!(alice.call("user_profile",json!({"user_id":b["user_id"]}))["note"],"Личная заметка");
+    assert_eq!(bob.call("user_profile",json!({"user_id":a["user_id"]}))["note"],"");
+    assert!(alice.try_call("set_profile_note",json!({"user_id":b["user_id"],"note":"я".repeat(101)})).is_err());
+    let group=alice.call("create_group",json!({"title":"Общая группа","member_ids":[b["user_id"]]}));
+    let gid=group["id"].as_str().unwrap(); alice.sync();bob.sync();
+    assert_eq!(alice.call("user_profile",json!({"user_id":b["user_id"]}))["groups"].as_array().unwrap().len(),1);
+    alice.call("send_text",json!({"conversation_id":gid,"text":"@everyone"}));alice.sync();bob.sync();
+    assert_eq!(bob.call("get_conversation",json!({"conversation_id":gid}))["mention_count"],1);
+    alice.call("mark_read",json!({"conversation_id":gid}));
+    bob.call("send_text",json!({"conversation_id":gid,"text":"@everyone @here"}));bob.sync();alice.sync();
+    assert_eq!(alice.call("get_conversation",json!({"conversation_id":gid}))["mention_count"],0);
+    let renamed=uname("new_handle");
+    alice.call("set_profile",json!({"username":renamed}));alice.sync();
+    let second=Client::new();
+    second.call("login",json!({"server":e.server,"username":renamed,"password":"correct horse battery","device_name":"new phone","platform":"ios"}));
+    alice.sync();second.sync();
+    assert_eq!(uid(&alice),uid(&second));
+    assert_eq!(second.call("user_profile",json!({"user_id":b["user_id"]}))["note"],"Личная заметка");
+    let avatar=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/avatar.jpg");
+    alice.call("set_profile_photo",json!({"path":avatar}));
+    alice.call("set_profile_photo",json!({"path":avatar}));
+    let photos=alice.call("profile_photos",json!({}));
+    assert_eq!(photos.as_array().unwrap().len(),2);
+    let photo=alice.call("profile_photo",json!({"user_id":uid(&alice),"photo_id":photos[0]["id"]}));
+    assert_eq!(std::fs::read(photo["path"].as_str().unwrap()).unwrap(),include_bytes!("fixtures/avatar.jpg"));
+    alice.call("delete_profile_photo",json!({"photo_id":photos[0]["id"]}));
+    assert_eq!(alice.call("profile_photos",json!({})).as_array().unwrap().len(),1);
+}
+
+#[test]
 fn direct_chat_restart_receipts_and_dedupe() {
     let Some(e) = env() else { return };
     let (mut alice, _) = register(&e, &uname("alice"));

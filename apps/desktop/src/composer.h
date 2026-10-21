@@ -9,6 +9,7 @@ namespace ui {
 class IconButton;
 }
 class SendButton;
+class QCompleter;
 
 class ComposerEdit : public QPlainTextEdit {
     Q_OBJECT
@@ -34,6 +35,7 @@ class Composer : public QWidget {
 public:
     explicit Composer(QWidget *parent = nullptr);
     void setDraft(const QString &text);
+    void setConversation(const QString &id);
     QString text() const;
     void setBlocked(bool blocked);
     void setReply(const QJsonObject &msg);
@@ -83,4 +85,6 @@ private:
     bool m_blocked = false;
     bool m_settingDraft = false;
     QTimer *m_draftTimer;
+    QCompleter *m_mentions;
+    QString m_conversationId;
 };

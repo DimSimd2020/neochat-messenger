@@ -348,13 +348,14 @@ impl Inner {
                         return Ok(());
                     }
                     let outgoing = sender == me;
+                    let mentioned = crate::mentions::incoming(&tx, &p, &me)?;
                     let fwd = p.fwd.as_ref().and_then(|f| {
                         let name = f["name"].as_str().unwrap_or("").chars().take(100).collect::<String>();
                         (!name.is_empty()).then(|| json!({"name": name, "ts": f["ts"].as_i64().unwrap_or(0)}).to_string())
                     });
                     let inserted = tx.execute(
-                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll, fwd)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                        "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, reply_to, file, status, server_id, sent_at, poll, fwd, mentioned)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                         params![
                             p.mid,
                             conv,
@@ -370,6 +371,7 @@ impl Inner {
                             p.ts.min(now + 300_000),
                             poll.map(|v| v.to_string()),
                             fwd,
+                            mentioned as i64,
                         ],
                     )?;
                     if inserted > 0 {
@@ -463,7 +465,8 @@ impl Inner {
         }
         if (stats.receipts.get(&conv).is_some_and(|v| !v.is_empty()) || stats.notify.remove(&conv)) && sender != me {
             let title = self.conversation_json(&conv).ok().and_then(|c| c["title"].as_str().map(str::to_string)).unwrap_or_default();
-            self.emit(json!({"type": "notify", "conversation_id": conv, "title": title}));
+            let mention = self.conversation_json(&conv).ok().is_some_and(|c| c["mention_count"].as_i64().unwrap_or(0) > 0);
+            self.emit(json!({"type": "notify", "conversation_id": conv, "title": title, "text":if mention { "Вас упомянули" } else { "Новое сообщение" }}));
         }
         Ok(())
     }

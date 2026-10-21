@@ -3,6 +3,12 @@
 #include "emoji.h"
 #include "theme.h"
 #include "widgets.h"
+#include "core.h"
+#include <QCompleter>
+#include <QStringListModel>
+#include <QRegularExpression>
+#include <QAbstractItemView>
+#include <QJsonArray>
 
 #include <QAbstractTextDocumentLayout>
 #include <QGridLayout>
@@ -106,6 +112,18 @@ void ComposerEdit::insertFromMimeData(const QMimeData *source)
 Composer::Composer(QWidget *parent) : QWidget(parent)
 {
     m_edit = new ComposerEdit(this);
+    m_mentions = new QCompleter(new QStringListModel(this), this);
+    m_mentions->setWidget(m_edit);
+    m_mentions->setCaseSensitivity(Qt::CaseInsensitive);
+    connect(m_mentions, qOverload<const QString &>(&QCompleter::activated), this, [this](const QString &name) {
+        auto cursor = m_edit->textCursor();
+        const QString prefix = m_edit->toPlainText().left(cursor.position());
+        const int at = prefix.lastIndexOf('@');
+        if (at < 0) return;
+        cursor.setPosition(at, QTextCursor::KeepAnchor);
+        cursor.insertText(name + " ");
+        m_edit->setTextCursor(cursor);
+    });
     m_edit->setFrameShape(QFrame::NoFrame);
     m_edit->setPlaceholderText(QStringLiteral("Написать сообщение…"));
     m_edit->setAccessibleName(QStringLiteral("Текст сообщения"));
@@ -209,6 +227,16 @@ void Composer::setDraft(const QString &text)
 
 void Composer::onTextChanged()
 {
+    const QString prefix = m_edit->toPlainText().left(m_edit->textCursor().position());
+    const auto mention = QRegularExpression("(?:^|\\s)(@[A-Za-z0-9_]*)$").match(prefix);
+    if (!m_settingDraft && !m_blocked && mention.hasMatch()) {
+        m_mentions->setCompletionPrefix(mention.captured(1));
+        if (m_mentions->completionCount() > 0) {
+            auto rect = m_edit->cursorRect();
+            rect.setWidth(220);
+            m_mentions->complete(rect);
+        } else m_mentions->popup()->hide();
+    } else m_mentions->popup()->hide();
     const bool has = !m_edit->toPlainText().trimmed().isEmpty();
     if (has != m_hasText) {
         m_hasText = has;
@@ -219,6 +247,20 @@ void Composer::onTextChanged()
         if (has)
             emit typing();
     }
+}
+
+void Composer::setConversation(const QString &id)
+{
+    m_conversationId = id;
+    m_mentions->popup()->hide();
+    static_cast<QStringListModel *>(m_mentions->model())->setStringList({});
+    if (id.isEmpty()) return;
+    Core::instance()->call("mention_candidates", {{"conversation_id",id}}, this, [this,id](const QJsonValue &v,const CoreError &e) {
+        if (!e.ok() || m_conversationId != id) return;
+        QStringList names;
+        for (const auto &person : v.toArray()) names << "@" + person.toObject().value("username").toString();
+        static_cast<QStringListModel *>(m_mentions->model())->setStringList(names);
+    });
 }
 
 void Composer::setBlocked(bool blocked)

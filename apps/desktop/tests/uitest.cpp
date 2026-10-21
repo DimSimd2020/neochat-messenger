@@ -209,6 +209,13 @@ private:
     void shot(const QString &name)
     {
         QTest::qWait(Theme::reducedMotion() ? 50 : 500);
+        if (name.startsWith("profile-067")) {
+            const auto sheets = sheetHost()->findChildren<Sheet *>(QString(), Qt::FindDirectChildrenOnly);
+            if (!sheets.isEmpty()) {
+                const auto cards = sheets.last()->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly);
+                if (!cards.isEmpty()) { cards.first()->grab().save(m_shots + "/" + name + ".png"); return; }
+            }
+        }
         m_window->grab().save(m_shots + "/" + name + ".png");
     }
     int messageCount(MessageView *v)
@@ -312,7 +319,6 @@ void UiTest::registerAccount()
     QTest::keyClicks(field("Пароль")->edit(), "correct horse battery");
     button("Создать аккаунт")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<ui::Toggle>([](ui::Toggle *tg) { return tg->text().startsWith("Я сохранил"); }), 15000);
-    shot("02-recovery-code");
     QAbstractButton *cont = button("Продолжить");
     QVERIFY(!cont->isEnabled());
     find<ui::Toggle>([](ui::Toggle *tg) { return tg->text().startsWith("Я сохранил"); })->setChecked(true);
@@ -802,11 +808,31 @@ void UiTest::archiveNavigation()
     auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
     QVERIFY(panel);
     auto *list = panel->findChild<QListView *>();
+    int chatRow = 0;
+    while (chatRow < list->model()->rowCount() && list->model()->index(chatRow, 0).data(ChatListModel::ObjectRole).toJsonObject().value("id").toString() != m_conv) ++chatRow;
+    QVERIFY(chatRow < list->model()->rowCount());
+    const QPoint pos = list->visualRect(list->model()->index(chatRow, 0)).center();
+    QContextMenuEvent menuEvent(QContextMenuEvent::Mouse, pos, list->viewport()->mapToGlobal(pos));
+    QApplication::sendEvent(list->viewport(), &menuEvent);
+    QTRY_VERIFY(dynamic_cast<PopupMenu *>(QApplication::activePopupWidget()));
+    auto *menu = dynamic_cast<PopupMenu *>(QApplication::activePopupWidget());
+    for (auto *action : menu->actions())
+        if (action->text() == QStringLiteral("В архив")) { action->trigger(); break; }
+    menu->close();
+    auto *toast = m_window->findChild<ui::Toast *>();
+    QTRY_VERIFY(toast->isVisible() && toast->accessibleName() == QStringLiteral("Чат в архиве"));
+    QTRY_VERIFY(panel->conversation(m_conv).value("in_archive").toBool());
+    auto *undo = toast->findChild<ui::Button *>();
+    QVERIFY(undo && undo->isVisible() && undo->text() == QStringLiteral("Отмена"));
+    shot("hotfix-archive-undo");
+    undo->click();
+    QTRY_VERIFY(!panel->conversation(m_conv).value("in_archive").toBool());
     Core::instance()->call("set_archived", {{"conversation_id", m_conv}, {"archived", true}});
     auto first = [&] { return list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject(); };
     QTRY_VERIFY(first().value("_archive").toBool());
     QVERIFY(!first().contains("titles"));
     QCOMPARE(first().value("count").toInt(), 1);
+    QCOMPARE(list->model()->index(0, 0).data(Qt::AccessibleTextRole).toString(), QStringLiteral("Архив"));
     shot("hotfix-archive-row");
     panel->setArchiveMode(true);
     QTest::qWait(120);
@@ -828,6 +854,52 @@ void UiTest::archiveNavigation()
     shot("hotfix-calls-page");
     button("Чаты")->click();
     QTRY_VERIFY(panel->isVisible());
+    DialogHost host;
+    host.host=sheetHost(); host.toast=[](const QString &) {}; host.openChat=[](const QString &) {};
+    m_aliceName = "alice_profile_" + QUuid::createUuid().toString(QUuid::Id128).left(18);
+    QString profileError;
+    m_alice->call("set_profile", {{"username",m_aliceName},{"display_name",QStringLiteral("Алиса")},{"bio",QStringLiteral("Музыка, путешествия и хорошие разговоры. Всегда рада новым идеям.")}}, &profileError);
+    QVERIFY(profileError.isEmpty());
+    Core::instance()->call("sync_now", {});
+    QTest::qWait(800);
+    dialogs::conversationInfo(host,m_conv);
+    QTRY_VERIFY(button(QStringLiteral("Конфиденциальность")));
+    auto *nick = sheetHost()->findChild<QAbstractButton *>("profileUsername");
+    auto *qr = sheetHost()->findChild<QAbstractButton *>("profileQr");
+    QVERIFY(nick && qr);
+    QCOMPARE(nick->text(), "@" + m_aliceName);
+    nick->click();
+    QCOMPARE(QApplication::clipboard()->text(), "@" + m_aliceName);
+    shot("profile-067");
+    m_window->resize(480,700);
+    QTest::qWait(400);
+    const auto nickRect = QRect(nick->mapTo(sheetHost(),QPoint()),nick->size());
+    const auto qrRect = QRect(qr->mapTo(sheetHost(),QPoint()),qr->size());
+    QVERIFY(!nickRect.intersects(qrRect));
+    QVERIFY(sheetHost()->rect().contains(nickRect) && sheetHost()->rect().contains(qrRect));
+    shot("profile-067-narrow");
+    qr->click();
+    QTRY_VERIFY(button(QStringLiteral("Скопировать ссылку")));
+    QTest::qWait(400);
+    button(QStringLiteral("Скопировать ссылку"))->click();
+    QVERIFY(QApplication::clipboard()->text().contains(m_aliceName));
+    shot("profile-067-qr");
+    const auto sheets = sheetHost()->findChildren<Sheet *>(QString(),Qt::FindDirectChildrenOnly);
+    QVERIFY(sheets.size() >= 2);
+    sheets.last()->close();
+    QTest::qWait(400);
+    m_window->resize(1360,850);
+    button(QStringLiteral("Конфиденциальность"))->click();
+    QTRY_VERIFY(button(QStringLiteral("Отметить как сверенный")));
+    shot("profile-067-privacy");
+    Sheet::closeAll(sheetHost());
+    QTRY_VERIFY(!Sheet::anyOpen(sheetHost()));
+    QTest::qWait(400);
+    dialogs::profile(host);
+    QTRY_VERIFY(button(QStringLiteral("Изменить профиль")));
+    shot("profile-067-own");
+    Sheet::closeAll(sheetHost());
+    QTRY_VERIFY(!Sheet::anyOpen(sheetHost()));
 }
 
 // Settings sub-pages with a back arrow, the 5x7 reaction grid, a group sheet that scrolls

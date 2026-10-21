@@ -1,6 +1,4 @@
 import UIKit
-import PhotosUI
-import UniformTypeIdentifiers
 
 /// Navigation with a guarded swipe-back: the gesture may only start on a real
 /// stacked screen and never while another transition is still running.
@@ -29,8 +27,10 @@ final class ChatNavController: UINavigationController, UIGestureRecognizerDelega
 }
 
 /// Chats, contacts and profile behind a floating glass tab bar, as on Android.
-final class MainTabController: UITabBarController {
+final class MainTabController: UITabBarController, UITabBarControllerDelegate, UIGestureRecognizerDelegate {
     private let pill = UIView()
+    private var tabHistory: [Int] = []
+    private var activeTab = 0
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -60,6 +60,9 @@ final class MainTabController: UITabBarController {
         let contacts = nav(ContactsViewController(), "Контакты", "person.2")
         let profile = nav(ProfileViewController(), "Профиль", "person.crop.circle")
         viewControllers = [chats, contacts, profile]
+        delegate = self
+        let back = UIScreenEdgePanGestureRecognizer(target:self,action:#selector(rootBack(_:)))
+        back.edges = .left; back.delegate = self; view.addGestureRecognizer(back)
         let a = UITabBarAppearance()
         a.configureWithTransparentBackground()
         tabBar.standardAppearance = a
@@ -72,11 +75,31 @@ final class MainTabController: UITabBarController {
     }
 
     func open(_ conversationId: String) {
+        if selectedIndex != 0 { tabHistory.append(selectedIndex) }
         selectedIndex = 0
+        activeTab = 0
         guard let nav = viewControllers?.first as? UINavigationController else { return }
         if (nav.topViewController as? ChatViewController)?.conversationId == conversationId { return }
-        nav.popToRootViewController(animated: false)
-        nav.pushViewController(ChatViewController(conversationId: conversationId), animated: !Theme.reducedMotion)
+        Core.shared.call("get_conversation",["conversation_id":conversationId]) { r in
+            guard case .success(let v) = r, let c = v as? JSON, let root = nav.viewControllers.first else { return }
+            var stack: [UIViewController] = [root]
+            if c.bool("in_archive") { stack.append(ArchiveViewController()) }
+            nav.setViewControllers(stack,animated:false)
+            nav.pushViewController(ChatViewController(conversationId:conversationId),animated:!Theme.reducedMotion)
+        }
+    }
+
+    func tabBarController(_ t: UITabBarController, didSelect vc: UIViewController) {
+        if selectedIndex != activeTab { tabHistory.append(activeTab); activeTab = selectedIndex }
+    }
+    func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        guard let nav = selectedViewController as? UINavigationController else { return false }
+        return nav.viewControllers.count == 1 && nav.transitionCoordinator == nil && (!tabHistory.isEmpty || selectedIndex != 0)
+    }
+    @objc private func rootBack(_ g: UIScreenEdgePanGestureRecognizer) {
+        guard g.state == .ended, g.translation(in:view).x > 64 || g.velocity(in:view).x > 400 else { return }
+        let index = tabHistory.popLast() ?? 0
+        UIView.transition(with:view,duration:Theme.ms(0.22),options:[.transitionCrossDissolve,.allowUserInteraction]) { self.selectedIndex = index; self.activeTab = index }
     }
 
     private func nav(_ vc: UIViewController, _ title: String, _ icon: String) -> UINavigationController {
@@ -168,9 +191,9 @@ final class PaddedBadge: UILabel {
         return CGSize(width: max(20, s.width + 12), height: 20)
     }
 
-    func set(_ n: Int) {
+    func set(_ n: Int, mentions: Int = 0) {
         isHidden = n == 0
-        text = n > 99 ? "99+" : "\(n)"
+        text = (mentions > 0 ? "@ " : "") + (n > 99 ? "99+" : "\(n)")
     }
 }
 
@@ -307,11 +330,19 @@ class ChatListViewController: ListViewController {
     }
 
     private func run(_ chats: [JSON], _ method: String, _ key: String, _ value: Bool) {
+        var archived: [String] = []
         tableView.isUserInteractionEnabled = false
         navigationItem.rightBarButtonItems?.forEach { $0.isEnabled = false }
         toolbarItems?.forEach { $0.isEnabled = false }
         func next(_ i: Int) {
-            if i == chats.count { endSelection(); return }
+            if i == chats.count {
+                endSelection()
+                if method == "set_archived" {
+                    replyHaptic()
+                    if value { archiveUndo(self, ids: archived) }
+                }
+                return
+            }
             let id = chats[i].str("id")
             Core.shared.call(method, ["conversation_id": id, key: value]) { [weak self] r in
                 guard let self else { return }
@@ -323,6 +354,7 @@ class ChatListViewController: ListViewController {
                     return
                 }
                 self.selectedChats.removeValue(forKey: id)
+                if method == "set_archived" && value && !chats[i].bool("in_archive") { archived.append(id) }
                 next(i + 1)
             }
         }
@@ -382,11 +414,9 @@ class ChatListViewController: ListViewController {
 
 /// The "Архив" entry above the chat list, as tall as a chat row. Names of archived chats stay out of sight.
 final class ArchiveEntryView: UIControl {
-    private let icon = UIImageView(image: UIImage(systemName: "archivebox.fill"))
+    private let icon = ArchiveIconView()
     private let disc = UIView()
     private let title = label("Архив", 17, .semibold)
-    private let subtitle = label("", 15, color: Theme.muted)
-    private let badge = PaddedBadge()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -396,12 +426,8 @@ final class ArchiveEntryView: UIControl {
         accessibilityTraits = .button
         disc.backgroundColor = Theme.accent.withAlphaComponent(0.16)
         disc.layer.cornerRadius = 26
-        icon.tintColor = Theme.accent
-        icon.contentMode = .scaleAspectFit
-        let text = UIStackView(arrangedSubviews: [title, subtitle])
-        text.axis = .vertical
-        text.spacing = 4
-        for v in [disc, icon, text, badge] as [UIView] {
+        accessibilityLabel = "Архив"
+        for v in [disc, icon, title] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             v.isUserInteractionEnabled = false
             addSubview(v)
@@ -415,11 +441,9 @@ final class ArchiveEntryView: UIControl {
             icon.centerYAnchor.constraint(equalTo: disc.centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 26),
             icon.heightAnchor.constraint(equalToConstant: 26),
-            text.leadingAnchor.constraint(equalTo: disc.trailingAnchor, constant: 14),
-            text.centerYAnchor.constraint(equalTo: centerYAnchor),
-            text.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -8),
-            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            title.leadingAnchor.constraint(equalTo: disc.trailingAnchor, constant: 14),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
         ])
     }
 
@@ -429,11 +453,7 @@ final class ArchiveEntryView: UIControl {
         didSet { alpha = isHighlighted ? 0.7 : 1 }
     }
 
-    func set(count: Int, unread: Int) {
-        subtitle.text = "Чатов: \(count)"
-        badge.set(unread)
-        accessibilityLabel = "Архив, чатов: \(count)" + (unread > 0 ? ", непрочитанных: \(unread)" : "")
-    }
+    func setPullProgress(_ progress: CGFloat) { icon.progress = progress }
 }
 
 final class ChatsViewController: ChatListViewController {
@@ -442,6 +462,7 @@ final class ChatsViewController: ChatListViewController {
     private var archived: [JSON] = []
     private var presenceTimer: Timer?
     private var archiveShown = false
+    private var archivePullArmed = false
     private let archiveButton = ArchiveEntryView()
     private var offsetObserver: NSKeyValueObservation?
     private var logoItem: UIBarButtonItem?
@@ -471,8 +492,7 @@ final class ChatsViewController: ChatListViewController {
         tableView.alwaysBounceVertical = true
         // The entry belongs to the very top of the list: once the first chat has moved up past the bar, it goes away.
         offsetObserver = tableView.observe(\.contentOffset, options: []) { [weak self] tv, _ in
-            guard let self, self.archiveShown, !self.isEditing else { return }
-            if tv.contentOffset.y > -(tv.adjustedContentInset.top - tv.contentInset.top) + 24 { self.setArchiveShown(false) }
+            self?.updateArchivePull()
         }
         let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(hideArchiveBySwipe(_:)))
         back.edges = .left
@@ -518,12 +538,26 @@ final class ChatsViewController: ChatListViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        archiveButton.frame = CGRect(x: 12, y: -archiveHeight, width: tableView.bounds.width - 24, height: 72)
-        archiveButton.isHidden = archiveHeight == 0
+        archiveButton.frame = CGRect(x: 12, y: -80, width: tableView.bounds.width - 24, height: 72)
+        updateArchivePull()
     }
 
     override func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if !isEditing && scrollView.contentOffset.y < -scrollView.adjustedContentInset.top - 64 { setArchiveShown(true) }
+        if archivePullArmed { setArchiveShown(true) }
+        archivePullArmed = false
+    }
+
+    private func updateArchivePull() {
+        let available = !isEditing && query.isEmpty && filter == 0 && !archived.isEmpty
+        let base = tableView.adjustedContentInset.top - tableView.contentInset.top
+        let exposed = max(0, -tableView.contentOffset.y - base)
+        archiveButton.isHidden = !available || exposed <= 0
+        archiveButton.setPullProgress(exposed / 80)
+        if available && tableView.isDragging && !archiveShown {
+            if !archivePullArmed && exposed >= 68 { archivePullArmed = true; replyHaptic() }
+            else if exposed < 56 { archivePullArmed = false }
+        }
+        if archiveShown && tableView.contentOffset.y > -base + 24 { setArchiveShown(false) }
     }
 
     private func setArchiveShown(_ on: Bool) {
@@ -531,7 +565,7 @@ final class ChatsViewController: ChatListViewController {
         archiveShown = on && query.isEmpty && filter == 0 && !archived.isEmpty
         let height = archiveHeight
         guard oldHeight != height else { return }
-        archiveButton.isHidden = height == 0
+        if height > 0 { archiveButton.isHidden = false }
         // Where the first chat rests under the bar without the entry.
         let base = tableView.adjustedContentInset.top - oldHeight
         let scrolledAway = height == 0 && tableView.contentOffset.y > -base
@@ -584,7 +618,6 @@ final class ChatsViewController: ChatListViewController {
     }
 
     private func applyFilter() {
-        archiveButton.set(count: archived.count, unread: archived.reduce(0) { $0 + $1.int("unread") })
         let rows = all.filter { filter == 0 || (filter == 1 ? $0.str("kind") == "direct" : ["group", "channel"].contains($0.str("kind"))) }
         if !query.isEmpty || filter != 0 || archived.isEmpty { setArchiveShown(false) }
         apply(rows, empty: all.isEmpty && query.isEmpty ? "Чатов пока нет. Начните переписку с человеком по его имени пользователя." : "Ничего не нашли")
@@ -695,146 +728,4 @@ final class ContactsViewController: ListViewController {
     }
 }
 
-final class ProfileViewController: UIViewController, PHPickerViewControllerDelegate {
-    private let avatar = AvatarView(size: 88)
-    private let name = label("", 24, .bold)
-    private let sub = label("", 15, color: Theme.muted)
-    private let bio = label("", 15)
-    private var hasAvatar = false
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .clear
-        avatar.isUserInteractionEnabled = true
-        avatar.isAccessibilityElement = true
-        avatar.accessibilityLabel = "Сменить фото профиля"
-        avatar.accessibilityTraits = .button
-        avatar.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(changeAvatar)))
-        name.textAlignment = .center
-        sub.textAlignment = .center
-        bio.textAlignment = .center
-        bio.isHidden = true
-        let card = UIStackView(arrangedSubviews: [
-            row("camera", "Сменить фото профиля") { [weak self] in self?.changeAvatar() },
-            row("pencil", "Имя и описание") { [weak self] in self?.presentSheet(EditProfileViewController()) },
-            row("qrcode", "Мой QR-код") { [weak self] in self?.presentSheet(MyQrViewController()) },
-            row("laptopcomputer.and.iphone", "Устройства") { [weak self] in self?.presentSheet(DevicesViewController()) },
-            row("gearshape", "Настройки") { [weak self] in self?.presentSheet(SettingsViewController()) },
-        ])
-        card.axis = .vertical
-        card.glass(25)
-        card.isLayoutMarginsRelativeArrangement = true
-        card.layoutMargins = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
-        let stack = UIStackView(arrangedSubviews: [avatar, name, sub, bio, card])
-        stack.axis = .vertical
-        stack.alignment = .center
-        stack.spacing = 10
-        stack.setCustomSpacing(26, after: bio)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        let scroll = UIScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(scroll)
-        scroll.addSubview(stack)
-        NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
-            stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
-            card.widthAnchor.constraint(equalTo: stack.widthAnchor),
-        ])
-        NotificationCenter.default.addObserver(forName: .prefsChanged, object: nil, queue: .main) { [weak self] _ in self?.reload() }
-        reload()
-    }
-
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        reload()
-    }
-
-    private func reload() {
-        Core.shared.call("status") { [weak self] r in
-            guard let self, case .success(let v) = r, let s = v as? JSON else { return }
-            let display = s.str("display_name").isEmpty ? s.str("username") : s.str("display_name")
-            self.avatar.set(display, seed: s.str("user_id"), avatar: s.str("avatar_path"))
-            self.hasAvatar = !s.str("avatar_path").isEmpty
-            self.name.text = display
-            self.sub.text = "@" + s.str("username") + (s.str("number").isEmpty ? "" : " · ID " + s.str("number"))
-            self.bio.text = s.str("bio")
-            self.bio.isHidden = s.str("bio").isEmpty
-        }
-    }
-
-    private func row(_ icon: String, _ text: String, _ action: @escaping () -> Void) -> UIView {
-        var cfg = UIButton.Configuration.plain()
-        cfg.image = UIImage(systemName: icon)
-        cfg.imagePadding = 16
-        cfg.title = text
-        cfg.baseForegroundColor = Theme.text
-        cfg.contentInsets = NSDirectionalEdgeInsets(top: 16, leading: 14, bottom: 16, trailing: 14)
-        let b = UIButton(configuration: cfg, primaryAction: UIAction { _ in action() })
-        b.contentHorizontalAlignment = .leading
-        return b
-    }
-
-    @objc private func changeAvatar() {
-        let menu = UIAlertController(title: "Фото профиля", message: nil, preferredStyle: .actionSheet)
-        menu.addAction(UIAlertAction(title: "Выбрать фото", style: .default) { [weak self] _ in
-            var cfg = PHPickerConfiguration()
-            cfg.filter = .images
-            cfg.selectionLimit = 1
-            let picker = PHPickerViewController(configuration: cfg)
-            picker.delegate = self
-            self?.present(picker, animated: !Theme.reducedMotion)
-        })
-        if hasAvatar { menu.addAction(UIAlertAction(title: "Удалить фото", style: .destructive) { [weak self] _ in self?.saveAvatar("") }) }
-        menu.addAction(UIAlertAction(title: "Отмена", style: .cancel))
-        menu.popoverPresentationController?.sourceView = avatar
-        present(menu, animated: !Theme.reducedMotion)
-    }
-
-    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-        picker.dismiss(animated: !Theme.reducedMotion)
-        guard let provider = results.first?.itemProvider else { return }
-        provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] url, _ in
-            guard let url, let image = Photos.decode(url, maxSide: 512) else {
-                DispatchQueue.main.async { self?.toast("Не удалось прочитать фото") }
-                return
-            }
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            format.opaque = true
-            let square = UIGraphicsImageRenderer(size: CGSize(width: 256, height: 256), format: format).image { ctx in
-                UIColor.white.setFill()
-                ctx.fill(CGRect(x: 0, y: 0, width: 256, height: 256))
-                let scale = 256 / min(image.size.width, image.size.height)
-                let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-                image.draw(in: CGRect(x: (256 - size.width) / 2, y: (256 - size.height) / 2, width: size.width, height: size.height))
-            }
-            guard let data = square.jpegData(compressionQuality: 0.75), data.count <= 49152 else {
-                DispatchQueue.main.async { self?.toast("Не удалось подготовить фото") }
-                return
-            }
-            let file = FileManager.default.temporaryDirectory.appendingPathComponent("avatar-\(UUID().uuidString).jpg")
-            do { try data.write(to: file, options: .atomic) }
-            catch { DispatchQueue.main.async { self?.toast("Не удалось подготовить фото") }; return }
-            DispatchQueue.main.async {
-                guard let self else { try? FileManager.default.removeItem(at: file); return }
-                self.saveAvatar(file.path)
-            }
-        }
-    }
-
-    private func saveAvatar(_ path: String) {
-        Core.shared.call("set_avatar", ["path": path]) { [weak self] r in
-            if !path.isEmpty { try? FileManager.default.removeItem(atPath: path) }
-            switch r {
-            case .failure(let e): self?.toast(e.message)
-            case .success: self?.reload()
-            }
-        }
-    }
-}
+final class ProfileViewController: PersonProfileViewController {}

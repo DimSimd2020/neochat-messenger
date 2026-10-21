@@ -270,8 +270,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nickname := strings.TrimPrefix(strings.TrimSpace(req.Username), "@")
-	if !nicknameRe.MatchString(nickname) {
-		s.fail(w, r, errf(400, "bad_username", "Имя пользователя: 3–32 символа, латинские буквы, цифры и _"))
+	if !nicknameRe.MatchString(nickname) || strings.EqualFold(nickname, "everyone") || strings.EqualFold(nickname, "here") {
+		s.fail(w, r, errf(400, "bad_username", "Имя пользователя: 3–32 латинские буквы, цифры или подчёркивание; everyone и here заняты"))
 		return
 	}
 	req.Username = strings.ToLower(nickname)
@@ -555,7 +555,7 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(r.Context(), `DELETE FROM account_state WHERE user_id=$1`, userID); err != nil {
 			return err
 		}
-		_, err = tx.Exec(r.Context(), `UPDATE users SET password_hash=$2, account_identity_key=$3, identity_epoch=$4, roster_revision=$5, roster_blob=$6, roster_sig=$7, recovery_hash=$8, key_backup=$9 WHERE id=$1`,
+		_, err = tx.Exec(r.Context(), `UPDATE users SET password_salt=username, password_hash=$2, account_identity_key=$3, identity_epoch=$4, roster_revision=$5, roster_blob=$6, roster_sig=$7, recovery_hash=$8, key_backup=$9 WHERE id=$1`,
 			userID, pwHash, req.AccountIdentityKey, epoch+1, rev, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup)
 		if err != nil {
 			return err

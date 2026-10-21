@@ -104,6 +104,7 @@ func richText(_ m: JSON, size: CGFloat, color: UIColor) -> NSAttributedString {
         if s.bool("strike") { a[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
         if pre || s.bool("code") { a[.backgroundColor] = UIColor.gray.withAlphaComponent(0.2) }
         if s["link"] is String { a[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+        if s["mention"] is String { a[.foregroundColor] = Theme.accent; a[.font] = Theme.font(size,.semibold) }
         out.append(NSAttributedString(string: s.str("text"), attributes: a))
         if pre { out.append(NSAttributedString(string: "\n", attributes: plain)) }
     }
@@ -223,6 +224,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private var peerOnline = false
     private var presenceTimer: Timer?
     private var replyTo: JSON?
+    private var replyAnimation: UIViewPropertyAnimator?
+    private let mentionRow = UIStackView()
+    private var mentionGeneration = 0
     // Edit mode: the field holds the message text; the unsent draft waits in savedDraft.
     private var editTarget: JSON?
     private var savedDraft = ""
@@ -272,7 +276,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         let verify = LinkButton("Сверить код")
         verify.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            self.presentSheet(ConversationInfoViewController(conversationId: self.conversationId))
+            self.openProfile()
         }, for: .touchUpInside)
         notice.addArrangedSubview(noticeText)
         notice.addArrangedSubview(verify)
@@ -293,6 +297,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         // Glass capsule header over a clear bar, like the Android chat header.
         let cap = UIView()
         cap.glass(21)
+        cap.addGestureRecognizer(TapGesture { [weak self] in self?.openProfile() })
+        cap.accessibilityTraits = .button
         titleBox.translatesAutoresizingMaskIntoConstraints = false
         cap.addSubview(titleBox)
         NSLayoutConstraint.activate([
@@ -316,7 +322,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         NSLayoutConstraint.activate([info.widthAnchor.constraint(equalToConstant: 40), info.heightAnchor.constraint(equalToConstant: 40)])
         info.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            self.presentSheet(ConversationInfoViewController(conversationId: self.conversationId))
+            self.openProfile()
         }, for: .touchUpInside)
         navigationItem.rightBarButtonItem = UIBarButtonItem(customView: info)
         navigationItem.rightBarButtonItems = [navigationItem.rightBarButtonItem!, UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: UIMenu(children: [
@@ -549,7 +555,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         replyBar.addArrangedSubview(col)
         replyBar.addArrangedSubview(cancel)
         replyBar.isHidden = true
-        let box = UIStackView(arrangedSubviews: [replyBar, row])
+        mentionRow.spacing = 6
+        mentionRow.axis = .vertical
+        mentionRow.isHidden = true
+        let box = UIStackView(arrangedSubviews: [mentionRow, replyBar, row])
         box.axis = .vertical
         box.translatesAutoresizingMaskIntoConstraints = false
         composer.addSubview(box)
@@ -560,6 +569,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     func textViewDidChange(_ tv: UITextView) {
+        updateMentions()
         placeholder.isHidden = !tv.text.isEmpty
         // The core sends "печатает" at most every 4 s.
         if tv.isFirstResponder && !tv.text.isEmpty && !blocked { Core.shared.call("send_typing", ["conversation_id": conversationId]) }
@@ -618,6 +628,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     private func setReply(_ m: JSON?) {
+        replyAnimation?.stopAnimation(true)
+        replyAnimation = nil
         leaveEdit()
         replyTo = m
         if let m {
@@ -627,9 +639,44 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             input.becomeFirstResponder()
         }
         replyBar.accessibilityLabel = m == nil ? nil : (replyTitle.text ?? "") + ": " + (replyText.text ?? "")
-        Theme.animate(0.18) {
-            self.replyBar.isHidden = m == nil
-            self.view.layoutIfNeeded()
+        // Commit the hidden state outside the animation closure. A quick Send
+        // can interrupt the opening animation of this arranged subview.
+        replyBar.isHidden = m == nil
+        if m == nil { replyTitle.text = nil; replyText.text = nil }
+        let a = UIViewPropertyAnimator(duration:Theme.ms(0.18),timingParameters:Theme.curve)
+        a.addAnimations { self.view.layoutIfNeeded() }
+        replyAnimation = a
+        a.startAnimation()
+    }
+
+    private func updateMentions() {
+        mentionGeneration += 1
+        let gen = mentionGeneration
+        mentionRow.isHidden = true
+        let text = input.text ?? ""
+        let cursor = min(input.selectedRange.location,(text as NSString).length)
+        let prefix = (text as NSString).substring(to:cursor)
+        guard !blocked, let range = prefix.range(of:"(?:^|\\s)@[A-Za-z0-9_]*$",options:.regularExpression), let at = prefix[range].firstIndex(of:"@") else { return }
+        let query = String(prefix[prefix.index(after:at)...])
+        let start = (String(prefix[..<at]) as NSString).length
+        Core.shared.call("mention_candidates",["conversation_id":conversationId,"query":query]) { [weak self] r in
+            guard let self, gen == self.mentionGeneration, case .success(let v) = r else { return }
+            self.mentionRow.arrangedSubviews.forEach { self.mentionRow.removeArrangedSubview($0); $0.removeFromSuperview() }
+            let candidates = Array((v as? [JSON] ?? []).prefix(3))
+            for c in candidates {
+                let b = UIButton(type:.system)
+                b.setTitle("@"+c.str("username")+"  "+c.str("display_name"),for:.normal)
+                b.contentHorizontalAlignment = .leading; b.tintColor = Theme.accent
+                b.contentEdgeInsets = UIEdgeInsets(top:12,left:16,bottom:12,right:16)
+                b.addAction(UIAction { [weak self] _ in
+                    guard let self, self.input.selectedRange.location == cursor else { return }
+                    self.input.text = (self.input.text as NSString).replacingCharacters(in:NSRange(location:start,length:cursor-start),with:"@"+c.str("username")+" ")
+                    self.input.selectedRange = NSRange(location:start+(c.str("username") as NSString).length+2,length:0)
+                    self.textViewDidChange(self.input)
+                },for:.touchUpInside)
+                self.mentionRow.addArrangedSubview(b)
+            }
+            self.mentionRow.isHidden = candidates.isEmpty
         }
     }
 
@@ -837,6 +884,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 return
             }
             self.conv = c
+            if let nav = self.navigationController, nav.topViewController === self, nav.transitionCoordinator == nil,
+               let root = nav.viewControllers.first, root is ChatsViewController {
+                let returnsToArchive = nav.viewControllers.dropLast().last is ArchiveViewController
+                if returnsToArchive != c.bool("in_archive") {
+                    var path:[UIViewController] = [root]
+                    if c.bool("in_archive") { path.append(ArchiveViewController()) }
+                    path.append(self)
+                    nav.setViewControllers(path,animated:false)
+                }
+            }
             let members = c.arr("members")
             let channel = c.str("kind") == "channel"
             let system = c.str("kind") == "system"
@@ -880,6 +937,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         if callable == shown { return }
         if callable { items.append(callItem) } else { items.removeAll { $0 === callItem } }
         navigationItem.setRightBarButtonItems(items, animated: false)
+    }
+
+    private func openProfile() {
+        if conv.str("kind") == "direct" {
+            navigationController?.pushViewController(PersonProfileViewController(userId:conv.str("peer_user_id")),animated:!Theme.reducedMotion)
+        } else { presentSheet(ConversationInfoViewController(conversationId:conversationId)) }
     }
 
     private func startCall(video: Bool) {
@@ -1056,6 +1119,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             c.bind(m, group: group, first: first, last: last)
             c.onRetry = { [weak self] in self?.retry(m) }
             c.onPhoto = { [weak self] in self?.openPhoto(m) }
+            c.onProfile = { [weak self] in self?.navigationController?.pushViewController(PersonProfileViewController(userId:m.str("sender_user_id")),animated:!Theme.reducedMotion) }
             c.onVote = { [weak self] i in self?.vote(m, i) }
             c.onTap = { [weak self, weak c] in
                 guard let self, let c else { return }
@@ -1293,6 +1357,7 @@ final class BubbleCell: UITableViewCell {
     /// Own messages are answered with a swipe to the right, the others' with a swipe to the left.
     private(set) var swipesRight = false
     var onTap: (() -> Void)?
+    var onProfile: (() -> Void)?
     var onReact: ((String) -> Void)?
     /// Swipe anywhere on the row, the empty part included: to the left for others' messages, to the right for own.
     var onSwipeReply: (() -> Void)?
@@ -1304,6 +1369,10 @@ final class BubbleCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = .clear
         selectionStyle = .none
+        avatar.isUserInteractionEnabled = true
+        avatar.addGestureRecognizer(TapGesture { [weak self] in self?.onProfile?() })
+        sender.isUserInteractionEnabled = true
+        sender.addGestureRecognizer(TapGesture { [weak self] in self?.onProfile?() })
         bubble.layer.cornerRadius = 23
         bubble.layer.cornerCurve = .continuous
         let icon = UIImageView(image: UIImage(systemName: "doc.fill"))
@@ -1357,6 +1426,8 @@ final class BubbleCell: UITableViewCell {
         inner.setCustomSpacing(6, after: reactRow)
         bubbleTap.addTarget(self, action: #selector(tapped))
         bubbleTapDelegate.photo = photo
+        bubbleTapDelegate.avatar = avatar
+        bubbleTapDelegate.sender = sender
         bubbleTap.delegate = bubbleTapDelegate
         contentView.addGestureRecognizer(bubbleTap)
         // A single tap waits for a possible second one only where a quick reaction is allowed.
@@ -1440,7 +1511,7 @@ final class BubbleCell: UITableViewCell {
             let armed = raw >= threshold
             if armed != replyArmed {
                 replyArmed = armed
-                if armed { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+                if armed { replyHaptic() }
             }
         case .ended, .cancelled, .failed:
             let fire = g.state == .ended && replyArmed
@@ -1685,11 +1756,13 @@ private final class ReplySwipeDelegate: NSObject, UIGestureRecognizerDelegate {
 /// Photos, poll answers and reaction chips handle their own taps.
 private final class BubbleTapDelegate: NSObject, UIGestureRecognizerDelegate {
     weak var photo: UIView?
+    weak var avatar: UIView?
+    weak var sender: UIView?
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         var v = touch.view
         while let x = v, x !== g.view {
-            if x is UIControl || x === photo { return false }
+            if x is UIControl || x === photo || x === avatar || x === sender { return false }
             v = x.superview
         }
         return true
@@ -1799,7 +1872,10 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
         scroll.addSubview(imageView)
         view.addSubview(scroll)
         view.addGestureRecognizer(TapGesture { [weak self] in self?.onClose?() })
-        Core.shared.call("download_file", ["message_id": message.str("id")]) { [weak self] r in
+        let profile = !message.str("profile_user_id").isEmpty
+        let method = profile ? "profile_photo" : "download_file"
+        let params: JSON = profile ? ["user_id":message.str("profile_user_id"),"photo_id":message.str("id")] : ["message_id":message.str("id")]
+        Core.shared.call(method, params) { [weak self] r in
             guard case .success(let v) = r, let path = (v as? JSON)?.str("path") else { return }
             DispatchQueue.global(qos: .userInitiated).async {
                 let img = Photos.decode(URL(fileURLWithPath: path), maxSide: 2732)
@@ -1813,6 +1889,7 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
 
 /// Full-screen photos of a chat in one pager: swipe left and right, cross-fades unless motion is reduced.
 final class PhotoGalleryController: UIPageViewController, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
+    var edit: ((String) -> Void)?
     private let photos: [JSON]
     private var current: Int
     private let counter = UILabel()
@@ -1849,6 +1926,18 @@ final class PhotoGalleryController: UIPageViewController, UIPageViewControllerDa
             counter.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
         ])
         view.accessibilityViewIsModal = true
+        let back = UIButton(type:.system)
+        back.setImage(UIImage(systemName:"chevron.left"),for:.normal)
+        back.tintColor = .white; back.accessibilityLabel = "Назад"
+        back.addAction(UIAction { [weak self] _ in self?.dismiss(animated:!Theme.reducedMotion) },for:.touchUpInside)
+        back.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(back)
+        NSLayoutConstraint.activate([back.leadingAnchor.constraint(equalTo:view.safeAreaLayoutGuide.leadingAnchor,constant:12),back.topAnchor.constraint(equalTo:view.safeAreaLayoutGuide.topAnchor),back.widthAnchor.constraint(equalToConstant:44),back.heightAnchor.constraint(equalToConstant:44)])
+        if edit != nil {
+            let pencil = UIButton(type:.system); pencil.setImage(UIImage(systemName:"pencil"),for:.normal); pencil.tintColor = .white; pencil.accessibilityLabel = "Изменить фото профиля"
+            pencil.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(pencil)
+            pencil.addAction(UIAction { [weak self] _ in guard let self else { return }; self.edit?(self.photos[self.current].str("id")) },for:.touchUpInside)
+            NSLayoutConstraint.activate([pencil.trailingAnchor.constraint(equalTo:view.safeAreaLayoutGuide.trailingAnchor,constant:-12),pencil.topAnchor.constraint(equalTo:view.safeAreaLayoutGuide.topAnchor),pencil.widthAnchor.constraint(equalToConstant:44),pencil.heightAnchor.constraint(equalToConstant:44)])
+        }
         updateCounter()
     }
 

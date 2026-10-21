@@ -183,6 +183,7 @@ QTextDocument *textDoc(const QJsonObject &m)
             f.setFontItalic(true);
         if (s.value("strike").toBool())
             f.setFontStrikeOut(true);
+        if (s.contains("mention")) { f.setForeground(Theme::p().accent); f.setFontWeight(QFont::DemiBold); }
         if (s.contains("link")) {
             f.setAnchor(true);
             f.setAnchorHref(s.value("link").toString());
@@ -1382,7 +1383,7 @@ void MessageView::mouseMoveEvent(QMouseEvent *e)
     MessageLayout L;
     const QJsonObject m = messageAt(e->pos(), &L);
     bool hand = !m.isEmpty() && (L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) ||
-                                 L.bubble.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty());
+                                 L.bubble.contains(e->pos()) || L.avatar.contains(e->pos()) || L.name.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty());
     if (!m.isEmpty() && !m.value("poll").toObject().value("closed").toBool())
         for (const QRectF &o : L.options)
             hand = hand || o.contains(e->pos());
@@ -1417,7 +1418,9 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
         for (int i = 0; i < L.reacts.size(); ++i)
             if (L.reacts[i].contains(e->pos()))
                 chip = i;
-        if (L.download.contains(e->pos()))
+        if (L.avatar.contains(e->pos()) || L.name.contains(e->pos()))
+            emit profileRequested(m.value("sender_user_id").toString());
+        else if (L.download.contains(e->pos()))
             openFile(m);
         else if (L.retry.contains(e->pos()))
             retry(m);

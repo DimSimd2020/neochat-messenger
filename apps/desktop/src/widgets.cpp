@@ -4,6 +4,7 @@
 
 #include <QAccessible>
 #include <QHash>
+#include <QGraphicsOpacityEffect>
 #include <QKeyEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -865,27 +866,48 @@ void Toggle::paintEvent(QPaintEvent *)
 Toast::Toast(QWidget *host) : QWidget(host)
 {
     setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_action = new Button({}, Button::Flat, this);
+    m_action->hide();
+    auto *fade = new QGraphicsOpacityEffect(this);
+    setGraphicsEffect(fade);
     m_anim.setStartValue(0.0);
-    connect(&m_anim, &QVariantAnimation::valueChanged, this, qOverload<>(&QWidget::update));
+    connect(&m_anim, &QVariantAnimation::valueChanged, this, [this, fade](const QVariant &v) {
+        fade->setOpacity(v.toReal());
+        place();
+        update();
+    });
     connect(&m_anim, &QVariantAnimation::finished, this, [this] {
         if (m_anim.endValue().toReal() == 0)
             hide();
     });
     m_timer = new QTimer(this);
     m_timer->setSingleShot(true);
-    connect(m_timer, &QTimer::timeout, this, [this] { animate(m_anim, 0, Theme::ms(160)); });
+    connect(m_timer, &QTimer::timeout, this, [this] { m_action->setEnabled(false); animate(m_anim, 0, Theme::ms(160)); });
+    connect(m_action, &QAbstractButton::clicked, this, [this] {
+        auto run = std::move(m_callback);
+        m_callback = {};
+        m_timer->stop();
+        m_action->setEnabled(false);
+        animate(m_anim, 0, Theme::ms(160));
+        if (run) run();
+    });
     host->installEventFilter(this);
     hide();
 }
 
-void Toast::show(const QString &text)
+void Toast::show(const QString &text, const QString &actionTitle, std::function<void()> action)
 {
     m_text = text;
+    m_callback = std::move(action);
+    m_action->setText(actionTitle);
+    m_action->setEnabled(bool(m_callback));
+    m_action->setVisible(bool(m_callback));
+    setAttribute(Qt::WA_TransparentForMouseEvents, !m_callback);
     place();
     QWidget::show();
     raise();
     animate(m_anim, 1, Theme::ms(180));
-    m_timer->start(3200);
+    m_timer->start(m_callback ? 5000 : 3200);
     QAccessibleEvent ev(this, QAccessible::Alert);
     setAccessibleName(text);
     QAccessible::updateAccessibility(&ev);
@@ -894,8 +916,11 @@ void Toast::show(const QString &text)
 void Toast::place()
 {
     const QFont f = Theme::instance()->font(14);
-    const int w = qMin(parentWidget()->width() - 32, QFontMetrics(f).horizontalAdvance(m_text) + 40);
-    setGeometry((parentWidget()->width() - w) / 2, parentWidget()->height() - 110, w, 44);
+    const int actionW = !m_action->isHidden() ? m_action->sizeHint().width() : 0;
+    const int w = qMin(parentWidget()->width() - 32, QFontMetrics(f).horizontalAdvance(m_text) + 40 + actionW);
+    const qreal t = m_anim.currentValue().toReal();
+    setGeometry((parentWidget()->width() - w) / 2, parentWidget()->height() - 110 + int((1 - t) * 8), w, 44);
+    m_action->setGeometry(w - actionW - 8, 4, actionW, 36);
 }
 
 bool Toast::eventFilter(QObject *o, QEvent *e)
@@ -908,17 +933,15 @@ bool Toast::eventFilter(QObject *o, QEvent *e)
 void Toast::paintEvent(QPaintEvent *)
 {
     const Palette &c = Theme::p();
-    const qreal t = m_anim.currentValue().isValid() ? m_anim.currentValue().toReal() : 0;
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.setOpacity(t);
-    p.translate(0, (1 - t) * 8);
     p.setPen(QPen(c.border, 1));
     p.setBrush(c.raised);
     p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 14, 14);
     p.setPen(c.text);
     p.setFont(Theme::instance()->font(14));
-    p.drawText(rect().adjusted(16, 0, -16, 0), Qt::AlignCenter, QFontMetrics(p.font()).elidedText(m_text, Qt::ElideRight, width() - 32));
+    const int actionW = !m_action->isHidden() ? m_action->width() : 0;
+    p.drawText(rect().adjusted(16, 0, -16 - actionW, 0), Qt::AlignCenter, QFontMetrics(p.font()).elidedText(m_text, Qt::ElideRight, width() - 32 - actionW));
 }
 
 // ---- QrView ----

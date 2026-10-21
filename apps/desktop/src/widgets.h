@@ -7,6 +7,7 @@
 #include <QPlainTextEdit>
 #include <QVariantAnimation>
 #include <QWidget>
+#include <functional>
 
 class QPainter;
 class QTimer;
@@ -229,7 +230,7 @@ class Toast : public QWidget {
     Q_OBJECT
 public:
     explicit Toast(QWidget *host);
-    void show(const QString &text);
+    void show(const QString &text, const QString &actionTitle = {}, std::function<void()> action = {});
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -240,6 +241,8 @@ private:
     QString m_text;
     QVariantAnimation m_anim;
     QTimer *m_timer;
+    Button *m_action;
+    std::function<void()> m_callback;
 };
 
 // QR code drawn from the core's module rows ('1' = dark).

@@ -65,6 +65,8 @@ pub struct Payload {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<FileMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,7 +193,9 @@ impl Inner {
         let mut pl = self.new_payload(conv, "text")?;
         pl.text = Some(text.clone());
         pl.reply_to = p["reply_to"].as_str().map(str::to_string);
+        pl.mentions = self.resolve_mentions(conv, &text)?;
         self.enqueue(&pl, true, None, &preview(&text))?;
+        if let Some(id) = &pl.reply_to { let _ = self.mark_read(&json!({"conversation_id":conv,"message_id":id})); }
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         self.emit(json!({"type": "conversations_changed"}));
         self.wake();
@@ -729,22 +733,27 @@ impl Inner {
         let (me, _) = self.me()?;
         let ids: Vec<String> = {
             let db = self.db();
-            db.conn.execute("UPDATE conversations SET unread=0 WHERE id=?1", [conv])?;
             let mut st = db.conn.prepare(
                 "SELECT id FROM messages WHERE conversation_id=?1 AND outgoing=0 AND kind IN ('text','file','poll')
-                 AND id NOT IN (SELECT message_id FROM receipts WHERE user_id=?2 AND kind='read')",
+                 AND id NOT IN (SELECT message_id FROM receipts WHERE user_id=?2 AND kind='read') AND (?3 IS NULL OR id=?3)",
             )?;
-            let ids: Vec<String> = st.query_map(params![conv, me], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+            let target = p["message_id"].as_str();
+            let ids: Vec<String> = st.query_map(params![conv, me, target], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
             for i in &ids {
                 db.conn.execute("INSERT OR IGNORE INTO receipts(message_id, user_id, kind, at) VALUES (?1, ?2, 'read', ?3)", params![i, me, now_ms()])?;
             }
+            if target.is_none() { db.conn.execute("UPDATE conversations SET unread=0 WHERE id=?1", [conv])?; }
+            else { db.conn.execute("UPDATE conversations SET unread=max(0,unread-?2) WHERE id=?1", params![conv,ids.len() as i64])?; }
             ids
         };
         // Read receipts are always on; channels have none (they would reach every subscriber).
         let channel = self.rights(conv).map(|r| r.kind == "channel").unwrap_or(false);
-        if !ids.is_empty() && conv != crate::sync::SYSTEM_CHAT && !channel {
-            self.enqueue_receipt(conv, "read", ids)?;
-            self.wake();
+        if !ids.is_empty() {
+            if conv != crate::sync::SYSTEM_CHAT && !channel {
+                for batch in ids.chunks(500) { self.enqueue_receipt(conv, "read", batch.to_vec())?; }
+                self.wake();
+            }
+            self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         }
         self.emit(json!({"type": "conversations_changed"}));
         Ok(Value::Null)

@@ -362,7 +362,7 @@ fn clear_history(conn: &rusqlite::Connection, id: &str, hide: bool) -> Result<()
     Ok(())
 }
 
-fn fingerprint(account_key: &[u8]) -> String {
+pub(crate) fn fingerprint(account_key: &[u8]) -> String {
     let h = keys::sha256(account_key);
     b64(&h[..16]).replace('+', "-").replace('/', "_").trim_end_matches('=').to_string()
 }

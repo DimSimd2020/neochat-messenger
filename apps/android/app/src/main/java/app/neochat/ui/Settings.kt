@@ -14,7 +14,7 @@ import org.json.JSONObject
 import java.io.File
 
 /** The profile tab: profile card and all settings, grouped like Telegram. */
-class SettingsPage(private val act: MainActivity) {
+class SettingsPage(private val act: MainActivity, private val settingsOnly: Boolean = true) {
     private val ctx: Context = act
     private val prefs = Prefs.of(ctx)
     private val scroll = ScrollView(ctx)
@@ -47,6 +47,7 @@ class SettingsPage(private val act: MainActivity) {
     fun setBottomPadding(px: Int) = scroll.setPadding(0, 0, 0, px)
 
     private fun build() {
+        if (!settingsOnly) {
         col.addView(avatar, lp(dp(88), dp(88)).apply { topMargin = dp(16) })
         avatar.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         avatar.contentDescription = "Сменить фото профиля"
@@ -66,6 +67,9 @@ class SettingsPage(private val act: MainActivity) {
             addView(nav(R.drawable.ic_qr, "Мой QR-код") { Qr.showMine(act) })
             addView(nav(R.drawable.ic_person_add, "Добавить по QR-коду") { Qr.scanContact(act) })
             addView(nav(R.drawable.ic_devices, "Устройства") { Dialogs.devices(act) })
+        }
+        } else {
+            section("Аккаунт").addView(nav(R.drawable.ic_devices, "Устройства") { Dialogs.devices(act) })
         }
 
         section("Конфиденциальность").apply {

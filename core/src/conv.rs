@@ -427,6 +427,7 @@ impl Inner {
             "archived": archived == 1,
             "left": left == 1,
             "unread": unread,
+            "mention_count": db.conn.query_row("SELECT count(*) FROM messages m WHERE m.conversation_id=?1 AND m.outgoing=0 AND m.mentioned=1 AND NOT EXISTS(SELECT 1 FROM receipts r WHERE r.message_id=m.id AND r.user_id=?2 AND r.kind='read')", [&id,&me], |r| r.get::<_,i64>(0))?,
             "draft": draft,
             "last_preview": preview,
             "last_activity": activity,

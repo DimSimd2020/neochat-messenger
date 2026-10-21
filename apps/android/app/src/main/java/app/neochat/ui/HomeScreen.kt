@@ -96,9 +96,9 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
         applyTheme()
     }
 
-    fun setBadge(n: Int) {
+    fun setBadge(n: Int, mentions: Int = 0) {
         badge.visibility = if (n > 0) VISIBLE else GONE
-        badge.text = if (n > 99) "99+" else n.toString()
+        badge.text = (if (mentions > 0) "@ " else "") + if (n > 99) "99+" else n.toString()
     }
 
     fun setChecked(on: Boolean?) {
@@ -154,6 +154,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private var archiveRow: JSONObject? = null
     private var archiveShown = false
     private val archiveEntry = ListRow(ctx)
+    private val archiveIcon = ArchiveIcon()
     private val archiveHeight = dp(72)
     private val archiveWrap = FrameLayout(ctx)
     private var archiveAnim: ValueAnimator? = null
@@ -174,13 +175,14 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private val contactAdapter = RowAdapter(48) { row, c -> bindContact(row, c) }
 
     // profile and settings
-    private val settingsPage = SettingsPage(act)
+    private val settingsPage = PersonProfilePage(act)
     private val profilePage: View = settingsPage.view
 
     private val refresh = Runnable { reloadChats(false); reloadContacts(false) }
 
     init {
         column.orientation = LinearLayout.VERTICAL
+        root.addView(BackgroundView(ctx), FrameLayout.LayoutParams(MATCH, MATCH))
         root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
         column.addView(header(), lp())
         status.visibility = View.GONE
@@ -274,6 +276,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
         chatsPage.addView(chips, lp().apply { setMargins(dp(12), dp(10), dp(12), dp(4)) })
         list(chatList, chatAdapter)
         androidx.core.view.ViewCompat.addAccessibilityAction(chatList, "Показать архив") { _, _ ->
+            chatList.scrollToPosition(0)
             showArchiveEntry(true)
             archiveRow != null
         }
@@ -286,22 +289,63 @@ class HomeScreen(private val act: MainActivity) : Screen {
             private var x = 0f
             private var y = 0f
             private var fromTop = false
+            private var dragging = false
+            private var armed = false
+            private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
+
+            private fun pull(e: MotionEvent) {
+                val distance = ((e.rawY - y - slop).coerceAtLeast(0f) * 0.55f)
+                val height = if (distance <= archiveHeight) distance else archiveHeight + (distance - archiveHeight) * 0.18f
+                setArchiveHeight(height.toInt().coerceAtMost(archiveHeight + dp(24)))
+                if (!armed && height >= archiveHeight * 0.85f) {
+                    armed = true
+                    archiveEntry.replyHaptic()
+                } else if (height < archiveHeight * 0.7f) armed = false
+            }
+
             override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
                 if (e.actionMasked == MotionEvent.ACTION_DOWN) {
-                    x = e.x; y = e.y; fromTop = !rv.canScrollVertically(-1)
+                    x = e.rawX; y = e.rawY
+                    fromTop = !rv.canScrollVertically(-1) && !archiveShown && archiveRow != null && filter == 0 && chatSearch.edit.text.isEmpty()
+                    dragging = false
+                    armed = false
                 }
-                if (e.actionMasked == MotionEvent.ACTION_MOVE && fromTop && !selection.active && e.y - y > dp(64) && e.y - y > kotlin.math.abs(e.x - x) * 1.5f) {
-                    fromTop = false
-                    showArchiveEntry(true)
+                if (e.actionMasked == MotionEvent.ACTION_MOVE && fromTop && !selection.active && e.rawY - y > slop && e.rawY - y > kotlin.math.abs(e.rawX - x) * 1.5f) {
+                    dragging = true
+                    archiveAnim?.cancel()
+                    rv.parent.requestDisallowInterceptTouchEvent(true)
+                    pull(e)
                     return true
                 }
                 return false
             }
+
+            override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
+                if (!dragging) return
+                when (e.actionMasked) {
+                    MotionEvent.ACTION_MOVE -> pull(e)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        dragging = false
+                        fromTop = false
+                        showArchiveEntry(e.actionMasked == MotionEvent.ACTION_UP && armed)
+                        rv.parent.requestDisallowInterceptTouchEvent(false)
+                    }
+                }
+            }
         })
         // The archive entry belongs to the very top of the list: scrolling down puts it away.
         chatList.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            private var adjusting = false
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                if (dy > 0 && archiveShown && rv.canScrollVertically(-1)) showArchiveEntry(false)
+                if (dy <= 0 || !archiveShown || adjusting) return
+                val consumed = minOf(dy, archiveWrap.layoutParams.height)
+                archiveAnim?.cancel()
+                setArchiveHeight(archiveWrap.layoutParams.height - consumed)
+                if (archiveWrap.layoutParams.height == 0) archiveShown = false
+                // The row consumes the scroll first, just like the first item of the list.
+                adjusting = true
+                rv.scrollBy(0, -consumed)
+                adjusting = false
             }
         })
         androidx.recyclerview.widget.ItemTouchHelper(ChatSwipe(act, false, { chatAdapter.rows.getOrNull(it) }, { selection.active }) { reloadChats(false) }).attachToRecyclerView(chatList)
@@ -352,7 +396,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
             }
         }
         chatAdapter.rows = shown
-        archiveRow?.let { bindArchiveRow(act, archiveEntry, it) }
+        archiveRow?.let { bindArchiveRow(act, archiveEntry, archiveIcon) }
         if (filter != 0 || archiveRow == null || chatSearch.edit.text.isNotEmpty()) showArchiveEntry(false)
         val none = allChats.isEmpty() && archiveRow == null && chatSearch.edit.text.isEmpty()
         chatEmpty.visibility = if (none) View.VISIBLE else View.GONE
@@ -363,21 +407,28 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     private fun showArchiveEntry(on: Boolean) {
         val visible = on && archiveRow != null && filter == 0 && chatSearch.edit.text.isEmpty()
-        if (archiveShown == visible) return
+        val target = if (visible) archiveHeight else 0
+        if (archiveShown == visible && archiveWrap.layoutParams.height == target) return
         archiveShown = visible
         archiveAnim?.cancel()
         if (visible) archiveWrap.visibility = View.VISIBLE
         val from = archiveWrap.layoutParams.height
-        archiveAnim = ValueAnimator.ofInt(from, if (visible) archiveHeight else 0).apply {
+        archiveAnim = ValueAnimator.ofInt(from, target).apply {
             duration = if (Theme.reducedMotion) 0 else 220
             interpolator = Theme.surfaceCurve
             addUpdateListener {
-                archiveWrap.layoutParams = archiveWrap.layoutParams.apply { height = it.animatedValue as Int }
-                archiveEntry.alpha = (it.animatedValue as Int).toFloat() / archiveHeight
-                if (!archiveShown && it.animatedValue as Int == 0) archiveWrap.visibility = View.GONE
+                setArchiveHeight(it.animatedValue as Int)
             }
             start()
         }
+    }
+
+    private fun setArchiveHeight(height: Int) {
+        archiveWrap.visibility = if (height > 0) View.VISIBLE else View.GONE
+        archiveWrap.layoutParams = archiveWrap.layoutParams.apply { this.height = height }
+        archiveEntry.translationY = if (Theme.reducedMotion) 0f else (height - archiveHeight) * 0.45f
+        archiveIcon.progress = height.toFloat() / archiveHeight
+        archiveEntry.avatar.invalidate()
     }
 
     fun hideArchiveEntry() = showArchiveEntry(false)

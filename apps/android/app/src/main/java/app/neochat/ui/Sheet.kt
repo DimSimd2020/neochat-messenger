@@ -289,23 +289,55 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
 
 /** Short message near the bottom; fades out after a few seconds. */
 object Toast {
-    fun show(host: Sheet.Host, text: String) {
+    fun show(host: Sheet.Host, text: String, actionTitle: String? = null, action: (() -> Unit)? = null) {
         val ctx = host.overlay.context
+        host.overlay.findViewWithTag<View>("toast")?.let { host.overlay.removeView(it) }
+        val box = LinearLayout(ctx).apply {
+            tag = "toast"
+            gravity = Gravity.CENTER_VERTICAL
+            background = GlassDrawable(ctx, GlassDrawable.Kind.STRONG, ctx.dpf(20))
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            setPadding(ctx.dp(6), 0, ctx.dp(6), 0)
+        }
         val tv = TextView(ctx).apply {
             this.text = text
             setTextColor(Theme.p.text)
             textSize = 14.5f
-            background = GlassDrawable(ctx, GlassDrawable.Kind.STRONG, ctx.dpf(20))
-            setPadding(ctx.dp(18), ctx.dp(12), ctx.dp(18), ctx.dp(12))
-            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            maxWidth = ctx.resources.displayMetrics.widthPixels - ctx.dp(if (action != null) 164 else 60)
+            setPadding(ctx.dp(12), ctx.dp(12), ctx.dp(12), ctx.dp(12))
         }
-        host.overlay.addView(tv, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+        box.addView(tv)
+        val hide = Runnable {
+            box.isEnabled = false
+            box.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { host.overlay.removeView(box) }.start()
+        }
+        if (actionTitle != null && action != null) {
+            var handled = false
+            box.addView(TextView(ctx).apply {
+                this.text = actionTitle
+                textSize = 14.5f
+                typeface = weightFace(600)
+                setTextColor(Theme.p.accent)
+                gravity = Gravity.CENTER
+                minimumHeight = ctx.dp(48)
+                setPadding(ctx.dp(12), 0, ctx.dp(12), 0)
+                isFocusable = true
+                setOnClickListener {
+                    if (handled || box.parent == null) return@setOnClickListener
+                    handled = true
+                    isEnabled = false
+                    box.removeCallbacks(hide)
+                    host.overlay.removeView(box)
+                    action()
+                }
+                pressFeedback()
+            })
+        }
+        host.overlay.addView(box, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
             setMargins(ctx.dp(24), 0, ctx.dp(24), ctx.dp(96) + host.bottomInset)
         })
-        tv.alpha = 0f
-        tv.animate().alpha(1f).setDuration(Theme.ms(180)).start()
-        tv.postDelayed({
-            tv.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { host.overlay.removeView(tv) }.start()
-        }, 3200)
+        box.alpha = 0f
+        box.animate().alpha(1f).setDuration(Theme.ms(180)).start()
+        box.postDelayed(hide, if (action != null) 5000 else 3200)
     }
 }

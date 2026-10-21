@@ -10,11 +10,11 @@ use crate::outbox::FileMeta;
 
 const COLUMNS: &str = "m.local_id, m.id, m.conversation_id, m.sender_user_id, m.outgoing, m.kind, m.body, m.reply_to, m.file, m.status, m.error, m.sent_at,
     COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END, CASE WHEN m.sender_user_id='system' THEN 'NeoChat' ELSE '' END),
-    COALESCE(c.last_name, ''), COALESCE(c.username, ''), m.poll, m.fwd, m.edited_at";
+    COALESCE(c.last_name, ''), COALESCE(c.username, ''), m.poll, m.fwd, m.edited_at, m.mentioned";
 
 impl Inner {
     /// Runs a message query; `me` is appended as the last positional parameter.
-    fn query_messages(&self, cond: &str, args: &[&dyn ToSql]) -> Result<Vec<Value>> {
+    pub(crate) fn query_messages(&self, cond: &str, args: &[&dyn ToSql]) -> Result<Vec<Value>> {
         let db = self.db();
         let me = keys::my_user_id(&db.conn)?;
         let n = args.len() + 1;
@@ -45,8 +45,9 @@ impl Inner {
                 poll: r.get(15)?,
                 fwd: r.get(16)?,
                 edited_at: r.get(17)?,
-                delivered: r.get(18)?,
-                read: r.get(19)?,
+                delivered: r.get(19)?,
+                read: r.get(20)?,
+                mentioned: r.get::<_, i64>(18)? == 1,
             })
         })?;
         let rows: Vec<Row> = rows.collect::<std::result::Result<_, _>>()?;
@@ -122,6 +123,8 @@ impl Inner {
                 "emoji_only": if r.kind == "text" { crate::social::emoji_count(&r.body).filter(|n| *n <= 3).unwrap_or(0) } else { 0 },
                 "reactions": reactions.next().unwrap_or(json!([])),
                 "outgoing": r.outgoing,
+                "mentioned": r.mentioned,
+                "unread_mention": r.mentioned && !db.conn.query_row("SELECT EXISTS(SELECT 1 FROM receipts WHERE message_id=?1 AND user_id=?2 AND kind='read')", [&r.id,&me], |x| x.get::<_,bool>(0))?,
                 "kind": r.kind,
                 "text": match &call {
                     Some(c) => crate::calls::call_text(r.outgoing, c["video"] == true, c["status"].as_str().unwrap_or(""), c["duration"].as_i64().unwrap_or(0)),
@@ -212,6 +215,7 @@ struct Row {
     poll: Option<String>,
     fwd: Option<String>,
     edited_at: i64,
+    mentioned: bool,
     delivered: i64,
     read: i64,
 }

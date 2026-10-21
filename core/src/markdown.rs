@@ -194,12 +194,27 @@ fn links(s: &str, st: Style, out: &mut Out) {
             rest = &rest[start + end.max(1)..];
             continue;
         }
-        out.push(&rest[..start], st, None);
+        mentions(&rest[..start], st, out);
         let url = &tail[..end];
         out.push(url, st, Some(("link", json!(url))));
         rest = &tail[end..];
     }
-    out.push(rest, st, None);
+    mentions(rest, st, out);
+}
+
+fn mentions(text: &str, st: Style, out: &mut Out) {
+    let mut from = 0;
+    for (at, _) in text.match_indices('@') {
+        if at > 0 && text[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '@') { continue; }
+        let name: String = text[at+1..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        if !(3..=32).contains(&name.len()) { continue; }
+        let end = at+1+name.len();
+        if text[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') { continue; }
+        out.push(&text[from..at], st, None);
+        out.push(&text[at..end], st, Some(("mention",json!(name))));
+        from = end;
+    }
+    out.push(&text[from..], st, None);
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 import BackgroundTasks
+import AVFoundation
 import UIKit
 import UserNotifications
 
@@ -220,9 +221,8 @@ final class RootViewController: UIViewController {
 
     func showMain() {
         show(MainTabController())
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
         QuickReaction.load()
-        WhatsNewViewController.showIfNeeded(from: self)
+        CallReadiness.request(from:self) { [weak self] in guard let self else { return }; WhatsNewViewController.showIfNeeded(from:self) }
     }
 
     private func show(_ vc: UIViewController) {
@@ -239,6 +239,40 @@ final class RootViewController: UIViewController {
             old?.willMove(toParent: nil)
             old?.view.removeFromSuperview()
             old?.removeFromParent()
+        }
+    }
+}
+
+/// iOS exposes background refresh as a setting, not a runtime permission.
+private enum CallReadiness {
+    static func request(from host:UIViewController,done:@escaping()->Void) {
+        let center=UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            let next = { checkMicrophone(from:host,notifications:settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional,done:done) }
+            if settings.authorizationStatus == .notDetermined {
+                center.requestAuthorization(options:[.alert,.sound,.badge]) { ok,_ in checkMicrophone(from:host,notifications:ok,done:done) }
+            } else { next() }
+        }
+    }
+    private static func checkMicrophone(from host:UIViewController,notifications:Bool,done:@escaping()->Void) {
+        let status=AVCaptureDevice.authorizationStatus(for:.audio)
+        if status == .notDetermined { AVCaptureDevice.requestAccess(for:.audio) { ok in show(from:host,notifications:notifications,microphone:ok,done:done) } }
+        else { show(from:host,notifications:notifications,microphone:status == .authorized,done:done) }
+    }
+    private static func show(from host:UIViewController,notifications:Bool,microphone:Bool,done:@escaping()->Void) {
+        DispatchQueue.main.async {
+            var missing:[String]=[]
+            if !notifications { missing.append("Разрешите уведомления, чтобы видеть входящие звонки и сообщения на заблокированном экране.") }
+            if !microphone { missing.append("Разрешите микрофон для звонков.") }
+            if UIApplication.shared.backgroundRefreshStatus != .available { missing.append("Включите «Обновление контента» в настройках iOS.") }
+            guard !missing.isEmpty else { done();return }
+            let alert=UIAlertController(title:"Звонки и работа в фоне",message:missing.joined(separator:"\n\n"),preferredStyle:.alert)
+            alert.addAction(UIAlertAction(title:"Открыть настройки",style:.default) { _ in
+                if let url=URL(string:UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                done()
+            })
+            alert.addAction(UIAlertAction(title:"Позже",style:.cancel) { _ in done() })
+            host.present(alert,animated:!Theme.reducedMotion)
         }
     }
 }

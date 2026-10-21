@@ -285,6 +285,15 @@ impl Inner {
             "update_contact" => self.update_contact(p),
             "delete_contact" => self.delete_contact(p),
             "contact_info" => self.contact_info(p),
+            "user_profile" => self.user_profile(p),
+            "profile_items" => self.profile_items(p),
+            "set_profile_note" => self.set_profile_note(p),
+            "profile_qr" => self.profile_qr(p),
+            "profile_photos" => self.profile_photos(p),
+            "profile_photo" => self.profile_photo(p),
+            "set_profile_photo" => self.set_profile_photo(p),
+            "delete_profile_photo" => self.delete_profile_photo(p),
+            "mention_candidates" => self.mention_candidates(p),
             "verify_contact" => self.verify_contact(p),
             "accept_key_change" => self.accept_key_change(p),
             "open_direct" => self.open_direct(p),
@@ -345,7 +354,7 @@ impl Inner {
         }
     }
 
-    fn status(&self) -> Result<Value> {
+    pub(crate) fn status(&self) -> Result<Value> {
         let db = self.db();
         let c = &db.conn;
         let st = match self.conn_state.load(Ordering::SeqCst) {
@@ -468,7 +477,12 @@ impl Inner {
     fn login(&self, p: &Value) -> Result<Value> {
         let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
-        let pw = backup::derive(&username, s(p, "password")?)?;
+        let salt = match Api::new(&server).call("POST", "/v1/accounts/password-salt", None, Some(&json!({"username": username}))) {
+            Ok(v) => s(&v, "salt")?.to_string(),
+            Err(Error::Api { status: 404, .. }) => username.clone(),
+            Err(e) => return Err(e),
+        };
+        let pw = backup::derive(&salt, s(p, "password")?)?;
         let (device_id, stored_user, has_identity) = {
             let db = self.db();
             (kv_get_str(&db.conn, "device_id")?, kv_get_str(&db.conn, "username")?, kv_get(&db.conn, "user_id")?.is_some())
@@ -917,6 +931,13 @@ impl Inner {
             }
             body["bio"] = json!(bio);
         }
+        if let Some(username) = p["username"].as_str() {
+            let username = username.trim().trim_start_matches('@');
+            if !(3..=32).contains(&username.len()) || !username.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                return Err(Error::Invalid("Имя пользователя: 3–32 латинские буквы, цифры или подчёркивание".into()));
+            }
+            body["username"] = json!(username);
+        }
         self.authed("PUT", "/v1/accounts/current/profile", Some(&body))?;
         self.refresh_profile()?;
         Ok(Value::Null)
@@ -1026,7 +1047,7 @@ impl Inner {
         Ok(Value::Null)
     }
 
-    fn contact_info(&self, p: &Value) -> Result<Value> {
+    pub(crate) fn contact_info(&self, p: &Value) -> Result<Value> {
         let id = s(p, "user_id")?;
         let mut c = self.contact_json(id)?;
         let db = self.db();

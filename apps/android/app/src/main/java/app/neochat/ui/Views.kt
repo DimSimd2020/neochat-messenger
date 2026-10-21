@@ -23,7 +23,6 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -466,8 +465,12 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
     }
 
     fun setIcon(resource: Int) {
+        setIcon(context.getDrawable(resource)!!.mutate())
+    }
+
+    fun setIcon(drawable: Drawable) {
         set("", "archive")
-        icon = context.getDrawable(resource)?.mutate()?.apply { setTint(android.graphics.Color.WHITE) }
+        icon = drawable.apply { setTint(android.graphics.Color.WHITE) }
         invalidate()
     }
 
@@ -475,7 +478,7 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
         val hues = floatArrayOf(214f, 190f, 160f, 32f, 268f, 340f, 8f, 120f)
         val h = hues[abs(seed.hashCode()) % hues.size]
         val dark = Theme.p.dark
-        paint.color = android.graphics.Color.HSVToColor(floatArrayOf(h, if (dark) 0.42f else 0.22f, if (dark) 0.5f else 0.9f))
+        paint.color = if (icon != null) Theme.p.action else android.graphics.Color.HSVToColor(floatArrayOf(h, if (dark) 0.42f else 0.22f, if (dark) 0.5f else 0.9f))
         r.set(0f, 0f, width.toFloat(), height.toFloat())
         val rad = width * 18f / 48f
         c.drawRoundRect(r, rad, rad, paint)
@@ -971,28 +974,11 @@ class SwipeToReplyLayout(
         val nowArmed = abs(tx) >= threshold
         if (nowArmed && !armed) {
             armed = true
-            tick()
+            replyHaptic()
         } else if (!nowArmed) {
             armed = false
         }
         applyIcon(tx)
-    }
-
-    /**
-     * A short tick when the swipe reaches the reply point. The vibrator is used directly because
-     * view haptics are silent on many phones with "touch feedback" switched off.
-     */
-    private fun tick() {
-        val vibrator = if (Build.VERSION.SDK_INT >= 31) context.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
-        else @Suppress("DEPRECATION") context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
-        if (vibrator == null || !vibrator.hasVibrator()) {
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            return
-        }
-        vibrator.vibrate(
-            if (Build.VERSION.SDK_INT >= 29) android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_TICK)
-            else android.os.VibrationEffect.createOneShot(12, 90)
-        )
     }
 
     private fun applyIcon(tx: Float) {

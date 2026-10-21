@@ -29,6 +29,7 @@ import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import android.text.style.URLSpan
+import android.text.style.ForegroundColorSpan
 import android.util.Base64
 import android.util.LruCache
 import android.util.TypedValue
@@ -121,6 +122,7 @@ fun spanned(m: JSONObject): CharSequence {
             set(BackgroundColorSpan(0x30808080))
         }
         if (s.has("link")) set(URLSpan(s.str("link")))
+        if (s.has("mention")) { set(ForegroundColorSpan(Theme.p.accent)); set(StyleSpan(Typeface.BOLD)) }
         if (pre) b.append('\n')
     }
     while (b.isNotEmpty() && b[b.length - 1] == '\n') b.delete(b.length - 1, b.length)
@@ -946,6 +948,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             setPadding(if (out) dp(48) else dp(4), if (item.firstInRun) dp(8) else dp(3), if (out) dp(4) else dp(32), 0)
             av.visibility = if (group && !out) (if (item.lastInRun) VISIBLE else INVISIBLE) else GONE
             av.set(m.str("sender_name"), m.str("sender_user_id"), m.str("sender_avatar_path"))
+            av.setOnClickListener { act.openPage(PersonProfilePage(act,m.str("sender_user_id"))) }
+            sender.setOnClickListener { act.openPage(PersonProfilePage(act,m.str("sender_user_id"))) }
             sender.visibility = if (group && !out && item.firstInRun) VISIBLE else GONE
             sender.text = m.str("sender_name") + m.str("sender_tag").let { if (it.isEmpty()) "" else " · $it" }
             (col.layoutParams as LayoutParams).gravity = if (out) Gravity.END else Gravity.START
@@ -1384,6 +1388,34 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun buildComposer() {
         composer.orientation = LinearLayout.VERTICAL
+        val mentionRow = LinearLayout(ctx)
+        val mentionScroll = android.widget.HorizontalScrollView(ctx).apply { isHorizontalScrollBarEnabled=false; visibility=View.GONE; addView(mentionRow) }
+        composer.addView(mentionScroll,lp())
+        var mentionGeneration=0
+        edit.addTextChangedListener(object:TextWatcher {
+            override fun beforeTextChanged(s:CharSequence?,a:Int,b:Int,c:Int) {}
+            override fun onTextChanged(s:CharSequence?,a:Int,b:Int,c:Int) {}
+            override fun afterTextChanged(s:Editable?) {
+                val cursor=edit.selectionStart.coerceAtLeast(0)
+                val prefix=s.toString().take(cursor)
+                val match=Regex("(?:^|\\s)@([A-Za-z0-9_]*)$").find(prefix)
+                val gen=++mentionGeneration
+                mentionScroll.visibility=View.GONE
+                if(match==null || blocked)return
+                val start=prefix.lastIndexOf('@')
+                CoreClient.call("mention_candidates",JSONObject().put("conversation_id",conversationId).put("query",match.groupValues[1])) { v,e ->
+                    if(gen!=mentionGeneration || e!=null)return@call
+                    val choices=(v as? JSONArray)?.objects().orEmpty();mentionRow.removeAllViews()
+                    choices.take(6).forEach { candidate ->
+                        val b=PillButton(ctx,"@"+candidate.str("username"),primary=false)
+                        b.contentDescription="Упомянуть "+candidate.str("display_name")
+                        b.setOnClickListener { if(edit.text.toString().take(edit.selectionStart.coerceAtLeast(0))==prefix) edit.text.replace(start,cursor,"@"+candidate.str("username")+" ") }
+                        mentionRow.addView(b,lp(WRAP,dp(44)))
+                    }
+                    mentionScroll.visibility=if(choices.isEmpty())View.GONE else View.VISIBLE
+                }
+            }
+        })
         // The reply preview is the top part of the same glass field, not a separate strip.
         composerBox.orientation = LinearLayout.VERTICAL
         composerBox.background = composerBg

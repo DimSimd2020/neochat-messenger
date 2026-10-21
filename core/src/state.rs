@@ -192,6 +192,11 @@ impl Inner {
                         continue;
                     }
                     changed.1 = true;
+                } else if let Some(uid) = k.strip_prefix("note:") {
+                    if uid == me || uuid::Uuid::parse_str(uid).is_err() { continue; }
+                    let Some(note) = v.as_str().filter(|s| s.chars().count() <= 100) else { continue; };
+                    kv_set(&tx, k, note.as_bytes())?;
+                    changed.0 = true;
                 } else if k == "pref:quick_reaction" {
                     match v.as_str() {
                         Some(r) if crate::social::valid_reaction(r) => kv_set(&tx, "quick_reaction", r.as_bytes())?,
@@ -268,6 +273,7 @@ fn apply_contact(tx: &rusqlite::Transaction, uid: &str, v: &Value) -> Result<Con
 
 /// The shareable value of an entry, read from the local tables.
 fn local_value(c: &rusqlite::Connection, key: &str) -> Result<Option<Value>> {
+    if key.starts_with("note:") { return Ok(kv_get_str(c, key)?.map(|s| json!(s))); }
     if let Some(uid) = key.strip_prefix("contact:") {
         return Ok(c
             .query_row(

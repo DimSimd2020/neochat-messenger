@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type userOut struct {
@@ -77,6 +78,7 @@ func (s *Server) handlePutProfile(w http.ResponseWriter, r *http.Request, a *aut
 	var req struct {
 		DisplayName *string `json:"display_name"`
 		Bio         *string `json:"bio"`
+		Username    *string `json:"username"`
 	}
 	if err := readJSON(w, r, 4<<10, &req); err != nil {
 		s.fail(w, r, err)
@@ -100,6 +102,20 @@ func (s *Server) handlePutProfile(w http.ResponseWriter, r *http.Request, a *aut
 	}
 	var notify []string
 	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
+		if req.Username != nil {
+			nick := strings.TrimPrefix(strings.TrimSpace(*req.Username), "@")
+			if !nicknameRe.MatchString(nick) || strings.EqualFold(nick, "everyone") || strings.EqualFold(nick, "here") {
+				return errf(400, "bad_username", "Имя пользователя: 3–32 латинские буквы, цифры или подчёркивание; everyone и here заняты")
+			}
+			_, err := tx.Exec(r.Context(), `UPDATE users SET password_salt=COALESCE(NULLIF(password_salt,''),username), username=$2, nickname=$3 WHERE id=$1`, a.UserID, strings.ToLower(nick), nick)
+			if err != nil {
+				var pe *pgconn.PgError
+				if errors.As(err, &pe) && pe.Code == "23505" {
+					return errf(409, "username_taken", "Это имя пользователя уже занято")
+				}
+				return err
+			}
+		}
 		if req.DisplayName != nil {
 			if _, err := tx.Exec(r.Context(), `UPDATE users SET display_name=$2 WHERE id=$1`, a.UserID, name); err != nil {
 				return err

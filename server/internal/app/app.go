@@ -72,6 +72,7 @@ func (s *Server) routes() {
 
 	m.HandleFunc("POST /v1/accounts", s.handleRegister)
 	m.HandleFunc("POST /v1/accounts/recover", s.handleRecover)
+	m.HandleFunc("POST /v1/accounts/password-salt", s.handlePasswordSalt)
 	m.HandleFunc("POST /v1/sessions", s.handleLogin)
 	m.HandleFunc("POST /v1/sessions/refresh", s.handleRefresh)
 	m.HandleFunc("DELETE /v1/sessions/current", s.authed(s.handleLogout))
@@ -90,6 +91,8 @@ func (s *Server) routes() {
 	m.HandleFunc("PUT /v1/accounts/current/profile", s.authed(s.handlePutProfile))
 	m.HandleFunc("PUT /v1/accounts/current/avatar", s.authed(s.handleUploadAvatar))
 	m.HandleFunc("DELETE /v1/accounts/current/avatar", s.authed(s.handleDeleteAvatar))
+	m.HandleFunc("PUT /v1/accounts/current/photos", s.authed(s.handleUploadPhoto))
+	m.HandleFunc("DELETE /v1/accounts/current/photos/{photo}", s.authed(s.handleDeletePhoto))
 	m.HandleFunc("GET /v1/accounts/current/settings", s.authed(s.handleGetSettings))
 	m.HandleFunc("PUT /v1/accounts/current/settings", s.authed(s.handlePutSettings))
 	m.HandleFunc("GET /v1/accounts/current/history", s.authed(s.handleGetHistory))
@@ -101,6 +104,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/contacts/resolve", s.authed(s.handleResolve))
 	m.HandleFunc("GET /v1/users/{id}", s.authed(s.handleGetUser))
 	m.HandleFunc("GET /v1/users/{id}/avatar/{avatar}", s.authed(s.handleGetAvatar))
+	m.HandleFunc("GET /v1/users/{id}/photos", s.authed(s.handleListPhotos))
+	m.HandleFunc("GET /v1/users/{id}/photos/{photo}", s.authed(s.handleGetPhoto))
 	m.HandleFunc("POST /v1/users/{id}/bundles", s.authed(s.handleClaimBundles))
 
 	m.HandleFunc("GET /v1/conversations", s.authed(s.handleListConversations))

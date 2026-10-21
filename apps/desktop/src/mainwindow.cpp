@@ -5,6 +5,7 @@
 #include "composer.h"
 #include "core.h"
 #include "dialogs.h"
+#include "profiles.h"
 #include "filepicker.h"
 #include "messages.h"
 #include "onboarding.h"
@@ -498,6 +499,12 @@ MainWindow::MainWindow()
     connect(Core::instance(), &Core::event, this, &MainWindow::onEvent);
     connect(m_panel, &ChatPanel::activated, this, &MainWindow::openConversation);
     connect(m_panel, &ChatPanel::newChat, this, [this] { dialogs::newChat(host()); });
+    connect(m_panel, &ChatPanel::archived, this, [this](const QStringList &ids) {
+        m_toast->show(ids.size() == 1 ? QStringLiteral("Чат в архиве") : QStringLiteral("Чаты в архиве"), QStringLiteral("Отмена"), [this, ids] {
+            for (const auto &id : ids)
+                Core::instance()->call("set_archived", {{"conversation_id", id}, {"archived", false}}, this, [this](const QJsonValue &, const CoreError &e) { if (!e.ok()) toast(e.message); });
+        });
+    });
     connect(m_rail->people, &QAbstractButton::clicked, this, [this] { setTab(2); });
     connect(m_rail->calls, &QAbstractButton::clicked, this, [this] { setTab(1); });
     CallController::instance()->toast = [this](const QString &t) { toast(t); };
@@ -597,6 +604,7 @@ MainWindow::MainWindow()
             Core::instance()->call("set_draft", {{"conversation_id", m_current.value("id")}, {"text", text}});
     });
     connect(m_view, &MessageView::replyRequested, m_composer, &Composer::setReply);
+    connect(m_view, &MessageView::profileRequested, this, [this](const QString &uid) { dialogs::personProfile(host(),uid); });
     connect(m_view, &MessageView::editRequested, m_composer, &Composer::setEdit);
     connect(m_composer, &Composer::edited, this, &MainWindow::editText);
     connect(m_view, &MessageView::forwardRequested, this, [this](const QJsonArray &msgs) { dialogs::forward(host(), msgs); });
@@ -831,6 +839,7 @@ void MainWindow::openConversation(const QString &id)
                 }
                 m_composer->clearReply();
                 m_composer->setDraft(c.value("draft").toString());
+                m_composer->setConversation(id);
                 m_view->setConversation(id, c.value("kind").toString() == "group");
             }
             applyConversation(c);

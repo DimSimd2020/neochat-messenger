@@ -98,10 +98,10 @@ func TestAvatarFilesAndPermissions(t *testing.T) {
 	if profile.AvatarID == id {
 		t.Fatal("replacement must invalidate the cached file ID")
 	}
-	if _, err := os.Stat(s.avatarPath(id)); !os.IsNotExist(err) {
-		t.Fatal("old avatar file remains")
+	if _, err := os.Stat(s.avatarPath(id)); err != nil {
+		t.Fatal("old profile photo must remain in the gallery")
 	}
-	if st, _ := request(bob, "GET", path, nil); st != 404 {
+	if st, _ := request(bob, "GET", path, nil); st != 200 {
 		t.Fatalf("old file: %d", st)
 	}
 	if st, _ := alice.do("DELETE", "/v1/accounts/current/avatar", nil, nil); st != 200 {
@@ -111,7 +111,30 @@ func TestAvatarFilesAndPermissions(t *testing.T) {
 		t.Fatal("deleted avatar file remains")
 	}
 	alice.do("GET", "/v1/users/"+alice.userID, nil, &profile)
+	if profile.AvatarID != id {
+		t.Fatal("deleting the current photo must select the previous photo")
+	}
+	if st, _ := alice.do("DELETE", "/v1/accounts/current/photos/"+id, nil, nil); st != 200 {
+		t.Fatalf("delete previous: %d", st)
+	}
+	alice.do("GET", "/v1/users/"+alice.userID, nil, &profile)
 	if profile.AvatarID != "" {
 		t.Fatal("avatar ID remains after deletion")
+	}
+	var full bytes.Buffer
+	jpeg.Encode(&full, image.NewRGBA(image.Rect(0, 0, 960, 640)), nil)
+	if st, _ := request(alice, "PUT", "/v1/accounts/current/photos", full.Bytes()); st != 200 {
+		t.Fatalf("full photo: %d", st)
+	}
+	alice.do("GET", "/v1/users/"+alice.userID, nil, &profile)
+	fullPath := "/v1/users/" + alice.userID + "/photos/" + profile.AvatarID
+	if st, data := request(bob, "GET", fullPath, nil); st != 200 || !bytes.Equal(data, full.Bytes()) {
+		t.Fatal("full uncropped image did not survive upload")
+	}
+	if st, _ := request(stranger, "GET", fullPath, nil); st != 404 {
+		t.Fatalf("unrelated full image access: %d", st)
+	}
+	if st, _ := stranger.do("DELETE", "/v1/accounts/current/photos/"+profile.AvatarID, nil, nil); st != 404 {
+		t.Fatalf("deleting another user's photo: %d", st)
 	}
 }

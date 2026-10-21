@@ -52,11 +52,14 @@ class MainActivity : Activity(), Sheet.Host {
     private var archive: ArchiveScreen? = null
     private var chat: ChatScreen? = null
     private var current: Screen? = null
+    private val pageHistory = ArrayList<Screen>()
     private var pendingConversation: String? = null
+    private var openChatGeneration = 0
     private val listener: (JSONObject) -> Unit = { onEvent(it) }
     private var updateBanner: View? = null
     private var lastUpdateCheck = 0L
     private var slideAnim: android.animation.ValueAnimator? = null
+    var readinessPrompted = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -149,6 +152,8 @@ class MainActivity : Activity(), Sheet.Host {
     }
 
     fun showOnboarding(status: JSONObject) {
+        ++openChatGeneration
+        pageHistory.clear()
         closeOverlays()
         home = null
         archive = null
@@ -159,6 +164,9 @@ class MainActivity : Activity(), Sheet.Host {
     }
 
     fun showMain() {
+        ++openChatGeneration
+        pageHistory.clear()
+        readinessPrompted = false
         val h = HomeScreen(this)
         home = h
         archive = null
@@ -169,8 +177,6 @@ class MainActivity : Activity(), Sheet.Host {
         AppLock.maybeLock(this)
         QuickReaction.load(this)
         Dialogs.whatsNewIfNeeded(this)
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         pendingConversation?.let {
             pendingConversation = null
             openChat(it)
@@ -179,18 +185,45 @@ class MainActivity : Activity(), Sheet.Host {
 
     fun openChat(conversationId: String) {
         if (home == null) return
-        if (chat?.conversationId == conversationId) return
-        closeOverlays()
-        val c = ChatScreen(this, conversationId)
-        chat = c
-        show(c, dp(22).toFloat())
+        if (chat?.conversationId == conversationId && current === chat) return
+        val gen = ++openChatGeneration
+        CoreClient.call("get_conversation",JSONObject().put("conversation_id",conversationId)) { v,e ->
+            if (gen != openChatGeneration) return@call
+            if (e != null) return@call toast(e.message)
+            pageHistory.clear()
+            closeOverlays()
+            if ((v as JSONObject).optBoolean("in_archive")) {
+                if (archive == null) archive = ArchiveScreen(this)
+            } else archive = null
+            val c = if(chat?.conversationId == conversationId) chat!! else ChatScreen(this,conversationId)
+            chat = c
+            show(c,dp(22).toFloat(),slide=true)
+        }
     }
 
     fun closeChat() {
         val h = home ?: return
-        if (chat == null) return
-        chat = null
-        show(archive ?: h, -dp(22).toFloat())
+        val leaving = chat ?: return
+        val gen = ++openChatGeneration
+        CoreClient.call("get_conversation",JSONObject().put("conversation_id",leaving.conversationId)) { v,_ ->
+            if (gen != openChatGeneration || chat !== leaving) return@call
+            if (v is JSONObject) {
+                if (v.optBoolean("in_archive")) { if (archive == null) archive = ArchiveScreen(this) }
+                else archive = null
+            }
+            chat = null
+            show(archive ?: h,-dp(22).toFloat(),slide=true)
+        }
+    }
+
+    fun openPage(page: Screen) {
+        current?.let { pageHistory.add(it) }
+        show(page, dp(22).toFloat(), slide = true)
+    }
+
+    fun closePage() {
+        val previous = pageHistory.removeLastOrNull() ?: return
+        show(previous, -dp(22).toFloat(), slide = true)
     }
 
     fun openArchive() {
@@ -256,24 +289,34 @@ class MainActivity : Activity(), Sheet.Host {
      */
     private fun slideBetween(pv: View, v: View, forward: Boolean, drop: () -> Unit) {
         val w = content.width.toFloat().takeIf { it > 0f } ?: resources.displayMetrics.widthPixels.toFloat()
-        val plate = BackgroundView(this)
-        content.addView(plate, FrameLayout.LayoutParams(MATCH, MATCH))
+        val scrim = View(this).apply { setBackgroundColor(android.graphics.Color.BLACK) }
+        val shadow = View(this).apply {
+            background = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(android.graphics.Color.TRANSPARENT, 0x50000000)
+            )
+        }
+        content.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
+        content.addView(shadow, FrameLayout.LayoutParams(dp(18), MATCH))
         val over = if (forward) v else pv
         val under = if (forward) pv else v
         under.bringToFront()
-        plate.bringToFront()
+        scrim.bringToFront()
         over.bringToFront()
+        shadow.bringToFront()
         // p is how far the upper screen has come in: 0 off to the right, 1 at rest.
         val place = { p: Float ->
             over.translationX = (1f - p) * w
-            plate.translationX = over.translationX
-            under.translationX = -p * 0.3f * w
-            under.alpha = 1f - 0.35f * p
+            under.translationX = -p * 0.25f * w
+            under.alpha = 1f
+            scrim.alpha = 0.16f * p
+            shadow.translationX = over.translationX - dp(18)
+            shadow.alpha = (p * 8f).coerceAtMost(1f)
         }
         place(if (forward) 0f else 1f)
         val anim = android.animation.ValueAnimator.ofFloat(0f, 1f)
-        anim.duration = 360
-        anim.interpolator = Theme.surfaceCurve
+        anim.duration = 320
+        anim.interpolator = android.view.animation.PathInterpolator(0.23f, 1f, 0.32f, 1f)
         anim.addUpdateListener {
             val t = it.animatedValue as Float
             place(if (forward) t else 1f - t)
@@ -281,7 +324,8 @@ class MainActivity : Activity(), Sheet.Host {
         anim.addListener(object : AnimatorListenerAdapter() {
             override fun onAnimationEnd(a: Animator) {
                 if (slideAnim === anim) slideAnim = null
-                content.removeView(plate)
+                content.removeView(scrim)
+                content.removeView(shadow)
                 over.translationX = 0f
                 under.translationX = 0f
                 over.alpha = 1f
@@ -307,9 +351,11 @@ class MainActivity : Activity(), Sheet.Host {
         home?.onEvent(ev)
         archive?.onEvent(ev)
         chat?.onEvent(ev)
+        if (pageHistory.isNotEmpty()) current?.onEvent(ev)
     }
 
     fun toast(text: String) = Toast.show(this, text)
+    fun toast(text: String, actionTitle: String, action: () -> Unit) = Toast.show(this, text, actionTitle, action)
 
     private val results = HashMap<Int, (Int, Intent?) -> Unit>()
     private var nextRequest = 100
@@ -438,6 +484,7 @@ class MainActivity : Activity(), Sheet.Host {
     override fun onBackPressed() {
         backHandlers.lastOrNull()?.let { if (it()) return }
         if (current?.onBack() == true) return
+        if (pageHistory.isNotEmpty()) return closePage()
         if (chat != null) return closeChat()
         @Suppress("DEPRECATION")
         super.onBackPressed()

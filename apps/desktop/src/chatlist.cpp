@@ -6,6 +6,7 @@
 #include "theme.h"
 #include "transition.h"
 #include "widgets.h"
+#include <memory>
 
 #include <QButtonGroup>
 #include <QDateTime>
@@ -119,7 +120,7 @@ QVariant ChatListModel::data(const QModelIndex &index, int role) const
         return c;
     if (role == Qt::DisplayRole || role == Qt::AccessibleTextRole) {
         if (c.value("_archive").toBool())
-            return QStringLiteral("Архив, чатов: %1").arg(c.value("count").toInt());
+            return QStringLiteral("Архив");
         QString s = c.value("title").toString();
         if (c.value("pinned").toBool())
             s += QStringLiteral(", закреплён");
@@ -215,6 +216,13 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
     const qreal x = avatar.right() + 13;
     const qreal right = r.right() - 12;
     const Theme *th = Theme::instance();
+    if (archiveRow) {
+        p->setFont(th->font(15.5, QFont::DemiBold));
+        p->setPen(c.text);
+        p->drawText(QRectF(x, r.top(), right - x, r.height()), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("Архив"));
+        p->restore();
+        return;
+    }
     const QFont timeFont = th->font(12);
     const QString time = formatListTime(qint64(o.value("last_activity").toDouble()));
     const qreal timeW = QFontMetricsF(timeFont).horizontalAdvance(time);
@@ -238,7 +246,7 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
     qreal badgeW = 0;
     if (unread > 0) {
         const QFont bf = th->font(11.5, QFont::Bold);
-        const QString n = unread > 99 ? QStringLiteral("99+") : QString::number(unread);
+        const QString n = (o.value("mention_count").toInt() > 0 ? QStringLiteral("@ ") : QString()) + (unread > 99 ? QStringLiteral("99+") : QString::number(unread));
         badgeW = qMax(20.0, QFontMetricsF(bf).horizontalAdvance(n) + 12);
         const QRectF b(right - badgeW, top + titleH + 4 + (prevH - 20) / 2, badgeW, 20);
         p->setPen(Qt::NoPen);
@@ -252,8 +260,7 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
         ui::paintIcon(p, QRectF(right - 18, top + titleH + 4 + (prevH - 18) / 2, 18, 18), "pin", c.muted, 1.8);
         badgeW = 26;
     }
-    // Names of archived chats stay hidden; the row only counts them.
-    QString preview = archiveRow ? QStringLiteral("Чатов: %1").arg(o.value("count").toInt()) : o.value("last_preview").toString();
+    QString preview = o.value("last_preview").toString();
     QColor prevColor = selected ? c.text : c.muted;
     const QString draft = o.value("draft").toString().simplified();
     if (!draft.isEmpty() && !selected) {
@@ -548,8 +555,16 @@ void ChatPanel::runAction(const QString &method, const QString &key, bool value)
     const auto ids = m_checked;
     if (ids.isEmpty()) return;
     auto run = [this, ids, method, key, value] {
-        for (const auto &id : ids)
-            Core::instance()->call(method, {{"conversation_id", id}, {key, value}}, this, [this](const QJsonValue &, const CoreError &e) { if (!e.ok()) m_status->setText(e.message); });
+        auto completed = std::make_shared<QStringList>();
+        auto pending = std::make_shared<int>(ids.size());
+        for (const auto &id : ids) {
+            const bool canUndo = method == "set_archived" && value && !conversation(id).value("in_archive").toBool();
+            Core::instance()->call(method, {{"conversation_id", id}, {key, value}}, this, [this, id, completed, pending, canUndo](const QJsonValue &, const CoreError &e) {
+                if (!e.ok()) m_status->setText(e.message);
+                else if (canUndo) completed->append(id);
+                if (--*pending == 0 && !completed->isEmpty()) emit archived(*completed);
+            });
+        }
         m_selecting = false;
         m_view->clearSelection();
         updateSelection();

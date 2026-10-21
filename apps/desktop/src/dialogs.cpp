@@ -1,4 +1,5 @@
 #include "dialogs.h"
+#include "profiles.h"
 
 #include "calls.h"
 #include "filepicker.h"
@@ -277,9 +278,15 @@ class QrCard : public QWidget {
 public:
     QrCard()
     {
-        setFixedSize(300, 340);
+        setMinimumSize(180, 204);
+        setMaximumSize(300, 340);
+        QSizePolicy policy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        policy.setHeightForWidth(true);
+        setSizePolicy(policy);
         setAccessibleName(QStringLiteral("QR-код профиля"));
     }
+    QSize sizeHint() const override { return {300, 340}; }
+    int heightForWidth(int w) const override { return qRound(w * 340.0 / 300); }
     void set(const QStringList &rows, const QString &name, const QString &seed, const QString &handle)
     {
         m_rows = rows;
@@ -294,50 +301,37 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        QLinearGradient g(0, 0, width(), height());
+        p.scale(width() / 300.0, height() / 340.0);
+        QLinearGradient g(0, 0, 300, 340);
         g.setColorAt(0, QColor("#4169CF"));
         g.setColorAt(0.5, QColor("#7B5CD6"));
         g.setColorAt(1, QColor("#2FA5B5"));
         p.setPen(Qt::NoPen);
         p.setBrush(g);
-        p.drawRoundedRect(rect(), 26, 26);
-        const QRectF plate(26, 22, width() - 52, height() - 44);
+        p.drawRoundedRect(QRectF(0, 0, 300, 340), 26, 26);
+        const QRectF plate(26, 22, 248, 296);
         p.setBrush(Qt::white);
         p.drawRoundedRect(plate, 22, 22);
         const int n = int(m_rows.size());
         if (n == 0)
             return;
         const QColor dot("#16233C");
-        const qreal side = plate.width() - 36;
-        const qreal cell = side / n;
-        const QPointF o(plate.left() + 18, plate.top() + 16);
-        int hole = int(std::ceil(58 / cell));
-        if ((n - hole) % 2 == 1)
-            ++hole;
-        const int h0 = (n - hole) / 2, h1 = h0 + hole;
-        auto eye = [n](int x, int y) { return (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7); };
-        p.setBrush(dot);
+        const int cell = qMax(1, 212 / n);
+        const qreal side = cell * n;
+        const QPointF o(plate.center().x() - side / 2, plate.top() + 16 + (212 - side) / 2);
+        // Preserve every module, including alignment patterns. Artwork over the
+        // centre can make an otherwise detected code impossible to decode.
+        p.setRenderHint(QPainter::Antialiasing, false);
         for (int y = 0; y < n; ++y)
             for (int x = 0; x < n && x < m_rows[y].size(); ++x) {
-                if (m_rows[y][x] != '1' || eye(x, y) || (x >= h0 && x < h1 && y >= h0 && y < h1))
-                    continue;
-                p.drawEllipse(QRectF(o.x() + x * cell + cell * 0.05, o.y() + y * cell + cell * 0.05, cell * 0.9, cell * 0.9));
+                if (m_rows[y][x] == '1')
+                    p.fillRect(QRectF(o.x() + x * cell, o.y() + y * cell, cell, cell), dot);
             }
-        for (const QPoint e : {QPoint(0, 0), QPoint(n - 7, 0), QPoint(0, n - 7)}) {
-            const qreal l = o.x() + e.x() * cell, t = o.y() + e.y() * cell;
-            // Only slightly rounded finder eyes: strongly rounded ones break many decoders.
-            QPainterPath ring;
-            ring.setFillRule(Qt::OddEvenFill);
-            ring.addRoundedRect(QRectF(l, t, 7 * cell, 7 * cell), cell * 0.35, cell * 0.35);
-            ring.addRoundedRect(QRectF(l + cell, t + cell, 5 * cell, 5 * cell), cell * 0.15, cell * 0.15);
-            p.fillPath(ring, dot);
-            p.drawRoundedRect(QRectF(l + 2 * cell, t + 2 * cell, 3 * cell, 3 * cell), cell * 0.3, cell * 0.3);
-        }
-        const qreal av = 50;
-        ui::paintAvatar(&p, QRectF(o.x() + side / 2 - av / 2, o.y() + side / 2 - av / 2, av, av), m_name, m_seed);
+        p.setRenderHint(QPainter::Antialiasing);
+        ui::paintAvatar(&p, QRectF(plate.left() + 18, plate.bottom() - 50, 34, 34), m_name, m_seed);
         p.setFont(Theme::instance()->font(17, QFont::Bold));
         p.setPen(dot);
-        p.drawText(QRectF(plate.left(), o.y() + side + 6, plate.width(), plate.bottom() - (o.y() + side + 6)), Qt::AlignCenter, m_handle);
+        p.drawText(QRectF(plate.left() + 62, plate.bottom() - 50, plate.width() - 80, 34), Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(m_handle, Qt::ElideRight, int(plate.width() - 80)));
     }
 
 private:
@@ -1077,120 +1071,50 @@ void pickSquareJpeg(const DialogHost &h, QWidget *anchor, const QString &title, 
     });
 }
 
-void profile(const DialogHost &h)
+void editProfile(const DialogHost &h)
 {
-    auto *sheet = new Sheet(h.host, QStringLiteral("Профиль"), 420);
-    auto *photo = new PersonRow(QStringLiteral("Фото профиля"), QStringLiteral("Нажмите, чтобы изменить"), "profile");
-    sheet->body()->addWidget(photo);
-    auto *removePhoto = new ui::Button(QStringLiteral("Удалить фото"), ui::Button::Flat);
-    sheet->body()->addWidget(removePhoto);
-    auto updatePhoto = [h, sheet, photo, removePhoto](const QString &path, std::shared_ptr<QTemporaryFile> keep = {}) {
-        photo->setEnabled(false);
-        removePhoto->setEnabled(false);
-        Core::instance()->call("set_avatar", {{"path", path}}, sheet, [h, sheet, photo, removePhoto, keep](const QJsonValue &, const CoreError &e) {
-            photo->setEnabled(true);
-            removePhoto->setEnabled(true);
-            if (!e.ok()) return h.toast(e.message);
-            Core::instance()->call("status", {}, sheet, [photo, removePhoto](const QJsonValue &v, const CoreError &e) {
-                if (!e.ok()) return;
-                photo->avatar = v.toObject().value("avatar_path").toString();
-                photo->update();
-                removePhoto->setVisible(!photo->avatar.isEmpty());
-            });
-        });
-    };
-    QObject::connect(removePhoto, &QAbstractButton::clicked, sheet, [updatePhoto] { updatePhoto({}); });
-    QObject::connect(photo, &QAbstractButton::clicked, sheet, [h, sheet, updatePhoto] {
-        pickSquareJpeg(h, sheet, QStringLiteral("Фото профиля"), 256, 49152, [h, updatePhoto](std::shared_ptr<QTemporaryFile> temp) {
-            if (!temp)
-                return h.toast(QStringLiteral("Не удалось прочитать фото"));
-            updatePhoto(temp->fileName(), temp);
-        });
-    });
-    auto *name = new ui::Label({}, 20, QFont::Bold);
-    auto *sub = new CopyLabel({}, {}, [h] { h.toast(QStringLiteral("Имя пользователя скопировано")); });
-    sheet->body()->addWidget(name);
-    sheet->body()->addWidget(sub);
-    auto *about = new ui::Label({}, 14);
-    about->setWordWrap(true);
-    about->hide();
-    sheet->body()->addWidget(about);
-    auto *edit = new ui::TextField(QStringLiteral("Имя"));
+    auto *sheet = new Sheet(h.host, QStringLiteral("Изменить профиль"), 460);
+    sheet->setBack([h] { personProfile(h); });
+    auto *name = new ui::TextField(QStringLiteral("Имя"));
+    auto *username = new ui::TextField(QStringLiteral("Имя пользователя"));
     auto *bio = new ui::TextArea(QStringLiteral("О себе, до 100 символов"), 3);
     bio->setMaxLength(100);
-    auto *count = new ui::Label(QStringLiteral("0/100"), 12.5, 400, ui::Label::Muted);
-    count->setAlignment(Qt::AlignRight);
-    QObject::connect(bio, &ui::TextArea::textChanged, sheet, [=](const QString &t) { count->setText(QStringLiteral("%1/100").arg(t.size())); });
     auto *save = new ui::Button(QStringLiteral("Сохранить"), ui::Button::Secondary);
-    sheet->body()->addWidget(edit);
-    sheet->body()->addWidget(bio);
-    sheet->body()->addWidget(count);
-    sheet->body()->addWidget(save);
-    auto *qrButton = new ui::Button(QStringLiteral("Мой QR-код"), ui::Button::Secondary);
-    QObject::connect(qrButton, &QAbstractButton::clicked, sheet, [=] {
-        sheet->close();
-        myQr(h);
+    sheet->body()->addWidget(name); sheet->body()->addWidget(username); sheet->body()->addWidget(bio); sheet->body()->addWidget(save);
+    Core::instance()->call("status", {}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+        if (!e.ok()) return;
+        const auto p = v.toObject();
+        name->setText(p.value("display_name").toString()); username->setText("@"+p.value("username").toString()); bio->setText(p.value("bio").toString());
     });
-    Core::instance()->call("status", {}, sheet, [=](const QJsonValue &v, const CoreError &) {
-        const QJsonObject s = v.toObject();
-        photo->avatar = s.value("avatar_path").toString();
-        photo->update();
-        removePhoto->setVisible(!photo->avatar.isEmpty());
-        const QString nick = "@" + s.value("username").toString();
-        const QString display = s.value("display_name").toString();
-        name->setText(display.isEmpty() ? nick : display);
-        QString line = nick;
-        if (!s.value("number").toString().isEmpty())
-            line += QStringLiteral(" · ID ") + s.value("number").toString();
-        sub->setText(line);
-        sub->setValue(nick);
-        edit->setText(display);
-        bio->setText(s.value("bio").toString());
-        about->setText(s.value("bio").toString());
-        about->setVisible(!s.value("bio").toString().isEmpty());
-    });
-    QObject::connect(save, &QAbstractButton::clicked, sheet, [=] {
-        const QString n = edit->text().trimmed();
-        if (n.isEmpty())
-            return h.toast(QStringLiteral("Введите имя"));
+    QObject::connect(save,&QAbstractButton::clicked,sheet,[=] {
         save->setEnabled(false);
-        const QString b = bio->text().trimmed();
-        Core::instance()->call("set_profile", {{"display_name", n}, {"bio", b}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+        Core::instance()->call("set_profile",{{"display_name",name->text().trimmed()},{"username",username->text().trimmed()},{"bio",bio->text().trimmed()}},sheet,[=](const QJsonValue &,const CoreError &e) {
             save->setEnabled(true);
-            if (!e.ok())
-                return fail(h, e);
-            name->setText(n);
-            about->setText(b);
-            about->setVisible(!b.isEmpty());
-            h.toast(QStringLiteral("Профиль сохранён"));
+            if (!e.ok()) return h.toast(e.message);
+            sheet->close(); personProfile(h); h.toast(QStringLiteral("Профиль сохранён"));
         });
     });
-    auto *dev = new ui::Button(QStringLiteral("Устройства"), ui::Button::Secondary);
-    auto *set = new ui::Button(QStringLiteral("Настройки"), ui::Button::Secondary);
-    QObject::connect(dev, &QAbstractButton::clicked, sheet, [=] {
-        sheet->close();
-        devices(h);
-    });
-    QObject::connect(set, &QAbstractButton::clicked, sheet, [=] {
-        sheet->close();
-        settings(h);
-    });
-    sheet->body()->addWidget(qrButton);
-    sheet->body()->addWidget(dev);
-    sheet->body()->addWidget(set);
     sheet->open();
 }
 
+void profile(const DialogHost &h) { personProfile(h); }
+
 void myQr(const DialogHost &h)
 {
-    auto *sheet = new Sheet(h.host, QStringLiteral("Мой QR-код"), 380);
+    profileQr(h);
+}
+
+void profileQr(const DialogHost &h, const QString &userId)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("QR-код профиля"), 380);
     auto *qr = new QrCard;
     auto *copyLink = new ui::Button(QStringLiteral("Скопировать ссылку"), ui::Button::Flat);
     sheet->body()->addWidget(qr, 0, Qt::AlignHCenter);
     sheet->body()->addWidget(copyLink);
-    Core::instance()->call("my_qr", {}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+    const auto params = userId.isEmpty() ? QJsonObject() : QJsonObject{{"user_id", userId}};
+    Core::instance()->call("profile_qr", params, sheet, [=](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
-            return;
+            return h.toast(e.message);
         const QJsonObject o = v.toObject();
         QStringList rows;
         for (const auto &r : o.value("qr_rows").toArray())
@@ -1200,7 +1124,7 @@ void myQr(const DialogHost &h)
             QGuiApplication::clipboard()->setText(link);
             h.toast(QStringLiteral("Ссылка скопирована"));
         });
-        Core::instance()->call("status", {}, sheet, [=](const QJsonValue &sv, const CoreError &) {
+        Core::instance()->call("user_profile", params, sheet, [=](const QJsonValue &sv, const CoreError &) {
             const QJsonObject s = sv.toObject();
             const QString display = s.value("display_name").toString().isEmpty() ? s.value("username").toString() : s.value("display_name").toString();
             qr->set(rows, display, s.value("user_id").toString(), "@" + o.value("username").toString());
@@ -1211,7 +1135,18 @@ void myQr(const DialogHost &h)
 
 // ---- conversation info ----
 
+static void groupInfo(const DialogHost &h, const QString &cid);
 void conversationInfo(const DialogHost &h, const QString &cid)
+{
+    Core::instance()->call("get_conversation",{{"conversation_id",cid}},h.host,[=](const QJsonValue &v,const CoreError &e) {
+        if (!e.ok()) return h.toast(e.message);
+        const auto c=v.toObject();
+        if(c.value("kind")=="direct") personProfile(h,c.value("peer_user_id").toString());
+        else groupInfo(h,cid);
+    });
+}
+
+static void groupInfo(const DialogHost &h, const QString &cid)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Сведения"), 480);
     auto *content = new QWidget;

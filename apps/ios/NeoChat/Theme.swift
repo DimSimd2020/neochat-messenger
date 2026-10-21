@@ -298,27 +298,56 @@ final class AvatarView: UIView {
 }
 
 extension UIViewController {
-    func toast(_ text: String) {
+    func toast(_ text: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         guard let host = view.window ?? view else { return }
+        host.viewWithTag(0x4E4354)?.removeFromSuperview()
+        let box = UIStackView()
+        box.tag = 0x4E4354
+        box.axis = .horizontal
+        box.alignment = .center
+        box.glass(18, strong: true)
+        box.clipsToBounds = true
         let l = PaddedLabel()
         l.text = text
         l.numberOfLines = 0
         l.font = Theme.font(15)
         l.textColor = Theme.text
-        l.glass(18, strong: true)
-        l.clipsToBounds = true
-        l.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(l)
+        box.addArrangedSubview(l)
+        box.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(box)
         NSLayoutConstraint.activate([
-            l.centerXAnchor.constraint(equalTo: host.centerXAnchor),
-            l.leadingAnchor.constraint(greaterThanOrEqualTo: host.leadingAnchor, constant: 24),
-            l.bottomAnchor.constraint(equalTo: host.safeAreaLayoutGuide.bottomAnchor, constant: -90),
+            box.centerXAnchor.constraint(equalTo: host.centerXAnchor),
+            box.leadingAnchor.constraint(greaterThanOrEqualTo: host.leadingAnchor, constant: 24),
+            box.trailingAnchor.constraint(lessThanOrEqualTo: host.trailingAnchor, constant: -24),
+            box.bottomAnchor.constraint(equalTo: host.safeAreaLayoutGuide.bottomAnchor, constant: -90),
         ])
-        l.alpha = 0
-        UIAccessibility.post(notification: .announcement, argument: text)
-        UIView.animate(withDuration: Theme.ms(0.18), animations: { l.alpha = 1 }) { _ in
-            UIView.animate(withDuration: Theme.ms(0.18), delay: 3, options: [], animations: { l.alpha = 0 }) { _ in l.removeFromSuperview() }
+        let hide = DispatchWorkItem { [weak box] in
+            guard let box else { return }
+            box.isUserInteractionEnabled = false
+            UIView.animate(withDuration: Theme.ms(0.18), animations: { box.alpha = 0 }) { _ in box.removeFromSuperview() }
         }
+        if let actionTitle, let action {
+            let button = UIButton(type: .system)
+            button.setTitle(actionTitle, for: .normal)
+            button.titleLabel?.font = Theme.font(15, .semibold)
+            button.tintColor = Theme.accent
+            button.contentEdgeInsets = UIEdgeInsets(top: 12, left: 8, bottom: 12, right: 18)
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+            var handled = false
+            button.addAction(UIAction { [weak box] _ in
+                guard !handled, box?.superview != nil else { return }
+                handled = true
+                hide.cancel()
+                box?.removeFromSuperview()
+                action()
+            }, for: .touchUpInside)
+            box.addArrangedSubview(button)
+        }
+        box.alpha = 0
+        UIAccessibility.post(notification: .announcement, argument: text)
+        UIView.animate(withDuration: Theme.ms(0.18)) { box.alpha = 1 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (action == nil ? 3.2 : 5), execute: hide)
     }
 
     /// Bottom sheet with the platform's grabber and detents.
