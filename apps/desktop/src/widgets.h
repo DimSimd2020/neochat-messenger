@@ -4,6 +4,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPainterPath>
+#include <QPlainTextEdit>
 #include <QVariantAnimation>
 #include <QWidget>
 
@@ -142,6 +143,34 @@ private:
     QLineEdit *m_edit;
     QString m_label;
     QVariantAnimation m_float;
+};
+
+// Several-line field with the same floating label; text longer than the limit is cut.
+class TextArea : public QWidget {
+    Q_OBJECT
+public:
+    TextArea(const QString &label, int lines = 3, QWidget *parent = nullptr);
+    QPlainTextEdit *edit() const { return m_edit; }
+    QString text() const { return m_edit->toPlainText(); }
+    void setText(const QString &t);
+    void setMaxLength(int n) { m_max = n; }
+    QSize sizeHint() const override { return {280, height()}; }
+
+signals:
+    void textChanged(const QString &text);
+
+protected:
+    void paintEvent(QPaintEvent *) override;
+    void resizeEvent(QResizeEvent *) override;
+    void mousePressEvent(QMouseEvent *) override;
+    bool eventFilter(QObject *o, QEvent *e) override;
+
+private:
+    void updateFloat(bool animated);
+    QPlainTextEdit *m_edit;
+    QString m_label;
+    QVariantAnimation m_float;
+    int m_max = 0;
 };
 
 // Settings slider: device -> day -> night. Drag, click, arrows, Home/End.

@@ -12,7 +12,6 @@
 #include <QJsonArray>
 #include <QApplication>
 #include <QLocale>
-#include <QMenu>
 #include <QPainter>
 #include <QScrollBar>
 #include <QSettings>
@@ -475,18 +474,15 @@ QString ChatPanel::sortKey() const
 
 void ChatPanel::showSortMenu()
 {
-    QMenu menu(this);
-    menu.setTitle(QStringLiteral("Сортировка"));
+    auto *menu = new PopupMenu(this);
     const QString cur = sortKey();
     for (const auto &s : sorts()) {
-        QAction *a = menu.addAction(s.second, this, [this, key = s.first] {
+        menu->addChoice(s.second, s.first == cur, this, [this, key = s.first] {
             QSettings().setValue(m_archive ? "chats/archiveSort" : "chats/sort", key);
             reload();
         });
-        a->setCheckable(true);
-        a->setChecked(s.first == cur);
     }
-    menu.exec(m_sort->mapToGlobal(QPoint(0, m_sort->height())));
+    menu->popup(m_sort->mapToGlobal(QPoint(0, m_sort->height())));
 }
 
 // Right click: pin (up to 3) and archive, like the swipes on phones.

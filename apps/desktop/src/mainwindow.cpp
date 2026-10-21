@@ -5,6 +5,7 @@
 #include "composer.h"
 #include "core.h"
 #include "dialogs.h"
+#include "filepicker.h"
 #include "messages.h"
 #include "onboarding.h"
 #include "popupmenu.h"
@@ -15,7 +16,6 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
-#include <QFileDialog>
 #include <QCursor>
 #include <QDateTime>
 #include <QSet>
@@ -24,7 +24,6 @@
 #include <QBuffer>
 #include <QHBoxLayout>
 #include <QJsonArray>
-#include <QMenu>
 #include <QMimeDatabase>
 #include <QPainter>
 #include <QProcess>
@@ -509,22 +508,17 @@ MainWindow::MainWindow()
     });
     connect(m_composer, &Composer::attach, this, [this] {
         // Ask what is attached first: photos go to the gallery-like picker and arrive as photos.
-        QMenu menu(this);
-        menu.addAction(QStringLiteral("Фото"), this, [this] {
-            const QStringList files = QFileDialog::getOpenFileNames(this, QStringLiteral("Выберите фото"),
-                                                                    QStandardPaths::writableLocation(QStandardPaths::PicturesLocation),
-                                                                    QStringLiteral("Изображения (*.jpg *.jpeg *.png *.webp *.gif *.bmp *.heic)"));
-            if (!files.isEmpty())
-                sendFiles(files, true);
+        auto *menu = new PopupMenu(this);
+        menu->addAction(QStringLiteral("Фото"), this, [this] {
+            filepicker::open(this, QStringLiteral("Выберите фото"), {"jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"}, true,
+                             [this](const QStringList &files) { sendFiles(files, true); });
         });
-        menu.addAction(QStringLiteral("Файл"), this, [this] {
-            const QStringList files = QFileDialog::getOpenFileNames(this, QStringLiteral("Прикрепить файл"));
-            if (!files.isEmpty())
-                sendFiles(files, false);
+        menu->addAction(QStringLiteral("Файл"), this, [this] {
+            filepicker::open(this, QStringLiteral("Прикрепить файл"), {}, true, [this](const QStringList &files) { sendFiles(files, false); });
         });
         if (m_current.value("can_polls").toBool() && m_current.value("kind").toString() != "direct")
-            menu.addAction(QStringLiteral("Опрос"), this, [this] { dialogs::newPoll(host(), m_current.value("id").toString()); });
-        menu.exec(QCursor::pos());
+            menu->addAction(QStringLiteral("Опрос"), this, [this] { dialogs::newPoll(host(), m_current.value("id").toString()); });
+        menu->popup(QCursor::pos());
     });
     connect(m_composer, &Composer::draftChanged, this, [this](const QString &text) {
         if (!m_current.isEmpty())
@@ -757,8 +751,11 @@ void MainWindow::openConversation(const QString &id)
         applyConversation(c);
         m_listMode = false;
         updateLayoutMode();
-        if (switched)
+        if (switched) {
             m_composer->focusInput();
+            if (c.value("kind").toString() == "group")
+                refreshPresence();
+        }
     });
 }
 
@@ -785,6 +782,11 @@ void MainWindow::refreshPresence()
             ids.insert(c.value("peer_user_id").toString());
     if (!m_current.isEmpty() && m_current.value("kind").toString() == "direct")
         ids.insert(m_current.value("peer_user_id").toString());
+    // Members of the open group, for "N участников, X в сети".
+    if (!m_current.isEmpty() && m_current.value("kind").toString() == "group")
+        for (const auto &x : m_current.value("members").toArray())
+            if (!x.toObject().value("me").toBool())
+                ids.insert(x.toObject().value("user_id").toString());
     if (ids.isEmpty())
         return;
     QJsonArray arr;
@@ -806,6 +808,8 @@ void MainWindow::applyConversation(const QJsonObject &c)
     bool accent = false;
     if (group) {
         count = participants(c.value("member_count").toInt());
+        if (c.value("online_count").toInt() > 0)
+            count += QStringLiteral(", %1 в сети").arg(c.value("online_count").toInt());
         names = memberNames(c.value("members").toArray());
     } else if (channel) {
         count = subscribers(c.value("member_count").toInt());

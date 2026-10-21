@@ -3,7 +3,9 @@
 #include <QPointer>
 #include <QVariantAnimation>
 #include <QWidget>
+#include <functional>
 
+class QHBoxLayout;
 class QVBoxLayout;
 class QGraphicsOpacityEffect;
 
@@ -22,6 +24,8 @@ public:
     Sheet(QWidget *host, const QString &title, int width = 460);
     QVBoxLayout *body() const { return m_body; }
     void setTitle(const QString &title);
+    // Shows a back arrow before the title; it closes this sheet and runs `to`.
+    void setBack(std::function<void()> to);
     void open();
     void close();
     // The dialog itself refuses closing while a request is in flight.
@@ -47,6 +51,8 @@ private:
     QWidget *m_card;
     QVBoxLayout *m_body;
     ui::Label *m_title;
+    ui::IconButton *m_back = nullptr;
+    QHBoxLayout *m_head = nullptr;
     QGraphicsOpacityEffect *m_fade;
     QPointer<QWidget> m_opener;
     QVariantAnimation m_anim;

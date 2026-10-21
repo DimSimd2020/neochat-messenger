@@ -6,6 +6,8 @@
 #include "chatlist.h"
 #include "composer.h"
 #include "core.h"
+#include "dialogs.h"
+#include "filepicker.h"
 #include "mainwindow.h"
 #include "messages.h"
 #include "neocall.h"
@@ -18,20 +20,20 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QBuffer>
-#include <QCheckBox>
 #include <QPainter>
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QMenu>
 #include <QContextMenuEvent>
 #include <QMimeData>
 #include <QClipboard>
 #include <QMouseEvent>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QTimer>
 #include <QToolButton>
 #include <QSettings>
+#include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTranslator>
@@ -168,6 +170,8 @@ private slots:
     void composeSendAndFile();
     void receiptsAndGroup();
     void socialFeatures();
+    void dialogsAndPickers();
+    void groupSheet();
     void calls();
     void phonePeer();
     void themeSettingsAndSidebar();
@@ -176,6 +180,15 @@ private slots:
     void cleanupTestCase();
 
 private:
+    // Dialogs are sheets inside the main window's page stack.
+    QWidget *sheetHost() { return m_window->centralWidget()->findChild<QStackedWidget *>(); }
+    QString openSheets()
+    {
+        QStringList titles;
+        for (auto *s : sheetHost()->findChildren<Sheet *>(QString(), Qt::FindDirectChildrenOnly))
+            titles << s->accessibleName() + (s->isVisible() ? "" : " (hidden)");
+        return titles.join(", ");
+    }
     template <typename T> T *find(const std::function<bool(T *)> &pred)
     {
         for (T *w : m_window->findChildren<T *>())
@@ -215,7 +228,7 @@ private:
     QString m_server, m_shots;
     MainWindow *m_window = nullptr;
     Peer *m_alice = nullptr;
-    QString m_aliceName, m_aliceCode, m_bobName, m_conv;
+    QString m_aliceName, m_aliceCode, m_bobName, m_conv, m_group;
 };
 
 void UiTest::refreshedPageRemovesDeletedMessages()
@@ -274,11 +287,11 @@ void UiTest::registerAccount()
     field("Никнейм")->setText(m_bobName);
     QTest::keyClicks(field("Пароль")->edit(), "correct horse battery");
     button("Создать аккаунт")->click();
-    QTRY_VERIFY_WITH_TIMEOUT(find<QCheckBox>([](QCheckBox *) { return true; }), 15000);
+    QTRY_VERIFY_WITH_TIMEOUT(find<ui::Toggle>([](ui::Toggle *tg) { return tg->text().startsWith("Я сохранил"); }), 15000);
     shot("02-recovery-code");
     QAbstractButton *cont = button("Продолжить");
     QVERIFY(!cont->isEnabled());
-    find<QCheckBox>([](QCheckBox *) { return true; })->setChecked(true);
+    find<ui::Toggle>([](ui::Toggle *tg) { return tg->text().startsWith("Я сохранил"); })->setChecked(true);
     QVERIFY(cont->isEnabled());
     cont->click();
     QTRY_VERIFY(find<ChatPanel>([](ChatPanel *) { return true; }));
@@ -409,6 +422,7 @@ void UiTest::receiptsAndGroup()
 
     const QJsonObject bob = m_alice->call("resolve_contact", {{"username", m_bobName}}).toObject();
     const QString gid = m_alice->call("create_group", {{"title", "Наши"}, {"member_ids", QJsonArray{bob.value("user_id")}}}).toObject().value("id").toString();
+    m_group = gid;
     m_alice->call("send_text", {{"conversation_id", gid}, {"text", "Создала группу для поездки"}});
     m_alice->call("sync_now");
     auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
@@ -641,6 +655,88 @@ void UiTest::socialFeatures()
     QTRY_VERIFY_WITH_TIMEOUT(!panel->conversation(gid).value("in_archive").toBool() && !list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("_archive").toBool(), 10000);
 }
 
+// Settings sub-pages with a back arrow, the 5x7 reaction grid, a group sheet that scrolls
+// instead of overlapping rows, the own file chooser and the multi-line bio field.
+void UiTest::dialogsAndPickers()
+{
+    QSettings().remove("chat/quickReaction");
+    button("Настройки")->click();
+    QTRY_VERIFY(button("Конфиденциальность"));
+    button("Конфиденциальность")->click();
+    QTRY_VERIFY(button("Назад"));
+    shot("20a-privacy-back");
+    button("Назад")->click();
+    QTRY_VERIFY(button("Графика"));
+    QTRY_VERIFY(!button("Назад"));
+    // The sidebar has a button with the same accessible name; the settings one has the text.
+    find<QAbstractButton>([](QAbstractButton *b) { return b->text() == "Звонки"; })->click();
+    QTRY_VERIFY(button("Назад"));
+    button("Назад")->click();
+    QTRY_VERIFY(button("Графика"));
+    // The old settings sheet is still fading out for a moment: wait until only one is left.
+    QTRY_VERIFY([&] {
+        int n = 0;
+        for (auto *b : m_window->findChildren<QAbstractButton *>())
+            if (b->isVisible() && b->text() == "Графика")
+                ++n;
+        return n == 1;
+    }());
+    // The reaction grid is a popup of its own: 35 cells, 5 columns.
+    auto *quick = find<QAbstractButton>([](QAbstractButton *b) { return b->text().startsWith("Быстрая реакция"); });
+    QVERIFY(quick);
+    quick->click();
+    QTRY_VERIFY(QApplication::activePopupWidget());
+    QWidget *popup = QApplication::activePopupWidget();
+    QTest::qWait(300);
+    QWidget *grid = nullptr;
+    for (auto *w : popup->findChildren<QWidget *>())
+        if (w->property("ownKeys").toBool())
+            grid = w;
+    QVERIFY(grid);
+    grid->grab().save(m_shots + "/20b-reaction-grid.png");
+    QCOMPARE(quickReactionChoices().size(), 35);
+    QTest::keyClick(popup, Qt::Key_Escape);
+    QTRY_VERIFY(!QApplication::activePopupWidget());
+    Sheet::closeAll(sheetHost()); // offscreen has no keyboard focus for Escape to arrive at
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
+
+    // Profile: the bio field shows all 100 characters on three lines.
+    find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().startsWith("Профиль"); })->click();
+    QTRY_VERIFY(find<ui::TextArea>([](ui::TextArea *) { return true; }));
+    auto *bio = find<ui::TextArea>([](ui::TextArea *) { return true; });
+    bio->edit()->setPlainText(QString(100, QChar('я')));
+    QVERIFY(bio->text().size() == 100);
+    bio->setText(QString(150, QChar('я')));
+    bio->edit()->setPlainText(bio->edit()->toPlainText() + "ю");
+    QVERIFY(bio->text().size() <= 100);
+    shot("20c-profile-bio");
+    Sheet::closeAll(sheetHost());
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
+
+    // File chooser: a folder with two pictures, pick one with the keyboard.
+    QDir(m_dir.path()).mkpath("picker");
+    for (const QString &n : {QStringLiteral("a.jpg"), QStringLiteral("b.jpg"), QStringLiteral("c.txt")}) {
+        QFile f(m_dir.path() + "/picker/" + n);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("x");
+    }
+    QSettings().setValue("filepicker/dir", m_dir.path() + "/picker");
+    QStringList picked;
+    filepicker::open(m_window, QStringLiteral("Выберите фото"), {"jpg"}, true, [&](const QStringList &f) { picked = f; });
+    QTRY_VERIFY(find<QAbstractScrollArea>([](QAbstractScrollArea *a) { return a->accessibleName() == "Список файлов"; }));
+    auto *list = find<QAbstractScrollArea>([](QAbstractScrollArea *a) { return a->accessibleName() == "Список файлов"; });
+    list->setFocus();
+    QTest::keyClick(list, Qt::Key_Space);
+    QTest::keyClick(list, Qt::Key_Down);
+    QTest::keyClick(list, Qt::Key_Space);
+    shot("20d-file-picker");
+    QTRY_VERIFY(button("Выбрать (2)"));
+    button("Выбрать (2)")->click();
+    QTRY_COMPARE(picked.size(), 2);
+    QVERIFY(picked[0].endsWith("a.jpg") && picked[1].endsWith("b.jpg"));
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
+}
+
 void UiTest::calls()
 {
     auto *calls = CallController::instance();
@@ -720,16 +816,16 @@ void UiTest::calls()
     button("Звонки")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().contains(QStringLiteral("Отклонённый звонок")); }), 5000);
     shot("46-recent-calls");
-    QTest::keyClick(QApplication::focusWidget() ? QApplication::focusWidget() : m_window, Qt::Key_Escape);
-    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+    Sheet::closeAll(sheetHost()); // offscreen has no keyboard focus for Escape to arrive at
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
     button("Настройки")->click();
     QTRY_VERIFY(find<ui::Button>([](ui::Button *b) { return b->text() == QStringLiteral("Звонки"); }));
     find<ui::Button>([](ui::Button *b) { return b->text() == QStringLiteral("Звонки"); })->click();
     QTRY_VERIFY(button("Устройство ввода по умолчанию"));
     QTRY_VERIFY_WITH_TIMEOUT(button("Устройство ввода по умолчанию")->isEnabled(), 10000);
     shot("47-call-settings");
-    QTest::keyClick(QApplication::focusWidget() ? QApplication::focusWidget() : m_window, Qt::Key_Escape);
-    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+    Sheet::closeAll(sheetHost()); // offscreen has no keyboard focus for Escape to arrive at
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
 }
 
 // Manual cross-platform check, skipped unless NEOCHAT_PHONE_PEER names a file:
@@ -808,8 +904,8 @@ void UiTest::themeSettingsAndSidebar()
     QTest::keyClick(slider, Qt::Key_Left);
     QCOMPARE(Theme::instance()->mode(), Theme::Light);
     shot("13-settings-light");
-    QTest::keyClick(slider, Qt::Key_Escape);
-    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+    Sheet::closeAll(sheetHost()); // offscreen has no keyboard focus for Escape to arrive at
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
     shot("14-main-light");
     button("Скрыть список чатов")->click();
     QTest::qWait(400);
@@ -845,8 +941,8 @@ void UiTest::keyChangeBlocksSending()
 
 void UiTest::chatSelectionAndClear()
 {
-    QTest::keyClick(QApplication::focusWidget() ? QApplication::focusWidget() : m_window, Qt::Key_Escape);
-    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+    Sheet::closeAll(sheetHost()); // offscreen has no keyboard focus for Escape to arrive at
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
     auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
     auto *list = panel->findChild<QListView *>();
     auto *view = find<MessageView>([](MessageView *) { return true; });
@@ -885,8 +981,8 @@ void UiTest::chatSelectionAndClear()
     menu->close();
     QTRY_VERIFY(button(QStringLiteral("Очистить")));
     const int beforeClear = messageCount(view);
-    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
-    QTRY_VERIFY(!Sheet::anyOpen(m_window->centralWidget()));
+    Sheet::closeAll(sheetHost()); // offscreen has no keyboard focus for Escape to arrive at
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
     QCOMPARE(messageCount(view), beforeClear);
     menu = open();
     QVERIFY(menu);
@@ -897,6 +993,24 @@ void UiTest::chatSelectionAndClear()
     QTRY_COMPARE(messageCount(view), 0);
     QVERIFY(!m_alice->call("list_messages", {{"conversation_id", m_conv}}).toArray().isEmpty());
     shot("062-cleared-chats");
+}
+
+void UiTest::groupSheet()
+{
+    // The admin sees the photo row and the add button; member rows do not overlap.
+    const QJsonObject bob = m_alice->call("resolve_contact", {{"username", m_bobName}}).toObject();
+    m_alice->call("group_set_members", {{"conversation_id", m_group}, {"member_ids", QJsonArray{bob.value("user_id")}}, {"admin_ids", QJsonArray{bob.value("user_id")}}});
+    m_alice->call("sync_now");
+    QTRY_VERIFY_WITH_TIMEOUT(find<ChatPanel>([](ChatPanel *) { return true; })->conversation(m_group).value("is_admin").toBool(), 20000);
+    DialogHost dh;
+    dh.host = sheetHost();
+    dh.toast = [](const QString &) {};
+    dh.openChat = [](const QString &) {};
+    dialogs::conversationInfo(dh, m_group);
+    QTRY_VERIFY(button("Добавить участников"));
+    shot("20e-group-sheet");
+    Sheet::closeAll(sheetHost());
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
 }
 
 void UiTest::cleanupTestCase()

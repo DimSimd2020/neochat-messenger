@@ -8,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QPainter>
+#include <QScrollArea>
 #include <QVBoxLayout>
 
 namespace {
@@ -28,6 +29,38 @@ protected:
     }
 };
 
+// The body scrolls when the dialog is taller than the window, so rows are never squeezed
+// into each other; below that height the card simply fits its content.
+class BodyScroll : public QScrollArea {
+public:
+    explicit BodyScroll(QWidget *parent) : QScrollArea(parent)
+    {
+        setWidgetResizable(true);
+        setFrameShape(QFrame::NoFrame);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        viewport()->setAutoFillBackground(false);
+    }
+    bool hasHeightForWidth() const override { return true; }
+    int heightForWidth(int w) const override
+    {
+        const QWidget *c = widget();
+        // A layout without wrapped rows has no height for width (-1): its size hint is the height then.
+        const int h = c && c->layout() ? c->layout()->totalHeightForWidth(w) : -1;
+        return h >= 0 ? h : (c ? c->sizeHint().height() : 0);
+    }
+    QSize sizeHint() const override { return widget() ? widget()->sizeHint() : QSize(); }
+    QSize minimumSizeHint() const override { return {0, 96}; }
+
+protected:
+    // Rows added or removed inside the body resize the dialog.
+    bool eventFilter(QObject *o, QEvent *e) override
+    {
+        if (o == widget() && e->type() == QEvent::LayoutRequest)
+            updateGeometry();
+        return QScrollArea::eventFilter(o, e);
+    }
+};
+
 } // namespace
 
 Sheet::Sheet(QWidget *host, const QString &title, int width) : QWidget(host), m_width(width)
@@ -40,6 +73,7 @@ Sheet::Sheet(QWidget *host, const QString &title, int width) : QWidget(host), m_
     outer->setContentsMargins(24, 18, 24, 24);
     outer->setSpacing(14);
     auto *head = new QHBoxLayout;
+    m_head = head;
     m_title = new ui::Label(title, 18, QFont::DemiBold);
     m_title->setAccessibleName(title);
     auto *close = new ui::IconButton("close", QStringLiteral("Закрыть"), m_card, 36);
@@ -47,9 +81,15 @@ Sheet::Sheet(QWidget *host, const QString &title, int width) : QWidget(host), m_
     head->addWidget(m_title, 1);
     head->addWidget(close);
     outer->addLayout(head);
-    m_body = new QVBoxLayout;
+    auto *scroll = new BodyScroll(m_card);
+    auto *content = new QWidget;
+    content->setAutoFillBackground(false);
+    m_body = new QVBoxLayout(content);
+    m_body->setContentsMargins(0, 0, 0, 0);
     m_body->setSpacing(10);
-    outer->addLayout(m_body, 1);
+    scroll->setWidget(content);
+    content->installEventFilter(scroll);
+    outer->addWidget(scroll, 1);
     m_fade = new QGraphicsOpacityEffect(m_card);
     m_fade->setOpacity(0);
     m_card->setGraphicsEffect(m_fade);
@@ -77,6 +117,22 @@ void Sheet::setTitle(const QString &title)
     m_title->setText(title);
 }
 
+void Sheet::setBack(std::function<void()> to)
+{
+    if (!m_back) {
+        m_back = new ui::IconButton("back", QStringLiteral("Назад"), m_card, 36);
+        m_head->insertWidget(0, m_back);
+        m_head->insertSpacing(1, 6);
+    }
+    m_back->disconnect(this);
+    connect(m_back, &QAbstractButton::clicked, this, [this, to = std::move(to)] {
+        if (m_closing || m_busy)
+            return;
+        close();
+        to();
+    });
+}
+
 void Sheet::open()
 {
     setGeometry(parentWidget()->rect());
@@ -84,7 +140,7 @@ void Sheet::open()
     show();
     raise();
     setAccessibleName(m_title->text());
-    // The close button is the first focus stop; fields are not focused automatically.
+    // The back or close button is the first focus stop; fields are not focused automatically.
     QWidget *first = m_card->findChild<ui::IconButton *>();
     if (first)
         first->setFocus(Qt::OtherFocusReason);

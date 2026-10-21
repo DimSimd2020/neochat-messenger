@@ -5,7 +5,6 @@
 #include "widgets.h"
 
 #include <QApplication>
-#include <QCheckBox>
 #include <QClipboard>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -176,13 +175,11 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
         QApplication::clipboard()->setText(m_recoveryCode->text().remove('\n'));
     });
     rl->addWidget(copy);
-    m_saved = new QCheckBox(QStringLiteral("Я сохранил код в надёжном месте"));
-    m_saved->setFont(Theme::instance()->font(14));
-    m_saved->setCursor(Qt::PointingHandCursor);
+    m_saved = new ui::Toggle(QStringLiteral("Я сохранил код в надёжном месте"));
     rl->addWidget(m_saved);
     m_continue = new ui::Button(QStringLiteral("Продолжить"));
     m_continue->setEnabled(false);
-    connect(m_saved, &QCheckBox::toggled, m_continue, &QWidget::setEnabled);
+    connect(m_saved, &QAbstractButton::toggled, m_continue, &QWidget::setEnabled);
     connect(m_continue, &QAbstractButton::clicked, this, [this] {
         // Clear the code from memory-backed widgets as soon as it is confirmed.
         m_recoveryCode->clear();

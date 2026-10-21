@@ -13,6 +13,10 @@ class PopupMenu : public QWidget {
 public:
     explicit PopupMenu(QWidget *parent);
     QAction *addAction(const QString &text, QObject *context, std::function<void()> run);
+    // One of several values: the current one carries a tick instead of an icon.
+    QAction *addChoice(const QString &text, bool current, QObject *context, std::function<void()> run);
+    // Emoji (or any short text) in a grid of `columns`; the current one is highlighted.
+    void addGrid(const QStringList &items, const QString &current, int columns, std::function<void(const QString &)> pick);
     void addWidget(QWidget *widget);
     void addSeparator();
     void popup(const QPoint &globalPos);

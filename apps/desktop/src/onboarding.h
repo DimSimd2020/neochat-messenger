@@ -5,10 +5,10 @@
 
 class QStackedWidget;
 class QTimer;
-class QCheckBox;
 namespace ui {
 class TextField;
 class Button;
+class Toggle;
 class Label;
 class QrView;
 }
@@ -56,7 +56,7 @@ private:
     ui::Button *m_recover;
     // recovery code page
     ui::Label *m_recoveryCode;
-    QCheckBox *m_saved;
+    ui::Toggle *m_saved;
     ui::Button *m_continue;
     // QR sign-in
     QWidget *m_qrCard;

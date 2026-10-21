@@ -27,6 +27,8 @@ add_library(neochat_ui STATIC
     src/widgets.cpp src/widgets.h
     src/sheet.cpp src/sheet.h
     src/popupmenu.cpp src/popupmenu.h
+    src/filepicker.cpp src/filepicker.h
+    src/chrome.cpp src/chrome.h
     src/onboarding.cpp src/onboarding.h
     src/chatlist.cpp src/chatlist.h
     src/messages.cpp src/messages.h

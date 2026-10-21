@@ -1,4 +1,7 @@
 #include "messages.h"
+
+#include "chrome.h"
+#include "filepicker.h"
 #include "popupmenu.h"
 
 #include "core.h"
@@ -12,7 +15,6 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QAbstractTextDocumentLayout>
-#include <QFileDialog>
 #include <QFontDatabase>
 #include <QGraphicsOpacityEffect>
 #include <QHelpEvent>
@@ -21,7 +23,6 @@
 #include <QJsonArray>
 #include <QKeyEvent>
 #include <QLocale>
-#include <QMenu>
 #include <QPainter>
 #include <QPropertyAnimation>
 #include <QScrollBar>
@@ -32,7 +33,6 @@
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
-#include <QToolTip>
 #include <QUrl>
 
 namespace {
@@ -1222,11 +1222,11 @@ void MessageView::enterCheckMode(const QString &id)
             exitCheckMode();
         });
         connect(del, &QAbstractButton::clicked, bar, [this, del] {
-            QMenu menu(this);
+            auto *menu = new PopupMenu(this);
             bool allMine = true;
             for (const auto &m : checkedMessages(m_model, m_checked))
                 allMine = allMine && m.value("outgoing").toBool();
-            menu.addAction(QStringLiteral("Удалить у себя"), this, [this] {
+            menu->addAction(QStringLiteral("Удалить у себя"), this, [this] {
                 const QList<QJsonObject> sel = checkedMessages(m_model, m_checked);
                 exitCheckMode();
                 for (const auto &m : sel)
@@ -1235,7 +1235,7 @@ void MessageView::enterCheckMode(const QString &id)
                             emit toast(e.message);
                     });
             });
-            QAction *all = menu.addAction(QStringLiteral("Удалить у всех"), this, [this] {
+            QAction *all = menu->addAction(QStringLiteral("Удалить у всех"), this, [this] {
                 const QList<QJsonObject> sel = checkedMessages(m_model, m_checked);
                 exitCheckMode();
                 for (const auto &m : sel)
@@ -1245,7 +1245,7 @@ void MessageView::enterCheckMode(const QString &id)
                     });
             });
             all->setEnabled(allMine);
-            menu.exec(del->mapToGlobal(del->rect().bottomLeft()));
+            menu->popup(del->mapToGlobal(del->rect().bottomLeft()));
         });
         connect(x, &QAbstractButton::clicked, bar, [this] { exitCheckMode(); });
         m_checkBar = bar;
@@ -1475,16 +1475,16 @@ bool MessageView::viewportEvent(QEvent *e)
             for (const auto &v : opts[i].toObject().value("voters").toArray())
                 who << v.toString();
             if (!who.isEmpty()) {
-                QToolTip::showText(he->globalPos(), who.join(", "), viewport());
+                chrome::showTip(he->globalPos(), who.join(", "), viewport());
                 return true;
             }
         }
         const QString link = linkAt(m, L, he->pos());
         if (!link.isEmpty()) {
-            QToolTip::showText(he->globalPos(), link, viewport());
+            chrome::showTip(he->globalPos(), link, viewport());
             return true;
         }
-        QToolTip::hideText();
+        chrome::hideTip();
         return true;
     }
     return QListView::viewportEvent(e);
@@ -1689,12 +1689,11 @@ void MessageView::openFile(const QJsonObject &m)
 void MessageView::saveFile(const QJsonObject &m)
 {
     const QString name = m.value("file").toObject().value("name").toString();
-    const QString dest = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранить файл"),
-                                                      QStandardPaths::writableLocation(QStandardPaths::DownloadLocation) + "/" + name);
-    if (dest.isEmpty())
-        return;
-    Core::instance()->call("export_file", {{"message_id", m.value("id")}, {"dest", dest}}, this, [this](const QJsonValue &, const CoreError &e) {
-        emit toast(e.ok() ? QStringLiteral("Файл сохранён") : e.message);
+    const QString id = m.value("id").toString();
+    filepicker::save(this, QStringLiteral("Сохранить файл"), name, [this, id](const QString &dest) {
+        Core::instance()->call("export_file", {{"message_id", id}, {"dest", dest}}, this, [this](const QJsonValue &, const CoreError &e) {
+            emit toast(e.ok() ? QStringLiteral("Файл сохранён") : e.message);
+        });
     });
 }
 
@@ -1715,7 +1714,8 @@ QString quickReaction()
 
 QStringList quickReactionChoices()
 {
-    return QString::fromUtf8("❤️ 👍 🔥 😂 😮 😢 🙏 👏 🎉 😍 🤝 👀").split(' ', Qt::SkipEmptyParts);
+    // 5 columns by 7 rows; the phones offer the same set.
+    return QString::fromUtf8("❤️ 👍 🔥 😂 😮 😢 🙏 👏 🎉 😍 🤝 👀 👎 😡 🤔 😎 🥰 😘 🤩 😁 😭 🤯 😱 🥳 🤗 💯 ✨ ⚡ 💔 💪 🙌 👌 🤮 🥺 😴").split(' ', Qt::SkipEmptyParts);
 }
 
 void loadQuickReaction(QObject *ctx)

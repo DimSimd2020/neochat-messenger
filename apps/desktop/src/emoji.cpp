@@ -7,7 +7,6 @@
 #include <QGridLayout>
 #include <QPainter>
 #include <QPropertyAnimation>
-#include <QPushButton>
 #include <QScrollArea>
 #include <QVBoxLayout>
 
@@ -41,6 +40,43 @@ const QList<QPair<QString, QStringList>> &categories()
 
 } // namespace emoji
 
+namespace {
+// One emoji in the picker, painted by hand.
+class EmojiCell : public QAbstractButton {
+public:
+    EmojiCell(const QString &e, const QFont &font, QWidget *parent) : QAbstractButton(parent), m_font(font)
+    {
+        setText(e);
+        setFixedSize(40, 40);
+        setCursor(Qt::PointingHandCursor);
+        setAccessibleName(e);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+
+protected:
+    void enterEvent(QEnterEvent *) override { update(); }
+    void leaveEvent(QEvent *) override { update(); }
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        if (underMouse() || isDown() || hasFocus()) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(Theme::p().raised);
+            p.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 10, 10);
+        }
+        if (hasFocus())
+            ui::paintFocusRing(&p, QRectF(rect()).adjusted(1, 1, -1, -1), 10);
+        p.setFont(m_font);
+        p.setPen(Theme::p().text);
+        p.drawText(rect(), Qt::AlignCenter, text());
+    }
+
+private:
+    QFont m_font;
+};
+}
+
 EmojiPopup::EmojiPopup(QWidget *anchor, std::function<void(const QString &)> pick)
     : QWidget(anchor, Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint)
 {
@@ -71,13 +107,8 @@ EmojiPopup::EmojiPopup(QWidget *anchor, std::function<void(const QString &)> pic
         grid->setSpacing(2);
         for (int i = 0; i < cat.second.size(); ++i) {
             const QString e = cat.second[i];
-            auto *b = new QPushButton(e, gridHost);
-            b->setFlat(true);
-            b->setFixedSize(40, 40);
-            b->setCursor(Qt::PointingHandCursor);
-            b->setAccessibleName(e);
-            b->setFont(f);
-            connect(b, &QPushButton::clicked, this, [this, pick, e] {
+            auto *b = new EmojiCell(e, f, gridHost);
+            connect(b, &QAbstractButton::clicked, this, [this, pick, e] {
                 pick(e);
                 close();
             });
@@ -101,7 +132,7 @@ void EmojiPopup::popup(const QPoint &bottomRight)
     connect(fade, &QPropertyAnimation::finished, this, [this] { setGraphicsEffect(nullptr); });
     show();
     fade->start(QAbstractAnimation::DeleteWhenStopped);
-    if (auto *first = findChild<QPushButton *>())
+    if (auto *first = findChild<QAbstractButton *>())
         first->setFocus();
 }
 

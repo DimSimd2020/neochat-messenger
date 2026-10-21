@@ -1,8 +1,10 @@
 #include "dialogs.h"
 
 #include "calls.h"
+#include "filepicker.h"
 #include "core.h"
 #include "messages.h"
+#include "popupmenu.h"
 #include "sheet.h"
 #include "theme.h"
 #include "widgets.h"
@@ -14,7 +16,6 @@
 #include <memory>
 #include <QDateTime>
 #include <QGuiApplication>
-#include <QFileDialog>
 #include <QImageReader>
 #include <QDir>
 #include <QTemporaryFile>
@@ -22,7 +23,6 @@
 #include <QLinearGradient>
 #include <QHBoxLayout>
 #include <QJsonArray>
-#include <QMenu>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
@@ -316,19 +316,16 @@ void contacts(const DialogHost &h)
     };
     QObject::connect(search->edit(), &QLineEdit::textChanged, sheet, [=] { (*reload)(); });
     QObject::connect(sortBtn, &QAbstractButton::clicked, sheet, [=] {
-        QMenu menu(sortBtn);
+        auto *menu = new PopupMenu(sortBtn);
         const QList<QPair<QString, QString>> modes{{"name-asc", QStringLiteral("Имя А–Я")}, {"name-desc", QStringLiteral("Имя Я–А")}, {"recent", QStringLiteral("Дата добавления")}};
         for (const auto &m : modes) {
-            QAction *a = menu.addAction(m.second);
-            a->setCheckable(true);
-            a->setChecked(*sort == m.first);
-            QObject::connect(a, &QAction::triggered, sheet, [=] {
+            menu->addChoice(m.second, *sort == m.first, sheet, [=] {
                 *sort = m.first;
                 QSettings().setValue("contacts/sort", m.first);
                 (*reload)();
             });
         }
-        menu.exec(sortBtn->mapToGlobal(QPoint(0, sortBtn->height())));
+        menu->popup(sortBtn->mapToGlobal(QPoint(0, sortBtn->height())));
     });
     QObject::connect(add, &QAbstractButton::clicked, sheet, [=] { newContact(h, [=] { (*reload)(); }); });
     QObject::connect(Core::instance(), &Core::event, sheet, [=](const QJsonObject &ev) {
@@ -567,8 +564,8 @@ void devices(const DialogHost &h)
                     QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
                         if (!canRevoke)
                             return;
-                        QMenu menu(row);
-                        menu.addAction(QStringLiteral("Отозвать «%1»").arg(name), sheet, [=] {
+                        auto *menu = new PopupMenu(row);
+                        menu->addAction(QStringLiteral("Отозвать «%1»").arg(name), sheet, [=] {
                             sheet->setBusy(true);
                             Core::instance()->call("revoke_device", {{"device_id", id}}, sheet, [=](const QJsonValue &, const CoreError &re) {
                                 sheet->setBusy(false);
@@ -578,7 +575,7 @@ void devices(const DialogHost &h)
                                 (*reload)();
                             });
                         });
-                        menu.exec(row->mapToGlobal(QPoint(60, row->height())));
+                        menu->popup(row->mapToGlobal(QPoint(60, row->height())));
                     });
                     list->add(row);
                 }
@@ -618,7 +615,7 @@ void recentCalls(const DialogHost &h)
                     row->warning = sub;
                 const QString cid = c.value("conversation_id").toString();
                 QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
-                    QMenu menu(row);
+                    auto *menu = new PopupMenu(row);
                     auto call = [=](bool video) {
                         Core::instance()->call("get_conversation", {{"conversation_id", cid}}, sheet, [=](const QJsonValue &cv, const CoreError &ce) {
                             if (!ce.ok())
@@ -627,13 +624,13 @@ void recentCalls(const DialogHost &h)
                             CallController::instance()->start(cv.toObject(), video);
                         });
                     };
-                    menu.addAction(QStringLiteral("Позвонить"), sheet, [=] { call(false); });
-                    menu.addAction(QStringLiteral("Видеозвонок"), sheet, [=] { call(true); });
-                    menu.addAction(QStringLiteral("Открыть чат"), sheet, [=] {
+                    menu->addAction(QStringLiteral("Позвонить"), sheet, [=] { call(false); });
+                    menu->addAction(QStringLiteral("Видеозвонок"), sheet, [=] { call(true); });
+                    menu->addAction(QStringLiteral("Открыть чат"), sheet, [=] {
                         sheet->close();
                         h.openChat(cid);
                     });
-                    menu.exec(row->mapToGlobal(QPoint(60, row->height())));
+                    menu->popup(row->mapToGlobal(QPoint(60, row->height())));
                 });
                 list->add(row);
             }
@@ -655,6 +652,7 @@ void recentCalls(const DialogHost &h)
 void callSettings(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Звонки"), 480);
+    sheet->setBack([h] { dialogs::settings(h); });
     struct Choice {
         const char *key, *list, *title, *fallback;
     };
@@ -691,13 +689,10 @@ void callSettings(const DialogHost &h)
             b->setText(label());
             b->setEnabled(true);
             QObject::connect(b, &QAbstractButton::clicked, sheet, [=] {
-                QMenu menu(b);
+                auto *menu = new PopupMenu(b);
                 const QString cur = QSettings().value(ch.key).toString();
                 auto add = [&](const QString &name, const QString &id) {
-                    QAction *a = menu.addAction(name);
-                    a->setCheckable(true);
-                    a->setChecked(cur == id);
-                    QObject::connect(a, &QAction::triggered, sheet, [=] {
+                    menu->addChoice(name, cur == id, sheet, [=] {
                         if (id.isEmpty())
                             QSettings().remove(ch.key);
                         else
@@ -709,8 +704,8 @@ void callSettings(const DialogHost &h)
                 for (const auto &d : devs)
                     add(d.toObject().value("name").toString(), d.toObject().value("id").toString());
                 if (devs.isEmpty())
-                    menu.addAction(QString::fromUtf8(i == 2 ? "Камеры не найдены" : "Устройства не найдены"))->setEnabled(false);
-                menu.exec(b->mapToGlobal(QPoint(0, b->height())));
+                    menu->addAction(QString::fromUtf8(i == 2 ? "Камеры не найдены" : "Устройства не найдены"), sheet, [] {})->setEnabled(false);
+                menu->popup(b->mapToGlobal(QPoint(0, b->height())));
             });
         }
     });
@@ -722,6 +717,7 @@ void callSettings(const DialogHost &h)
 void graphicsSettings(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Графика"), 480);
+    sheet->setBack([h] { dialogs::settings(h); });
     auto *themeHead = new QHBoxLayout;
     themeHead->addWidget(new ui::Label(QStringLiteral("Тема"), 15, QFont::DemiBold), 1);
     static const char *const names[] = {"Устройство", "День", "Ночь"};
@@ -759,6 +755,7 @@ void graphicsSettings(const DialogHost &h)
 void privacySettings(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Конфиденциальность"), 480);
+    sheet->setBack([h] { dialogs::settings(h); });
     auto *twoFactor = new ui::Toggle(QStringLiteral("Подтверждение входа"));
     auto *lastSeen = new ui::Toggle(QStringLiteral("Время последнего визита"));
     twoFactor->setEnabled(false);
@@ -828,21 +825,16 @@ void settings(const DialogHost &h)
     auto *quick = new ui::Button(QStringLiteral("Быстрая реакция · ") + quickReaction(), ui::Button::Secondary);
     quick->setToolTip(QStringLiteral("Двойной щелчок по сообщению ставит эту реакцию. Настройка общая для всех ваших устройств"));
     QObject::connect(quick, &QAbstractButton::clicked, sheet, [=] {
-        QMenu menu(quick);
-        for (const QString &e : quickReactionChoices()) {
-            QAction *a = menu.addAction(e);
-            a->setCheckable(true);
-            a->setChecked(e == quickReaction());
-            QObject::connect(a, &QAction::triggered, sheet, [=] {
-                Core::instance()->call("set_settings", {{"quick_reaction", e}}, sheet, [=](const QJsonValue &, const CoreError &err) {
-                    if (!err.ok())
-                        return h.toast(err.message);
-                    QSettings().setValue("chat/quickReaction", e);
-                    quick->setText(QStringLiteral("Быстрая реакция · ") + e);
-                });
+        auto *menu = new PopupMenu(quick);
+        menu->addGrid(quickReactionChoices(), quickReaction(), 5, [=](const QString &e) {
+            Core::instance()->call("set_settings", {{"quick_reaction", e}}, sheet, [=](const QJsonValue &, const CoreError &err) {
+                if (!err.ok())
+                    return h.toast(err.message);
+                QSettings().setValue("chat/quickReaction", e);
+                quick->setText(QStringLiteral("Быстрая реакция · ") + e);
             });
-        }
-        menu.exec(quick->mapToGlobal(QPoint(0, quick->height())));
+        });
+        menu->popup(quick->mapToGlobal(QPoint(0, quick->height())));
     });
     sheet->body()->addWidget(quick);
     auto *update = new ui::Button(QStringLiteral("Проверить обновления · версия ") + QStringLiteral(NEOCHAT_VERSION), ui::Button::Secondary);
@@ -854,12 +846,12 @@ void settings(const DialogHost &h)
     sheet->body()->addSpacing(6);
     auto *logout = new ui::Button(QStringLiteral("Выйти из аккаунта"), ui::Button::Danger);
     QObject::connect(logout, &QAbstractButton::clicked, sheet, [=] {
-        QMenu menu(logout);
-        menu.addAction(QStringLiteral("Выйти: ключи и история на этом компьютере будут удалены"), sheet, [=] {
+        auto *menu = new PopupMenu(logout);
+        menu->addAction(QStringLiteral("Выйти: ключи и история на этом компьютере будут удалены"), sheet, [=] {
             sheet->close();
             h.logout();
         });
-        menu.exec(logout->mapToGlobal(QPoint(0, logout->height())));
+        menu->popup(logout->mapToGlobal(QPoint(0, logout->height())));
     });
     sheet->body()->addWidget(logout);
     sheet->open();
@@ -891,6 +883,43 @@ void whatsNew(const DialogHost &h)
 
 // ---- profile ----
 
+// Picks an image, cuts the middle square and saves it as a small JPEG in a temporary file
+// (nullptr when it cannot be read or stays above `maxBytes` even at low quality).
+void pickSquareJpeg(const DialogHost &h, QWidget *anchor, const QString &title, int side, qint64 maxBytes,
+                    std::function<void(std::shared_ptr<QTemporaryFile>)> done)
+{
+    const QPointer<QWidget> guard(anchor);
+    filepicker::open(anchor, title, {"jpg", "jpeg", "png", "webp", "bmp", "heic"}, false, [h, guard, side, maxBytes, done](const QStringList &files) {
+        const QString path = files.first();
+        QThreadPool::globalInstance()->start([h, guard, side, maxBytes, done, path] {
+            QImageReader reader(path);
+            reader.setAutoTransform(true);
+            const QSize size = reader.size();
+            if (size.isValid())
+                reader.setScaledSize(size.scaled(side * 2, side * 2, Qt::KeepAspectRatio));
+            const QImage image = reader.read();
+            std::shared_ptr<QTemporaryFile> temp;
+            if (!image.isNull()) {
+                const int s = qMin(image.width(), image.height());
+                const QImage square = image.copy((image.width() - s) / 2, (image.height() - s) / 2, s, s).scaled(side, side, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                for (int quality : {75, 60, 45, 30}) {
+                    auto t = std::make_shared<QTemporaryFile>(QDir::tempPath() + "/neochat-avatar-XXXXXX.jpg");
+                    if (t->open() && square.save(t.get(), "JPEG", quality) && t->size() <= maxBytes) {
+                        t->close();
+                        temp = t;
+                        break;
+                    }
+                }
+            }
+            if (guard)
+                QMetaObject::invokeMethod(guard.data(), [guard, temp, done] {
+                    if (guard)
+                        done(temp);
+                }, Qt::QueuedConnection);
+        });
+    });
+}
+
 void profile(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Профиль"), 420);
@@ -915,27 +944,10 @@ void profile(const DialogHost &h)
     };
     QObject::connect(removePhoto, &QAbstractButton::clicked, sheet, [updatePhoto] { updatePhoto({}); });
     QObject::connect(photo, &QAbstractButton::clicked, sheet, [h, sheet, updatePhoto] {
-        const QString path = QFileDialog::getOpenFileName(sheet, QStringLiteral("Фото профиля"), {}, QStringLiteral("Изображения (*.jpg *.jpeg *.png *.webp *.bmp *.heic)"));
-        if (path.isEmpty()) return;
-        const QPointer<Sheet> guard(sheet);
-        QThreadPool::globalInstance()->start([guard, path, h, updatePhoto] {
-            QImageReader reader(path);
-            reader.setAutoTransform(true);
-            const QSize size = reader.size();
-            if (size.isValid()) reader.setScaledSize(size.scaled(512, 512, Qt::KeepAspectRatio));
-            const QImage image = reader.read();
-            auto temp = std::make_shared<QTemporaryFile>(QDir::tempPath() + "/neochat-avatar-XXXXXX.jpg");
-            if (!image.isNull()) {
-                const int side = qMin(image.width(), image.height());
-                const QImage square = image.copy((image.width() - side) / 2, (image.height() - side) / 2, side, side).scaled(256, 256, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                if (!temp->open() || !square.save(temp.get(), "JPEG", 75) || temp->size() > 49152) temp.reset();
-                else temp->close();
-            } else temp.reset();
-            if (guard) QMetaObject::invokeMethod(guard, [guard, temp, h, updatePhoto] {
-                if (!guard) return;
-                if (!temp) return h.toast(QStringLiteral("Не удалось прочитать фото"));
-                updatePhoto(temp->fileName(), temp);
-            }, Qt::QueuedConnection);
+        pickSquareJpeg(h, sheet, QStringLiteral("Фото профиля"), 256, 49152, [h, updatePhoto](std::shared_ptr<QTemporaryFile> temp) {
+            if (!temp)
+                return h.toast(QStringLiteral("Не удалось прочитать фото"));
+            updatePhoto(temp->fileName(), temp);
         });
     });
     auto *name = new ui::Label({}, 20, QFont::Bold);
@@ -947,11 +959,11 @@ void profile(const DialogHost &h)
     about->hide();
     sheet->body()->addWidget(about);
     auto *edit = new ui::TextField(QStringLiteral("Имя"));
-    auto *bio = new ui::TextField(QStringLiteral("О себе, до 100 символов"));
-    bio->edit()->setMaxLength(100);
+    auto *bio = new ui::TextArea(QStringLiteral("О себе, до 100 символов"), 3);
+    bio->setMaxLength(100);
     auto *count = new ui::Label(QStringLiteral("0/100"), 12.5, 400, ui::Label::Muted);
     count->setAlignment(Qt::AlignRight);
-    QObject::connect(bio->edit(), &QLineEdit::textChanged, sheet, [=](const QString &t) { count->setText(QStringLiteral("%1/100").arg(t.size())); });
+    QObject::connect(bio, &ui::TextArea::textChanged, sheet, [=](const QString &t) { count->setText(QStringLiteral("%1/100").arg(t.size())); });
     auto *save = new ui::Button(QStringLiteral("Сохранить"), ui::Button::Secondary);
     sheet->body()->addWidget(edit);
     sheet->body()->addWidget(bio);
@@ -1136,15 +1148,15 @@ void conversationInfo(const DialogHost &h, const QString &cid)
             for (const auto &a : c.value("admins").toArray())
                 admins.insert(a.toString());
             // Everyone except me, optionally without one person or with one more.
-            auto others = [members](const QString &without, const QString &with) {
+            auto others = [members](const QString &without, const QStringList &with) {
                 QJsonArray ids;
                 for (const auto &y : members) {
                     const QJsonObject o = y.toObject();
                     if (!o.value("me").toBool() && o.value("user_id").toString() != without)
                         ids << o.value("user_id");
                 }
-                if (!with.isEmpty())
-                    ids << with;
+                for (const QString &w : with)
+                    ids << w;
                 return ids;
             };
             auto setMembers = [=](QJsonObject p, const QString &done) {
@@ -1167,6 +1179,38 @@ void conversationInfo(const DialogHost &h, const QString &cid)
             };
 
             lay->addWidget(new ui::Label(channel ? QStringLiteral("Канал") : QStringLiteral("Группа"), 14, 400, ui::Label::Muted));
+            const bool canEditInfo = c.value("can_edit_info").toBool() && active;
+            const QString groupPhoto = c.value("avatar_path").toString();
+            if (canEditInfo || !groupPhoto.isEmpty()) {
+                auto *photo = new PersonRow(c.value("title").toString(), canEditInfo ? QStringLiteral("Нажмите, чтобы сменить фото") : QString(), cid);
+                photo->avatar = groupPhoto;
+                lay->addWidget(photo);
+                if (canEditInfo) {
+                    QObject::connect(photo, &QAbstractButton::clicked, sheet, [=] {
+                        pickSquareJpeg(h, sheet, QStringLiteral("Фото группы"), 192, 18000, [=](std::shared_ptr<QTemporaryFile> temp) {
+                            if (!temp)
+                                return h.toast(QStringLiteral("Не удалось подготовить фото"));
+                            Core::instance()->call("group_set_avatar", {{"conversation_id", cid}, {"path", temp->fileName()}}, sheet, [=](const QJsonValue &, const CoreError &ae) {
+                                Q_UNUSED(temp)
+                                if (!ae.ok())
+                                    return fail(h, ae);
+                                (*build)();
+                            });
+                        });
+                    });
+                    if (!groupPhoto.isEmpty()) {
+                        auto *remove = new ui::Button(QStringLiteral("Удалить фото"), ui::Button::Flat);
+                        QObject::connect(remove, &QAbstractButton::clicked, sheet, [=] {
+                            Core::instance()->call("group_set_avatar", {{"conversation_id", cid}, {"path", ""}}, sheet, [=](const QJsonValue &, const CoreError &ae) {
+                                if (!ae.ok())
+                                    return fail(h, ae);
+                                (*build)();
+                            });
+                        });
+                        lay->addWidget(remove);
+                    }
+                }
+            }
             const QString description = c.value("description").toString();
             if (!description.isEmpty()) {
                 auto *d = new ui::Label(description, 14.5);
@@ -1177,7 +1221,8 @@ void conversationInfo(const DialogHost &h, const QString &cid)
             if (c.value("can_edit_info").toBool() && active) {
                 auto *rename = new ui::TextField(channel ? QStringLiteral("Название канала") : QStringLiteral("Название группы"));
                 rename->setText(c.value("title").toString());
-                auto *about = new ui::TextField(QStringLiteral("Описание"));
+                auto *about = new ui::TextArea(QStringLiteral("Описание, до 255 символов"), 3);
+                about->setMaxLength(255);
                 about->setText(description);
                 auto *save = new ui::Button(QStringLiteral("Сохранить название и описание"), ui::Button::Secondary);
                 lay->addWidget(rename);
@@ -1217,8 +1262,8 @@ void conversationInfo(const DialogHost &h, const QString &cid)
                 const QString tag = m.value("tag").toString();
                 const bool me = m.value("me").toBool();
                 QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
-                    QMenu menu(row);
-                    menu.addAction(QStringLiteral("Тег…"), sheet, [=] {
+                    auto *menu = new PopupMenu(row);
+                    menu->addAction(QStringLiteral("Тег…"), sheet, [=] {
                         auto *ts = new Sheet(h.host, QStringLiteral("Тег: ") + name, 380);
                         auto *field = new ui::TextField(QStringLiteral("Например, «дизайн» или «модератор»"));
                         field->setText(tag);
@@ -1241,19 +1286,19 @@ void conversationInfo(const DialogHost &h, const QString &cid)
                     });
                     if (owner && !me) {
                         if (admins.contains(uid))
-                            menu.addAction(QStringLiteral("Снять права админа"), sheet, [=] {
+                            menu->addAction(QStringLiteral("Снять права админа"), sheet, [=] {
                                 setMembers({{"member_ids", others({}, {})}, {"admin_ids", adminIds(uid, {})}}, QStringLiteral("Права админа сняты"));
                             });
                         else
-                            menu.addAction(QStringLiteral("Назначить админом"), sheet, [=] {
+                            menu->addAction(QStringLiteral("Назначить админом"), sheet, [=] {
                                 setMembers({{"member_ids", others({}, {})}, {"admin_ids", adminIds({}, uid)}}, QStringLiteral("Назначен админ"));
                             });
                     }
                     if (!me && uid != ownerId && (owner || !admins.contains(uid)))
-                        menu.addAction(channel ? QStringLiteral("Удалить из канала") : QStringLiteral("Исключить из группы"), sheet, [=] {
+                        menu->addAction(channel ? QStringLiteral("Удалить из канала") : QStringLiteral("Исключить из группы"), sheet, [=] {
                             setMembers({{"member_ids", others(uid, {})}}, QStringLiteral("Исключён. Новые сообщения ему не придут"));
                         });
-                    menu.exec(row->mapToGlobal(QPoint(60, row->height())));
+                    menu->popup(row->mapToGlobal(QPoint(60, row->height())));
                 });
             }
             list->fit();
@@ -1268,19 +1313,47 @@ void conversationInfo(const DialogHost &h, const QString &cid)
                         QSet<QString> current;
                         for (const auto &y : members)
                             current.insert(y.toObject().value("user_id").toString());
-                        QMenu menu(add);
+                        auto *pick = new Sheet(h.host, channel ? QStringLiteral("Добавить подписчиков") : QStringLiteral("Добавить участников"), 440);
+                        auto *pl = new RowList(320);
+                        auto chosen = std::make_shared<QStringList>();
+                        auto *confirm = new ui::Button(QStringLiteral("Добавить"));
+                        confirm->setEnabled(false);
+                        int shown = 0;
                         for (const auto &y : lv.toArray()) {
                             const QJsonObject ct = y.toObject();
                             const QString uid = ct.value("user_id").toString();
                             if (current.contains(uid))
                                 continue;
-                            menu.addAction(ct.value("display_name").toString() + "  @" + ct.value("username").toString(), sheet, [=] {
-                                setMembers({{"member_ids", others({}, uid)}}, QStringLiteral("Добавлен. Прошлые сообщения ему не видны"));
+                            auto *row = new PersonRow(ct.value("display_name").toString(), "@" + ct.value("username").toString(), uid);
+                            row->avatar = ct.value("avatar_path").toString();
+                            row->multi = true;
+                            row->setCheckable(true);
+                            QObject::connect(row, &QAbstractButton::toggled, pick, [=](bool on) {
+                                if (on)
+                                    chosen->append(uid);
+                                else
+                                    chosen->removeAll(uid);
+                                confirm->setEnabled(!chosen->isEmpty());
+                                confirm->setText(chosen->isEmpty() ? QStringLiteral("Добавить") : QStringLiteral("Добавить (%1)").arg(chosen->size()));
                             });
+                            pl->add(row);
+                            ++shown;
                         }
-                        if (menu.isEmpty())
-                            menu.addAction(QStringLiteral("Все контакты уже здесь"))->setEnabled(false);
-                        menu.exec(add->mapToGlobal(QPoint(0, add->height())));
+                        if (shown == 0) {
+                            pick->body()->addWidget(mutedText(QStringLiteral("Все ваши контакты уже здесь. Новых можно добавить в разделе «Контакты».")));
+                        } else {
+                            pl->fit();
+                            pick->body()->addWidget(pl);
+                        }
+                        QObject::connect(confirm, &QAbstractButton::clicked, pick, [=] {
+                            pick->close();
+                            setMembers({{"member_ids", others({}, *chosen)}}, QStringLiteral("Добавлено. Прошлые сообщения новым участникам не видны"));
+                        });
+                        if (shown > 0)
+                            pick->body()->addWidget(confirm);
+                        else
+                            confirm->deleteLater();
+                        pick->open();
                     });
                 });
             }
@@ -1313,17 +1386,17 @@ void conversationInfo(const DialogHost &h, const QString &cid)
             if (!c.value("left").toBool()) {
                 auto *leave = new ui::Button(channel ? QStringLiteral("Выйти из канала") : QStringLiteral("Выйти из группы"), ui::Button::Danger);
                 QObject::connect(leave, &QAbstractButton::clicked, sheet, [=] {
-                    QMenu menu(leave);
+                    auto *menu = new PopupMenu(leave);
                     const QString what = owner ? (channel ? QStringLiteral("Выйти: канал станет архивным для всех") : QStringLiteral("Выйти: группа станет архивной для всех"))
                                                : QStringLiteral("Выйти: новые сообщения перестанут приходить");
-                    menu.addAction(what, sheet, [=] {
+                    menu->addAction(what, sheet, [=] {
                         Core::instance()->call("group_leave", {{"conversation_id", cid}}, sheet, [=](const QJsonValue &, const CoreError &ge) {
                             if (!ge.ok())
                                 return fail(h, ge);
                             sheet->close();
                         });
                     });
-                    menu.exec(leave->mapToGlobal(QPoint(0, leave->height())));
+                    menu->popup(leave->mapToGlobal(QPoint(0, leave->height())));
                 });
                 lay->addWidget(leave);
             }

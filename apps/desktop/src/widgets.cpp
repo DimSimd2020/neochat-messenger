@@ -7,6 +7,8 @@
 #include <QKeyEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPlainTextEdit>
+#include <QTextCursor>
 #include <QPixmapCache>
 #include <QSvgRenderer>
 #include <QTimer>
@@ -39,6 +41,8 @@ const QHash<QString, QString> &icons()
         {"tick", R"(<path d="m5 12 4 4L19 6"/>)"},
         {"clock", R"(<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>)"},
         {"alert", R"(<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.1"/>)"},
+        {"folder", R"(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>)"},
+        {"up", R"(<path d="M12 19V5m-6 6 6-6 6 6"/>)"},
         {"file", R"(<path d="M6 3h8l4 4v14H6V3Zm8 0v5h4M9 12h6M9 16h4"/>)"},
         {"download", R"(<path d="M12 3v12m-5-5 5 5 5-5M5 18v3h14v-3"/>)"},
         {"person-add", R"(<circle cx="9" cy="7" r="3.5"/><path d="M2.5 21v-2a6.5 6.5 0 0 1 13 0v2M19 7v8m-4-4h8"/>)"},
@@ -546,6 +550,98 @@ void TextField::paintEvent(QPaintEvent *)
     p.setPen(m_edit->hasFocus() ? c.accent : c.muted);
     const qreal y = (height() - QFontMetricsF(p.font()).height()) / 2 * (1 - t) + 7 * t;
     p.drawText(QRectF(15, y, width() - 30, QFontMetricsF(p.font()).height()), Qt::AlignLeft | Qt::AlignVCenter, m_label);
+}
+
+// ---- TextArea ----
+
+TextArea::TextArea(const QString &label, int lines, QWidget *parent) : QWidget(parent), m_label(label)
+{
+    m_edit = new QPlainTextEdit(this);
+    m_edit->setFrameShape(QFrame::NoFrame);
+    m_edit->setAccessibleName(label);
+    m_edit->setFont(Theme::instance()->font(14.5));
+    m_edit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_edit->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_edit->setTabChangesFocus(true);
+    m_edit->viewport()->setAutoFillBackground(false);
+    m_edit->installEventFilter(this);
+    setFixedHeight(32 + lines * QFontMetrics(m_edit->font()).lineSpacing());
+    m_float.setStartValue(0.0);
+    m_float.setEndValue(0.0);
+    connect(&m_float, &QVariantAnimation::valueChanged, this, qOverload<>(&QWidget::update));
+    connect(m_edit, &QPlainTextEdit::textChanged, this, [this] {
+        if (m_max > 0 && m_edit->toPlainText().size() > m_max) {
+            QSignalBlocker block(m_edit);
+            m_edit->setPlainText(m_edit->toPlainText().left(m_max));
+            m_edit->moveCursor(QTextCursor::End);
+        }
+        updateFloat(true);
+        emit textChanged(m_edit->toPlainText());
+    });
+    auto applyColors = [this] {
+        QPalette pal = m_edit->palette();
+        pal.setColor(QPalette::Base, Qt::transparent);
+        pal.setColor(QPalette::Text, Theme::p().text);
+        m_edit->setPalette(pal);
+        update();
+    };
+    applyColors();
+    connect(Theme::instance(), &Theme::changed, this, applyColors);
+    connect(Theme::instance(), &Theme::fontChanged, this, [this] { m_edit->setFont(Theme::instance()->font(14.5)); });
+    setCursor(Qt::IBeamCursor);
+}
+
+void TextArea::setText(const QString &t)
+{
+    QSignalBlocker block(m_edit);
+    m_edit->setPlainText(t);
+    updateFloat(false);
+}
+
+void TextArea::updateFloat(bool animated)
+{
+    const qreal target = (m_edit->hasFocus() || !m_edit->toPlainText().isEmpty()) ? 1.0 : 0.0;
+    const qreal cur = m_float.currentValue().isValid() ? m_float.currentValue().toReal() : 0.0;
+    if (qFuzzyCompare(cur + 1, target + 1) && m_float.state() != QAbstractAnimation::Running)
+        return;
+    animate(m_float, target, animated ? Theme::ms(180) : 0);
+}
+
+bool TextArea::eventFilter(QObject *o, QEvent *e)
+{
+    if (o == m_edit && (e->type() == QEvent::FocusIn || e->type() == QEvent::FocusOut)) {
+        updateFloat(true);
+        update();
+    }
+    return QWidget::eventFilter(o, e);
+}
+
+void TextArea::mousePressEvent(QMouseEvent *)
+{
+    m_edit->setFocus(Qt::MouseFocusReason);
+}
+
+void TextArea::resizeEvent(QResizeEvent *)
+{
+    m_edit->setGeometry(10, 24, width() - 20, height() - 28);
+}
+
+void TextArea::paintEvent(QPaintEvent *)
+{
+    const Palette &c = Theme::p();
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    const QRectF r = QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75);
+    p.setPen(QPen(m_edit->hasFocus() ? c.accent : c.border, m_edit->hasFocus() ? 1.5 : 1));
+    p.setBrush(c.surface);
+    p.drawRoundedRect(r, 12, 12);
+    const qreal t = m_float.currentValue().isValid() ? m_float.currentValue().toReal() : 0.0;
+    const qreal px = 14.5 - t * (14.5 * 0.15);
+    p.setFont(Theme::instance()->font(px));
+    p.setPen(m_edit->hasFocus() ? c.accent : c.muted);
+    const qreal fh = QFontMetricsF(p.font()).height();
+    const qreal y = (30 - fh) / 2 * (1 - t) + 7 * t;
+    p.drawText(QRectF(15, y, width() - 30, fh), Qt::AlignLeft | Qt::AlignVCenter, m_label);
 }
 
 // ---- ThemeSlider ----
