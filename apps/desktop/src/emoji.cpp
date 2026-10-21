@@ -92,7 +92,6 @@ EmojiPopup::EmojiPopup(QWidget *anchor, std::function<void(const QString &)> pic
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->viewport()->setAutoFillBackground(false);
     auto *content = new QWidget;
-    content->setAutoFillBackground(false);
     auto *lay = new QVBoxLayout(content);
     lay->setContentsMargins(6, 0, 6, 0);
     lay->setSpacing(4);
@@ -117,6 +116,8 @@ EmojiPopup::EmojiPopup(QWidget *anchor, std::function<void(const QString &)> pic
         lay->addWidget(gridHost);
     }
     scroll->setWidget(content);
+    // setWidget turns the fill back on; the grid sits on the popup's own rounded card.
+    content->setAutoFillBackground(false);
     outer->addWidget(scroll);
 }
 

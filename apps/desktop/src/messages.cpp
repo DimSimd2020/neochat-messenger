@@ -302,6 +302,21 @@ private:
 
 } // namespace
 
+bool showPhotoFile(QWidget *host, const QString &path)
+{
+    if (!host)
+        return false;
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    if (reader.size().isValid())
+        reader.setScaledSize(reader.size().scaled(4096, 4096, Qt::KeepAspectRatio));
+    const QImage img = reader.read();
+    if (img.isNull())
+        return false;
+    new PhotoViewer(host->window() ? host->window() : host, img);
+    return true;
+}
+
 // ---- images ----
 
 ImageCache *ImageCache::instance()

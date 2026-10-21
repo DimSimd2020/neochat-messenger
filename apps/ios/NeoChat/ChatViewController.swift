@@ -1670,6 +1670,13 @@ final class BubbleCell: UITableViewCell {
             photoH.isActive = false
             photo.image = nil
         }
+        // Explicit wrap widths: the automatic one is the label's previous frame, so a reused
+        // cell would wrap this message at the width of the message it showed before.
+        let room = min(bounds.width * 0.78, bounds.width - (out ? 52 : group ? 74 : 36))
+        let wrap = max(0, floor(image ? photoW.constant - 21 : room - 29))
+        [fwd, quote, text, pollQuestion, pollInfo, meta].forEach { $0.preferredMaxLayoutWidth = wrap }
+        [fileName, fileMeta].forEach { $0.preferredMaxLayoutWidth = max(0, wrap - 42) }
+        sender.preferredMaxLayoutWidth = max(0, floor(room))
         if let f, !image {
             fileRow.isHidden = false
             fileName.text = f.str("name")

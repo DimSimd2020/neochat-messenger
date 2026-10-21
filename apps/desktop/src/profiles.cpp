@@ -13,7 +13,6 @@
 #include <QDesktopServices>
 #include <QEvent>
 #include <QDir>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QMouseEvent>
@@ -107,13 +106,67 @@ public:
 class MediaTile : public QAbstractButton {
 public:
     QPixmap image;
-    explicit MediaTile(QPixmap pix) : image(std::move(pix)) { setMinimumSize(80,110); setAccessibleName(QStringLiteral("Открыть фото")); }
-    void paintEvent(QPaintEvent *) override {
-        QPainter p(this);p.setRenderHint(QPainter::SmoothPixmapTransform);
-        p.fillRect(rect(),Theme::p().raised);
-        if(!image.isNull()) {const auto scaled=image.scaled(size(),Qt::KeepAspectRatioByExpanding,Qt::SmoothTransformation);p.drawPixmap((width()-scaled.width())/2,(height()-scaled.height())/2,scaled);}
-        if(hasFocus())ui::paintFocusRing(&p,QRectF(rect()).adjusted(2,2,-2,-2),12);
+    explicit MediaTile(QPixmap pix) : image(std::move(pix))
+    {
+        setFixedSize(96, 96);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        setAccessibleName(QStringLiteral("Открыть фото"));
+        setCursor(Qt::PointingHandCursor);
     }
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        p.setRenderHint(QPainter::Antialiasing);
+        if (!image.isNull()) {
+            // Keep the photo's own shape. The square's empty sides stay transparent.
+            const QPixmap scaled = image.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            p.drawPixmap((width() - scaled.width()) / 2, (height() - scaled.height()) / 2, scaled);
+        }
+        if (hasFocus())
+            ui::paintFocusRing(&p, QRectF(rect()).adjusted(2, 2, -2, -2), 12);
+    }
+};
+
+// As many tiles per row as fit (six in a profile), the rows centered as one block;
+// a single short row is centered by its own tiles.
+class MediaGrid : public QWidget {
+public:
+    void add(QWidget *tile)
+    {
+        tile->setParent(this);
+        m_tiles.append(tile);
+        updateGeometry();
+    }
+    bool hasHeightForWidth() const override { return true; }
+    int heightForWidth(int w) const override
+    {
+        const int cols = columns(w);
+        const int rows = (int(m_tiles.size()) + cols - 1) / cols;
+        return rows > 0 ? rows * (Tile + Gap) - Gap : 0;
+    }
+    QSize sizeHint() const override
+    {
+        const int w = 6 * (Tile + Gap) - Gap;
+        return {w, heightForWidth(w)};
+    }
+    QSize minimumSizeHint() const override { return {Tile, 0}; }
+
+protected:
+    void resizeEvent(QResizeEvent *) override
+    {
+        const int cols = columns(width());
+        const int used = qMin(cols, int(m_tiles.size()));
+        const int left = (width() - (used * (Tile + Gap) - Gap)) / 2;
+        for (int i = 0; i < m_tiles.size(); ++i)
+            m_tiles[i]->move(left + i % cols * (Tile + Gap), i / cols * (Tile + Gap));
+    }
+
+private:
+    static constexpr int Tile = 96;
+    static constexpr int Gap = 8;
+    static int columns(int w) { return qMax(1, (w + Gap) / (Tile + Gap)); }
+    QList<QWidget *> m_tiles;
 };
 
 void showPhotos(const DialogHost &h, QWidget *owner, const QString &uid, bool own, std::function<void()> changed)
@@ -230,8 +283,8 @@ public:
         const int next = profileTabIndex(key);
         slide = next == tabIndex ? 0 : (next > tabIndex ? 1 : -1);
         tabIndex = next;
-        const auto motion = slide < 0 ? ui::Motion::PullRight : ui::Motion::PullLeft;
-        if (key == QLatin1String("privacy") || key == QLatin1String("groups"))
+        const auto motion = slide < 0 ? ui::Motion::ShiftRight : ui::Motion::ShiftLeft;
+        if (slide != 0 && (key == QLatin1String("privacy") || key == QLatin1String("groups")))
             ui::transition(this, rect(), motion, [this, key] { build(key); });
         else
             build(key);
@@ -265,16 +318,17 @@ public:
         Core::instance()->call("profile_items",p,this,[=](const QJsonValue &v,const CoreError &e) {
             if(gen!=generation)return;
             if(!e.ok())return host.toast(e.message);
+            const bool arrived = items.isEmpty();
             for(const auto &m:v.toArray())items.append(m);
-            const auto motion = slide < 0 ? ui::Motion::PullRight : ui::Motion::PullLeft;
-            ui::transition(this, rect(), motion, [=] { clearLayout(column);
+            const auto motion = slide < 0 ? ui::Motion::ShiftRight : ui::Motion::ShiftLeft;
+            const auto fill = [=] { clearLayout(column);
             if(items.isEmpty())column->addWidget(new ui::Label(QStringLiteral("Общих материалов в этом разделе пока нет"),15,400,ui::Label::Muted));
-            auto *grid=new QGridLayout;
+            auto *grid=kind=="media"?new MediaGrid:nullptr;
             for(int i=0;i<items.size();++i) {
                 const auto m=items[i].toObject();
                 if(kind=="media") {
-                    auto *b=new MediaTile(ImageCache::instance()->thumb(m));grid->addWidget(b,i/4,i%4);
-                    QObject::connect(b,&QAbstractButton::clicked,this,[=]{Core::instance()->call("download_file",{{"message_id",m.value("id")}},this,[=](const QJsonValue &r,const CoreError &err){if(!err.ok())host.toast(err.message);else QDesktopServices::openUrl(QUrl::fromLocalFile(r.toObject().value("path").toString()));});});
+                    auto *b=new MediaTile(ImageCache::instance()->thumb(m));grid->add(b);
+                    QObject::connect(b,&QAbstractButton::clicked,this,[=]{Core::instance()->call("download_file",{{"message_id",m.value("id")}},this,[=](const QJsonValue &r,const CoreError &err){if(!err.ok())host.toast(err.message);else if(!showPhotoFile(window(),r.toObject().value("path").toString()))host.toast(QStringLiteral("Не удалось открыть фото"));});});
                 } else {
                     QString text=m.value("file").toObject().value("name").toString(); QString url;
                     if(kind=="links")for(const auto &span:m.value("spans").toArray()){url=span.toObject().value("link").toString();if(!url.isEmpty())break;}
@@ -283,9 +337,13 @@ public:
                     QObject::connect(b,&QAbstractButton::clicked,this,[=]{if(!url.isEmpty())QDesktopServices::openUrl(QUrl(url));else Core::instance()->call("download_file",{{"message_id",m.value("id")}},this,[=](const QJsonValue &r,const CoreError &err){if(!err.ok())host.toast(err.message);else QDesktopServices::openUrl(QUrl::fromLocalFile(r.toObject().value("path").toString()));});});
                 }
             }
-            if(kind=="media")column->addLayout(grid);else delete grid;
+            if(grid)column->addWidget(grid);
             if(v.toArray().size()==48){auto *b=new ui::Button(QStringLiteral("Показать ещё"),ui::Button::Flat);column->addWidget(b);QObject::connect(b,&QAbstractButton::clicked,this,[this]{load();});}
-            });
+            };
+            if (arrived && slide != 0)
+                ui::transition(this, rect(), motion, fill);
+            else
+                fill();
         });
     }
 };

@@ -18,6 +18,9 @@ class IconButton;
 
 // The reaction a double click puts on a message. An account setting: the core
 // shares it with the user's other devices; QSettings only caches it.
+// Opens a picture inside NeoChat. Returns false when the file cannot be read.
+bool showPhotoFile(QWidget *host, const QString &path);
+
 QString quickReaction();
 void loadQuickReaction(QObject *ctx);
 QStringList quickReactionChoices();
