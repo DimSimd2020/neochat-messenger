@@ -167,6 +167,13 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
         section("О приложении").apply {
             val version = runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: ""
             addView(nav(R.drawable.ic_info, "Версия", ctx.label(version, 14f, 400, Theme.Role.MUTED)) {})
+            val channelValue = ctx.label(Prefs.updateChannel(ctx), 14f, 400, Theme.Role.MUTED)
+            addView(nav(R.drawable.ic_info, "Сообщать об обновлениях:", channelValue) {
+                choose(channelValue, listOf("stable" to "stable", "beta" to "beta"), Prefs.updateChannel(ctx)) {
+                    prefs.edit().putString("update_channel", it).apply()
+                    act.checkUpdate(manual = true)
+                }
+            })
             addView(nav(R.drawable.ic_download, "Проверить обновления") { act.checkUpdate(manual = true) })
         }
 

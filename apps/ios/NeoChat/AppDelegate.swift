@@ -149,7 +149,7 @@ final class RootViewController: UIViewController {
         guard manual || (updateBanner == nil && Date().timeIntervalSince(lastUpdateCheck) > 3600),
               let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return }
         lastUpdateCheck = Date()
-        Core.shared.call("check_update", ["platform": "ios", "version": version]) { [weak self] r in
+        Core.shared.call("check_update", ["platform": "ios", "version": version, "channel": Prefs.updateChannel]) { [weak self] r in
             switch r {
             case .failure(let e): if manual { self?.topToast(e.message) }
             case .success(let v):

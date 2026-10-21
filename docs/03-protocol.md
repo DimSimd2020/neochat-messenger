@@ -157,7 +157,7 @@ V1 использует pairwise fanout: до 16 участников × 10 ус
 
 ## Обновления приложения
 
-`GET /v1/app/manifest` без авторизации возвращает `{manifest, signature}` (base64). Манифест — JSON `{"notes", "platforms": {"windows"|"android"|"ios": {version, file, size, sha256}}}`, подпись — Ed25519 офлайн-ключа обновлений. `GET /v1/app/files/{name}` отдаёт файл `NeoChat-<версия>-*.msi|apk|ipa`. Публикация: `python infra/publish-update.py <версия> "<что нового>"`. 404 значит, что обновлений нет.
+`GET /v1/app/manifest` без авторизации возвращает `{manifest, signature}` (base64). Манифест — JSON `{"notes", "platforms": {"windows"|"android"|"ios": {version, file, size, sha256}}, "channels": {"stable"|"beta": {те же платформы}}}`, подпись — Ed25519 офлайн-ключа обновлений. `platforms` — стабильный канал: клиенты без поля `channel` читают только его. `channels.beta` отдаётся ядру, только если клиент передал `channel: beta` (настройка «Сообщать об обновлениях», по умолчанию stable). `GET /v1/app/files/{name}` отдаёт файл `NeoChat-<версия>-*.msi|apk|ipa`. Публикация: `python infra/publish-update.py <версия> "<что нового>" [stable|beta]`. Канал beta дописывает сборки в `channels.beta` и не меняет `platforms`. 404 значит, что обновлений нет.
 
 ## Лимиты и ошибки
 

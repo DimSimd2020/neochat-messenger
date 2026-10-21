@@ -503,8 +503,19 @@ final class SettingsViewController: SheetViewController {
         section("Данные", [cache], footer: "Удаляет временные файлы и расшифрованные копии фото. Переписка остаётся.")
 
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let channel = NavRow("arrow.triangle.2.circlepath", "Сообщать об обновлениях:", value: Prefs.updateChannel) {}
+        channel.value.setContentCompressionResistancePriority(.required, for: .horizontal)
+        channel.addAction(UIAction { [weak self, weak channel] _ in
+            guard let self, let channel else { return }
+            self.choose("Сообщать об обновлениях:", [("stable", "stable"), ("beta", "beta")], current: Prefs.updateChannel, from: channel) { v, name in
+                Prefs.set("update_channel", v)
+                channel.value.text = name
+                (self.view.window?.rootViewController as? RootViewController)?.checkUpdate(manual: true)
+            }
+        }, for: .touchUpInside)
         section("О приложении", [
             NavRow("info.circle", "Версия", value: version, chevron: false) {},
+            channel,
             NavRow("arrow.down.circle", "Проверить обновления") { [weak self] in
                 (self?.view.window?.rootViewController as? RootViewController)?.checkUpdate(manual: true)
             },

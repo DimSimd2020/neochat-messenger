@@ -18,6 +18,8 @@ enum Prefs {
     static var bigEmoji: Bool { bool("big_emoji", true) }
     static var autoload: Bool { bool("autoload", true) }
     static var chatSort: String { d.string(forKey: "chat_sort") ?? "activity" }
+    /// stable receives only stable builds. Anything else, including a missing value, stays stable.
+    static var updateChannel: String { d.string(forKey: "update_channel") == "beta" ? "beta" : "stable" }
     static var archiveSort: String { d.string(forKey: "archive_sort") ?? "activity" }
 }
 

@@ -449,7 +449,7 @@ class MainActivity : Activity(), Sheet.Host {
     fun checkUpdate(manual: Boolean = false) {
         if (updateBanner != null) return
         val version = packageManager.getPackageInfo(packageName, 0).versionName ?: return
-        val p = JSONObject().put("platform", "android").put("version", version)
+        val p = JSONObject().put("platform", "android").put("version", version).put("channel", Prefs.updateChannel(this))
         CoreClient.call("check_update", p) { v, e ->
             if (e != null) return@call run { if (manual) toast(e.message) }
             val o = v as? JSONObject

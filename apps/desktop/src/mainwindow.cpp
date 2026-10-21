@@ -681,7 +681,10 @@ void MainWindow::checkUpdate(bool manual)
             toast(QStringLiteral("Обновление уже скачано: нажмите «Перезапустить» вверху окна"));
         return;
     }
-    const QJsonObject p{{"platform", "windows"}, {"version", QStringLiteral(NEOCHAT_VERSION)}};
+    const QString channel = QSettings().value(QStringLiteral("updates/channel")).toString() == QLatin1String("beta")
+                                 ? QStringLiteral("beta")
+                                 : QStringLiteral("stable");
+    const QJsonObject p{{"platform", "windows"}, {"version", QStringLiteral(NEOCHAT_VERSION)}, {"channel", channel}};
     Core::instance()->call("check_update", p, this, [this, p, manual](const QJsonValue &v, const CoreError &e) {
         if (!e.ok()) {
             if (manual)

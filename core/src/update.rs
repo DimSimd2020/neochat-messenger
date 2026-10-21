@@ -37,7 +37,9 @@ impl Inner {
     }
 
     /// The verified manifest entry for `platform`, or None when nothing is published.
-    fn update_entry(&self, platform: &str) -> Result<Option<(Value, String)>> {
+    /// `platforms` is the stable channel: clients that omit `channel` keep receiving it.
+    /// `channels.beta` is served only when the client asks for beta.
+    fn update_entry(&self, platform: &str, channel: &str) -> Result<Option<(Value, String)>> {
         let server = self.update_server()?;
         let out = match Api::new(&server).call("GET", "/v1/app/manifest", None, None) {
             Err(Error::Api { status: 404, .. }) => return Ok(None),
@@ -50,7 +52,7 @@ impl Inner {
             .and_then(|k| k.verify(&body, &sig))
             .map_err(|_| Error::Crypto("Подпись обновления не прошла проверку".into()))?;
         let manifest: Value = serde_json::from_slice(&body)?;
-        let entry = manifest["platforms"][platform].clone();
+        let entry = select_entry(&manifest, platform, channel);
         if entry.is_null() {
             return Ok(None);
         }
@@ -60,7 +62,7 @@ impl Inner {
 
     pub fn check_update(&self, p: &Value) -> Result<Value> {
         let current = s(p, "version")?;
-        match self.update_entry(s(p, "platform")?)? {
+        match self.update_entry(s(p, "platform")?, channel_of(p))? {
             Some((e, url)) if newer(e["version"].as_str().unwrap_or(""), current) => Ok(json!({
                 "available": true,
                 "version": e["version"],
@@ -75,7 +77,7 @@ impl Inner {
     /// SHA-256 check; an already downloaded file with the right hash is reused.
     pub fn download_update(&self, p: &Value) -> Result<Value> {
         let current = s(p, "version")?;
-        let Some((e, _)) = self.update_entry(s(p, "platform")?)? else {
+        let Some((e, _)) = self.update_entry(s(p, "platform")?, channel_of(p))? else {
             return Err(Error::Invalid("Обновлений нет".into()));
         };
         let version = e["version"].as_str().unwrap_or("");
@@ -109,6 +111,29 @@ impl Inner {
     }
 }
 
+/// Missing or unknown channel is stable. Beta falls back to stable when that track has no build.
+fn channel_of(p: &Value) -> &str {
+    match p.get("channel").and_then(|v| v.as_str()) {
+        Some("beta") => "beta",
+        _ => "stable",
+    }
+}
+
+fn select_entry(manifest: &Value, platform: &str, channel: &str) -> Value {
+    if channel == "beta" {
+        let beta = &manifest["channels"]["beta"][platform];
+        if !beta.is_null() {
+            return beta.clone();
+        }
+    } else {
+        let stable = &manifest["channels"]["stable"][platform];
+        if !stable.is_null() {
+            return stable.clone();
+        }
+    }
+    manifest["platforms"][platform].clone()
+}
+
 fn sha256_file(path: &std::path::Path) -> Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut h = Sha256::new();
@@ -125,7 +150,8 @@ fn sha256_file(path: &std::path::Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::newer;
+    use super::{channel_of, newer, select_entry};
+    use serde_json::json;
 
     #[test]
     fn versions_compare_numerically() {
@@ -135,5 +161,28 @@ mod tests {
         assert!(!newer("0.3.0", "0.3.0"));
         assert!(!newer("0.3", "0.3.0"));
         assert!(!newer("0.2.9", "0.3.0"));
+    }
+
+    #[test]
+    fn stable_channel_ignores_beta_builds() {
+        let manifest = json!({
+            "platforms": {"android": {"version": "0.6.7.1", "file": "stable.apk"}},
+            "channels": {
+                "stable": {"android": {"version": "0.6.7.1", "file": "stable.apk"}},
+                "beta": {"android": {"version": "0.6.7.2", "file": "beta.apk"}}
+            }
+        });
+        assert_eq!(select_entry(&manifest, "android", "stable")["file"], "stable.apk");
+        assert_eq!(select_entry(&manifest, "android", "beta")["file"], "beta.apk");
+        assert_eq!(channel_of(&json!({})), "stable");
+        assert_eq!(channel_of(&json!({"channel": "beta"})), "beta");
+        assert_eq!(channel_of(&json!({"channel": "nightly"})), "stable");
+    }
+
+    #[test]
+    fn missing_beta_uses_the_stable_entry() {
+        let manifest = json!({"platforms": {"ios": {"version": "0.6.7.1", "file": "stable.ipa"}}});
+        assert_eq!(select_entry(&manifest, "ios", "beta")["file"], "stable.ipa");
+        assert!(select_entry(&manifest, "windows", "stable").is_null());
     }
 }
