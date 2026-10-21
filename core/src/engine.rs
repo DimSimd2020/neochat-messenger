@@ -293,6 +293,7 @@ impl Inner {
             "group_leave" => self.group_leave(p),
             "group_rename" => self.group_rename(p),
             "group_set_info" => self.group_set_info(p),
+            "group_set_avatar" => self.group_set_avatar(p),
             "group_set_settings" => self.group_set_settings(p),
             "group_set_tag" => self.group_set_tag(p),
             "send_poll" => self.send_poll(p),

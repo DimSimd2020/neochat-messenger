@@ -488,7 +488,9 @@ fn groups_admins_tags_polls_and_channels() {
 
     // The admin adds Carol; Bob and Carol verify the admin-signed state through the chain.
     admin.sync();
-    let got = admin.call("group_set_members", json!({"conversation_id": gid, "member_ids": [a, b, c]}));
+    // Clients send everyone except the caller: the admin must stay a member and an admin.
+    let got = admin.call("group_set_members", json!({"conversation_id": gid, "member_ids": [uid(&owner), b, c]}));
+    assert_eq!(got["role"], "admin");
     assert_eq!(got["member_count"], 4);
     bob.sync();
     carol.sync();
@@ -496,6 +498,25 @@ fn groups_admins_tags_polls_and_channels() {
     assert_eq!(carol.call("get_conversation", json!({"conversation_id": gid}))["role"], "member");
     // A member cannot change the list, an admin cannot remove another admin or name one.
     assert!(bob.try_call("group_set_members", json!({"conversation_id": gid, "member_ids": [a, b]})).is_err());
+
+    // A group photo from the owner reaches members, including one added later, and can be removed.
+    let photo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/avatar.jpg");
+    owner.sync();
+    let set = owner.call("group_set_avatar", json!({"conversation_id": gid, "path": photo}));
+    assert_eq!(std::fs::read(set["avatar_path"].as_str().unwrap()).unwrap(), include_bytes!("fixtures/avatar.jpg"));
+    owner.sync();
+    bob.sync();
+    carol.sync();
+    for m in [&bob, &carol] {
+        let got = m.call("get_conversation", json!({"conversation_id": gid}));
+        assert_eq!(std::fs::read(got["avatar_path"].as_str().unwrap()).unwrap(), include_bytes!("fixtures/avatar.jpg"));
+    }
+    assert!(bob.try_call("group_set_avatar", json!({"conversation_id": gid, "path": photo})).is_err());
+    assert!(owner.try_call("group_set_avatar", json!({"conversation_id": gid, "path": PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")})).is_err());
+    owner.call("group_set_avatar", json!({"conversation_id": gid, "path": ""}));
+    owner.sync();
+    bob.sync();
+    assert_eq!(bob.call("get_conversation", json!({"conversation_id": gid}))["avatar_path"], "");
 
     // Tags and info from an admin reach everyone; a member's attempt is refused locally.
     owner.sync();

@@ -143,6 +143,8 @@ impl Db {
             "ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
             // Forwarded messages keep a small header: who originally sent it and when.
             "ALTER TABLE messages ADD COLUMN fwd TEXT",
+            // Group photo: file name in the avatars directory ("" = none).
+            "ALTER TABLE conversations ADD COLUMN avatar TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(sql, []);
         }

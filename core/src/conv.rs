@@ -231,6 +231,9 @@ impl Inner {
         let prev: u64 = cur["revision"].as_str().unwrap_or("0").parse().unwrap_or(0);
         let mut members: BTreeSet<String> = ids(&p["member_ids"]);
         members.insert(owner.clone());
+        // Clients send "everyone except me"; the caller stays a member (an admin
+        // missing from the list read as an admin removed by a non-owner).
+        members.insert(me.clone());
         let (min, max) = if prev_state.channel { (1, MAX_CHANNEL) } else { (2, MAX_GROUP) };
         if members.len() < min || members.len() > max {
             return Err(Error::Invalid(format!("Участников от {min} до {max}")));
@@ -270,6 +273,9 @@ impl Inner {
         let (title, description, tags): (String, String, String) =
             self.db().conn.query_row("SELECT title, description, tags FROM conversations WHERE id=?1", [gid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         let mut info = json!({"title": title, "description": description});
+        if let Some(a) = self.group_avatar_b64(gid) {
+            info["avatar"] = json!(a);
+        }
         if is_owner || admins.contains(&me) {
             info["tags"] = serde_json::from_str(&tags).unwrap_or(json!({}));
         }
@@ -321,7 +327,7 @@ impl Inner {
         let row = db
             .conn
             .query_row(
-                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags, in_archive, pinned FROM conversations WHERE id=?1",
+                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags, in_archive, pinned, avatar FROM conversations WHERE id=?1",
                 [id],
                 |r| {
                     Ok((
@@ -341,12 +347,13 @@ impl Inner {
                         r.get::<_, String>(13)?,
                         r.get::<_, i64>(14)?,
                         r.get::<_, i64>(15)?,
+                        r.get::<_, String>(16)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| Error::Invalid("Беседа не найдена".into()))?;
-        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags, in_archive, pinned) = row;
+        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags, in_archive, pinned, group_avatar) = row;
         drop(db);
         let rights = self.rights(&id)?;
         let db = self.db();
@@ -396,12 +403,23 @@ impl Inner {
             None
         };
         let active = kind != "system" && changed.is_empty() && left == 0 && archived == 0;
+        // Members seen online (I count as online); only for groups, whose members see each other.
+        let online_count = if kind == "group" {
+            1 + member_ids.iter().filter(|m| **m != me && self.cached_presence(m).is_some_and(|p| p["online"] == true)).count()
+        } else {
+            0
+        };
         Ok(json!({
             "id": id,
             "kind": kind,
             "title": display,
             "peer_user_id": peer,
-            "avatar_path": members_out.iter().find(|m| Some(m["user_id"].as_str().unwrap_or("")) == peer.as_deref()).map(|m| m["avatar_path"].clone()).unwrap_or(json!("")),
+            "avatar_path": if kind == "direct" {
+                members_out.iter().find(|m| Some(m["user_id"].as_str().unwrap_or("")) == peer.as_deref()).map(|m| m["avatar_path"].clone()).unwrap_or(json!(""))
+            } else {
+                json!(self.group_avatar_path(&group_avatar))
+            },
+            "online_count": online_count,
             "owner_id": owner,
             "is_owner": owner.as_deref() == Some(me.as_str()),
             "members": members_out,

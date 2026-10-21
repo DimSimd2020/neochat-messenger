@@ -19,6 +19,8 @@ use crate::outbox::Payload;
 use crate::store::now_ms;
 
 const MAX_POLL_OPTIONS: usize = 10;
+/// A group photo travels inside one encrypted envelope (32 KiB), so it stays small.
+const MAX_GROUP_AVATAR: usize = 18 << 10;
 
 /// Rights of one user in one conversation, from the verified state and server settings.
 pub struct Rights {
@@ -51,7 +53,8 @@ impl Rights {
         (self.kind == "group" || self.kind == "channel") && self.can_post(user) && (self.is_admin(user) || self.allows("members_can_polls"))
     }
     pub fn can_info(&self, user: &str) -> bool {
-        self.is_admin(user) || (self.kind == "group" && self.allows("members_can_info"))
+        // Off unless the owner turned it on, as the settings screens show.
+        self.is_admin(user) || (self.kind == "group" && self.settings["members_can_info"].as_bool().unwrap_or(false))
     }
 }
 
@@ -223,6 +226,80 @@ impl Inner {
         self.conversation_json(gid)
     }
 
+    /// Where the photo of a group is cached; `name` is the `conversations.avatar` value.
+    pub fn group_avatar_path(&self, name: &str) -> String {
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return String::new();
+        }
+        self.data_dir.join("avatars").join(format!("g-{name}.jpg")).to_string_lossy().into_owned()
+    }
+
+    /// Caches a group photo (None removes it); the file name carries a hash, so clients
+    /// that cache images by path see the change.
+    fn store_group_avatar(&self, gid: &str, jpeg: Option<&[u8]>) -> Result<()> {
+        let old: String = self.db().conn.query_row("SELECT avatar FROM conversations WHERE id=?1", [gid], |r| r.get(0))?;
+        let name = match jpeg {
+            Some(b) => {
+                let h = keys::sha256(b);
+                let name = format!("{gid}-{:02x}{:02x}{:02x}{:02x}", h[0], h[1], h[2], h[3]);
+                if name == old && std::path::Path::new(&self.group_avatar_path(&name)).is_file() {
+                    return Ok(());
+                }
+                let path = self.group_avatar_path(&name);
+                std::fs::create_dir_all(self.data_dir.join("avatars"))?;
+                std::fs::write(&path, b)?;
+                name
+            }
+            None => String::new(),
+        };
+        self.db().conn.execute("UPDATE conversations SET avatar=?2 WHERE id=?1", params![gid, name])?;
+        let old_path = self.group_avatar_path(&old);
+        if !old.is_empty() && old != name && !old_path.is_empty() {
+            let _ = std::fs::remove_file(old_path);
+        }
+        Ok(())
+    }
+
+    fn checked_group_avatar(b: &[u8], limit: usize) -> Result<()> {
+        if b.len() > limit {
+            return Err(Error::Invalid("Фото группы: JPEG до 18 КБ".into()));
+        }
+        if b.len() < 3 || b[..3] != [0xff, 0xd8, 0xff] {
+            return Err(Error::Invalid("Не удалось прочитать фото".into()));
+        }
+        Ok(())
+    }
+
+    /// Sets (or, with an empty path, removes) the photo of a group or channel.
+    pub fn group_set_avatar(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let gid = s(p, "conversation_id")?;
+        let path = s(p, "path")?;
+        let (me, _) = self.me()?;
+        if !self.rights(gid)?.can_info(&me) {
+            return Err(Error::Invalid("Менять фото могут владелец и админы".into()));
+        }
+        self.check_can_send(gid)?;
+        let update = if path.is_empty() {
+            self.store_group_avatar(gid, None)?;
+            json!({"avatar": ""})
+        } else {
+            let bytes = std::fs::read(path)?;
+            Self::checked_group_avatar(&bytes, MAX_GROUP_AVATAR)?;
+            self.store_group_avatar(gid, Some(&bytes))?;
+            json!({"avatar": keys::b64(&bytes)})
+        };
+        self.enqueue_control(gid, "group_update", update)?;
+        self.emit(json!({"type": "conversations_changed"}));
+        self.conversation_json(gid)
+    }
+
+    /// The cached photo as base64, for members who join later.
+    pub fn group_avatar_b64(&self, gid: &str) -> Option<String> {
+        let name: String = self.db().conn.query_row("SELECT avatar FROM conversations WHERE id=?1", [gid], |r| r.get(0)).ok()?;
+        let bytes = std::fs::read(self.group_avatar_path(&name)).ok()?;
+        Some(keys::b64(&bytes))
+    }
+
     /// A short label next to a member's name, set by the owner or an admin.
     pub fn group_set_tag(self: &Arc<Self>, p: &Value) -> Result<Value> {
         let gid = s(p, "conversation_id")?;
@@ -269,6 +346,17 @@ impl Inner {
                 let d: String = d.chars().take(255).collect();
                 self.db().conn.execute("UPDATE conversations SET description=?2 WHERE id=?1", params![conv, d])?;
                 changed = true;
+            }
+            if let Some(a) = g["avatar"].as_str() {
+                if a.is_empty() {
+                    self.store_group_avatar(conv, None)?;
+                    changed = true;
+                } else if let Ok(bytes) = unb64(a) {
+                    if Self::checked_group_avatar(&bytes, MAX_GROUP_AVATAR + (6 << 10)).is_ok() {
+                        self.store_group_avatar(conv, Some(&bytes))?;
+                        changed = true;
+                    }
+                }
             }
         }
         if r.is_admin(sender) {
