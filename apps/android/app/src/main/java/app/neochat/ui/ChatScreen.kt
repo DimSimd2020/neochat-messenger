@@ -1162,7 +1162,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         if (at < 0) showViewer(listOf(m), 0) else showViewer(photos, at)
     }
 
-    private class PhotoPage(val img: ImageView) : RecyclerView.ViewHolder(img) {
+    private class PhotoPage(val img: ZoomImageView) : RecyclerView.ViewHolder(img) {
         var id = ""
     }
 
@@ -1181,18 +1181,19 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         pager.adapter = object : RecyclerView.Adapter<PhotoPage>() {
             override fun getItemCount() = photos.size
             override fun onCreateViewHolder(parent: ViewGroup, type: Int): PhotoPage {
-                val img = ImageView(ctx)
+                val img = ZoomImageView(ctx)
                 img.scaleType = ImageView.ScaleType.FIT_CENTER
                 img.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 img.setPadding(dp(8), column.paddingTop + dp(8), dp(8), column.paddingBottom + dp(8))
                 img.layoutParams = RecyclerView.LayoutParams(MATCH, MATCH)
-                img.setOnClickListener { closeViewer() }
+                img.onTap = { closeViewer() }
                 return PhotoPage(img)
             }
             override fun onBindViewHolder(h: PhotoPage, pos: Int) {
                 val m = photos[pos]
                 val id = m.str("id")
                 h.id = id
+                h.img.reset()
                 h.img.setImageBitmap(Photos.full.get(id) ?: Photos.thumb(m))
                 if (Photos.full.get(id) != null) return
                 CoreClient.call("download_file", JSONObject().put("message_id", id)) { r, e ->
@@ -1216,7 +1217,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         counter.background = GradientDrawable().apply { setColor(0x66000000); cornerRadius = ctx.dpf(16) }
         fun describe(pos: Int) {
             counter.text = "${pos + 1} из ${photos.size}"
-            v.contentDescription = if (photos.size > 1) "Просмотр фото ${pos + 1} из ${photos.size}. Листайте влево и вправо, нажмите, чтобы закрыть" else "Просмотр фото. Нажмите, чтобы закрыть"
+            v.contentDescription = if (photos.size > 1) "Просмотр фото ${pos + 1} из ${photos.size}. Листайте влево и вправо, двойное касание увеличивает, нажмите, чтобы закрыть" else "Просмотр фото. Нажмите, чтобы закрыть"
         }
         describe(start)
         if (photos.size > 1) {
