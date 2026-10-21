@@ -109,7 +109,7 @@ object CallManager {
     // ---- WebRTC objects ----
 
     val egl: EglBase by lazy { EglBase.create() }
-    private var factory: PeerConnectionFactory? = null
+    @Volatile private var factory: PeerConnectionFactory? = null
     private var pc: PeerConnection? = null
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
@@ -137,7 +137,16 @@ object CallManager {
     /** The peer's camera is on and frames are arriving. */
     val remoteVideo get() = peerCamera && System.currentTimeMillis() - remoteSink.lastFrame < 1500
 
-    private fun factory(): PeerConnectionFactory = factory ?: run {
+    /** Loads the WebRTC library and the audio module off the main thread, before a call needs them. */
+    fun warmUp() {
+        if (factory != null || warming) return
+        warming = true
+        Thread { runCatching { factory() }; warming = false }.start()
+    }
+
+    @Volatile private var warming = false
+
+    @Synchronized private fun factory(): PeerConnectionFactory = factory ?: run {
         PeerConnectionFactory.initialize(PeerConnectionFactory.InitializationOptions.builder(app).createInitializationOptions())
         val adm = JavaAudioDeviceModule.builder(app)
             .setUseHardwareAcousticEchoCanceler(true)
@@ -166,7 +175,9 @@ object CallManager {
         override fun onIceGatheringChange(s: PeerConnection.IceGatheringState) {
             if (s == PeerConnection.IceGatheringState.COMPLETE) post { sendLocal() }
         }
-        override fun onIceCandidate(c: IceCandidate) {}
+        override fun onIceCandidate(c: IceCandidate) {
+            if (c.sdp.contains(" typ relay")) post { relayGathered(gen) }
+        }
         override fun onIceCandidatesRemoved(c: Array<out IceCandidate>) {}
         override fun onAddStream(s: MediaStream) {}
         override fun onRemoveStream(s: MediaStream) {}
@@ -228,14 +239,19 @@ object CallManager {
         conn.createAnswer(Sdp(g, created = { setLocal(g, it) }), MediaConstraints())
     }
 
-    // Non-trickle: the description goes once gathering completes, or after
-    // 4 s with whatever candidates were found by then.
+    // Non-trickle: the description goes as soon as the relay address is known (a path that works
+    // behind any NAT), when gathering completes, or after 2 s with whatever was found by then.
+    // Waiting for every server to answer used to take several seconds on mobile networks.
     private fun setLocal(g: Int, d: SessionDescription) {
         val conn = pc ?: return
         conn.setLocalDescription(Sdp(g, set = {
             if (conn.iceGatheringState() == PeerConnection.IceGatheringState.COMPLETE) sendLocal()
         }), d)
-        main.postDelayed({ if (g == gen) sendLocal() }, 4000)
+        main.postDelayed({ if (g == gen) sendLocal() }, 2000)
+    }
+
+    private fun relayGathered(g: Int) {
+        if (g == gen) main.postDelayed({ if (g == gen) sendLocal() }, 150)
     }
 
     private fun sendLocal() {
@@ -459,6 +475,7 @@ object CallManager {
             .put("peer_user_id", conversation.str("peer_user_id")).put("avatar_path", conversation.str("avatar_path"))
             .put("video", video).put("outgoing", true)
         reset(video)
+        warmUp()
         setPhase(Phase.STARTING)
         openScreen()
         CoreClient.call("call_start", JSONObject().put("conversation_id", conversation.str("id")).put("video", video)) { v, e ->
@@ -543,7 +560,11 @@ object CallManager {
             reset(ev.optBoolean("video"))
             setPhase(Phase.INCOMING)
             ring()
-            if ((app as App).inForeground) openScreen() else CallNotifications.showIncoming(app)
+            warmUp()
+            // On screen at once when the app is open; otherwise the notification, and the screen
+            // itself when notifications are blocked.
+            if ((app as App).inForeground) openScreen()
+            else if (!CallNotifications.showIncoming(app)) runCatching { openScreen() }
             return
         }
         if (ev.str("call_id") != callId || phase == Phase.IDLE || phase == Phase.ENDED) return

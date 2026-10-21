@@ -46,6 +46,7 @@ class MainActivity : Activity(), Sheet.Host {
     override fun addInsetListener(l: () -> Unit) { insetListeners += l }
     override fun removeInsetListener(l: () -> Unit) { insetListeners.remove(l) }
     var scanner: QrScanner? = null
+    var camera: PhotoCamera? = null
 
     private var home: HomeScreen? = null
     private var archive: ArchiveScreen? = null
@@ -163,6 +164,7 @@ class MainActivity : Activity(), Sheet.Host {
         chat = null
         show(h, 0f)
         RealtimeService.sync(this)
+        AppLock.migrate(this)
         AppLock.maybeLock(this)
         QuickReaction.load(this)
         Dialogs.whatsNewIfNeeded(this)
@@ -299,6 +301,7 @@ class MainActivity : Activity(), Sheet.Host {
     override fun onPause() {
         // The camera must not stay open behind another app.
         scanner?.dismiss()
+        camera?.dismiss()
         super.onPause()
     }
 

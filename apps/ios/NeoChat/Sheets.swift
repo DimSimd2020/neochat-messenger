@@ -1,4 +1,6 @@
+import PhotosUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Base for sheet content: a scrolling vertical stack with a close button.
 class SheetViewController: UIViewController {
@@ -407,17 +409,19 @@ final class SettingsViewController: SheetViewController {
             }
         }, for: .touchUpInside)
         privacy.append(lastSeen)
-        let has = AppLock.hasPasscode
-        privacy.append(NavRow("lock", "Код-пароль", value: has ? "Вкл." : "Выкл.") { [weak self] in
-            guard let self else { return }
-            if has { AppLock.disable(from: self) { self.build() } } else { AppLock.setPasscode(from: self) { self.build() } }
-        })
-        if has {
-            privacy.append(SwitchRow("iphone", "Вход в приложение по коду", on: AppLock.lockApp) { Prefs.set("lock_app", $0) })
-            privacy.append(SwitchRow("archivebox", "Вход в архив по коду", on: AppLock.lockArchive) { Prefs.set("lock_archive", $0) })
-            if let bio = AppLock.biometryName {
-                privacy.append(SwitchRow(bio == "Face ID" ? "faceid" : "touchid", bio, on: AppLock.useBio) { Prefs.set("lock_bio", $0) })
+        if AppLock.available {
+            let bio = AppLock.biometryName
+            let icon = bio == "Face ID" ? "faceid" : bio == "Touch ID" ? "touchid" : "lock"
+            var appRow: SwitchRow?
+            appRow = SwitchRow(icon, "Вход в приложение: " + bio, on: AppLock.lockApp) { [weak self] on in
+                self?.setLock("lock_app", on, appRow)
             }
+            privacy.append(appRow!)
+            var archiveRow: SwitchRow?
+            archiveRow = SwitchRow("archivebox", "Вход в архив: " + bio, on: AppLock.lockArchive) { [weak self] on in
+                self?.setLock("lock_archive", on, archiveRow)
+            }
+            privacy.append(archiveRow!)
             let current = AppLock.afterChoices.first { $0.0 == AppLock.lockAfter }?.1 ?? "Сразу"
             let after = NavRow("timer", "Автоблокировка", value: current) {}
             after.addAction(UIAction { [weak self, weak after] _ in
@@ -476,20 +480,16 @@ final class SettingsViewController: SheetViewController {
                 sort.value.text = name
             }
         }, for: .touchUpInside)
-        let quick = NavRow("hand.tap", "Быстрая реакция", value: QuickReaction.current) {}
-        quick.addAction(UIAction { [weak self, weak quick] _ in
-            guard let self, let quick else { return }
-            self.choose("Быстрая реакция", QuickReaction.choices.map { ($0, $0) }, current: QuickReaction.current, from: quick) { v, _ in
-                QuickReaction.set(v) { err in
-                    if let err { self.toast(err) } else { quick.value.text = v }
-                }
-            }
-        }, for: .touchUpInside)
+        let quick = NavRow("hand.tap", "Быстрая реакция", value: QuickReaction.current) { [weak self] in
+            let vc = QuickReactionViewController()
+            vc.onPick = { [weak self] _ in self?.build() }
+            self?.push(vc)
+        }
         section("Чаты", [
             sort,
             quick,
             SwitchRow("photo", "Автозагрузка фото", on: Prefs.autoload) { Prefs.set("autoload", $0) },
-        ], footer: "Смахните чат влево, чтобы убрать его в архив, и вправо, чтобы закрепить. Закрепить можно до 3 чатов. Двойное касание сообщения ставит быструю реакцию, смахивание сообщения влево — отвечает на него. Контакты, закреплённые чаты, архив и быстрая реакция общие для всех ваших устройств.")
+        ], footer: "Смахните чат влево, чтобы убрать его в архив, и вправо, чтобы закрепить. Закрепить можно до 3 чатов. Двойное касание сообщения ставит быструю реакцию, смахивание сообщения влево (своего — вправо) отвечает на него. Контакты, закреплённые чаты, архив и быстрая реакция общие для всех ваших устройств.")
 
         let cache = NavRow("trash", "Очистить кэш", value: sizeOf(cacheDirs())) {}
         cache.addAction(UIAction { [weak self, weak cache] _ in
@@ -543,11 +543,20 @@ final class SettingsViewController: SheetViewController {
         return String(format: "%.1f МБ", Double(total) / 1048576).replacingOccurrences(of: ".", with: ",")
     }
 
+    /// Turning a lock on asks the system once and keeps the app open; turning it off needs no question.
+    private func setLock(_ key: String, _ on: Bool, _ row: SwitchRow?) {
+        guard on else { return Prefs.set(key, false) }
+        AppLock.enable(key, from: self) { ok in
+            if !ok { row?.toggle.setOn(false, animated: true) }
+        }
+    }
+
     private func confirmLogout() {
         let a = UIAlertController(title: "Выйти из аккаунта?", message: "Ключи и переписка на этом телефоне будут удалены.", preferredStyle: .actionSheet)
         a.addAction(UIAlertAction(title: "Выйти", style: .destructive) { [weak self] _ in
             Core.shared.call("logout") { _ in
-                Prefs.set("has_passcode", false)
+                Prefs.set("lock_app", false)
+                Prefs.set("lock_archive", false)
                 let root = self?.view.window?.rootViewController as? RootViewController
                 self?.dismiss(animated: true) { root?.start() }
             }
@@ -557,7 +566,7 @@ final class SettingsViewController: SheetViewController {
     }
 }
 
-final class ConversationInfoViewController: SheetViewController {
+final class ConversationInfoViewController: SheetViewController, PHPickerViewControllerDelegate {
     private let cid: String
 
     init(conversationId: String) {
@@ -571,6 +580,65 @@ final class ConversationInfoViewController: SheetViewController {
         super.viewDidLoad()
         title = "Сведения"
         reload()
+    }
+
+    private func changePhoto(hasPhoto: Bool) {
+        let a = UIAlertController(title: "Фото", message: nil, preferredStyle: .actionSheet)
+        a.addAction(UIAlertAction(title: "Выбрать фото", style: .default) { [weak self] _ in
+            var cfg = PHPickerConfiguration()
+            cfg.filter = .images
+            cfg.selectionLimit = 1
+            let picker = PHPickerViewController(configuration: cfg)
+            picker.delegate = self
+            self?.present(picker, animated: !Theme.reducedMotion)
+        })
+        if hasPhoto { a.addAction(UIAlertAction(title: "Удалить фото", style: .destructive) { [weak self] _ in self?.saveGroupPhoto("") }) }
+        a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        a.popoverPresentationController?.sourceView = view
+        present(a, animated: !Theme.reducedMotion)
+    }
+
+    /// The group photo travels in an end-to-end encrypted control message, so it is a 128 px JPEG under 18 KiB.
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        picker.dismiss(animated: !Theme.reducedMotion)
+        guard let provider = results.first?.itemProvider else { return }
+        provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] url, _ in
+            guard let url, let image = Photos.decode(url, maxSide: 512) else {
+                DispatchQueue.main.async { self?.toast("Не удалось прочитать фото") }
+                return
+            }
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            format.opaque = true
+            let side: CGFloat = 128
+            let square = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { ctx in
+                UIColor.white.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+                let k = side / min(image.size.width, image.size.height)
+                let size = CGSize(width: image.size.width * k, height: image.size.height * k)
+                image.draw(in: CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2, width: size.width, height: size.height))
+            }
+            var data: Data?
+            for q in [0.75, 0.6, 0.45, 0.3] as [CGFloat] {
+                if let d = square.jpegData(compressionQuality: q), d.count <= 18432 { data = d; break }
+            }
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("group-\(UUID().uuidString).jpg")
+            guard let data, (try? data.write(to: file, options: .atomic)) != nil else {
+                DispatchQueue.main.async { self?.toast("Не удалось подготовить фото") }
+                return
+            }
+            DispatchQueue.main.async { self?.saveGroupPhoto(file.path) }
+        }
+    }
+
+    private func saveGroupPhoto(_ path: String) {
+        Core.shared.call("group_set_avatar", ["conversation_id": cid, "path": path]) { [weak self] r in
+            if !path.isEmpty { try? FileManager.default.removeItem(atPath: path) }
+            switch r {
+            case .failure(let e): self?.toast(e.message)
+            case .success: self?.reload()
+            }
+        }
     }
 
     private func call(_ m: String, _ p: JSON, ok: String? = nil, close: Bool = false) {
@@ -631,7 +699,9 @@ final class ConversationInfoViewController: SheetViewController {
             let others = { (without: String, with: String) -> [String] in
                 members.filter { !$0.bool("me") && $0.str("user_id") != without }.map { $0.str("user_id") } + (with.isEmpty ? [] : [with])
             }
-            self.stack.addArrangedSubview(self.personRow(c.str("title"), (channel ? "Канал · " : "Группа · ") + memberCount(c.int("member_count"), channel: channel), seed: self.cid))
+            let canPhoto = c.bool("can_edit_info") && !gone
+            self.stack.addArrangedSubview(self.personRow(c.str("title"), (channel ? "Канал · " : "Группа · ") + memberCount(c.int("member_count"), channel: channel) + (canPhoto ? " · нажмите, чтобы сменить фото" : ""),
+                                                         seed: self.cid, avatar: c.str("avatar_path"), action: canPhoto ? { self.changePhoto(hasPhoto: !c.str("avatar_path").isEmpty) } : nil))
             if !c.str("description").isEmpty { self.stack.addArrangedSubview(label(c.str("description"), 15)) }
             if c.bool("can_edit_info") && !gone {
                 let name = Field(channel ? "Название канала" : "Название группы")
@@ -658,7 +728,7 @@ final class ConversationInfoViewController: SheetViewController {
                 if !m.str("tag").isEmpty { sub += " · " + m.str("tag") }
                 if warn { sub = "Ключ изменился — сверьте код в личном чате" }
                 let name = m.str("display_name")
-                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, subColor: warn ? Theme.warning : Theme.muted, action: admin && !gone ? {
+                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, avatar: m.str("avatar_path"), subColor: warn ? Theme.warning : Theme.muted, action: admin && !gone ? {
                     let a = UIAlertController(title: name, message: nil, preferredStyle: .actionSheet)
                     a.addAction(UIAlertAction(title: "Тег…", style: .default) { _ in self.editTag(uid, name: name, current: m.str("tag")) })
                     if owner && !me {

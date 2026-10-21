@@ -43,10 +43,11 @@ object Dialogs {
     fun whatsNewIfNeeded(act: MainActivity) {
         val version = runCatching { act.packageManager.getPackageInfo(act.packageName, 0).versionName }.getOrNull() ?: return
         CoreClient.call("whats_new", JSONObject().put("version", version).put("platform", "android")) { v, _ ->
-            val o = v as? JSONObject ?: return@call
-            if (!o.optBoolean("show")) return@call
+            val o = v as? JSONObject ?: return@call callReadiness(act)
+            if (!o.optBoolean("show")) return@call callReadiness(act)
             CoreClient.call("whats_new_seen", JSONObject().put("version", version))
             val s = Sheet(act, o.optString("title"))
+            s.onDismiss = { callReadiness(act) }
             val items = o.optJSONArray("items")
             for (i in 0 until (items?.length() ?: 0)) s.add(s.ctx.label("•  " + items!!.optString(i), 15f, 400), if (i == 0) 4 else 10)
             val ok = PillButton(s.ctx, "Понятно")
@@ -54,6 +55,36 @@ object Dialogs {
             s.add(ok, 18)
             s.show()
         }
+    }
+
+    /**
+     * Once after the first start: calls in the background need the battery limit lifted, and on
+     * Android 14 a ringing call needs its own permission to appear on a locked screen.
+     * Settings keeps both switches for later.
+     */
+    fun callReadiness(act: MainActivity) {
+        val prefs = Prefs.of(act)
+        if (prefs.getBoolean("readiness_asked", false)) return
+        val battery = !act.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(act.packageName)
+        val screen = !app.neochat.calls.CallNotifications.canShowOnLockScreen(act)
+        if (!battery && !screen) return
+        prefs.edit().putBoolean("readiness_asked", true).apply()
+        val s = Sheet(act, "Чтобы звонки приходили сразу")
+        s.muted("Без этих разрешений Android может задержать входящий звонок или не показать его на заблокированном экране.", 4)
+        if (battery) {
+            val b = PillButton(s.ctx, "Работа в фоне без ограничений")
+            b.setOnClickListener { s.dismiss(); SettingsPage.openBatterySettings(act) }
+            s.add(b, 16)
+        }
+        if (screen) {
+            val b = PillButton(s.ctx, "Показывать звонки на заблокированном экране", primary = !battery)
+            b.setOnClickListener { s.dismiss(); SettingsPage.openLockScreenCalls(act) }
+            s.add(b, 10)
+        }
+        val later = PillButton(s.ctx, "Позже", primary = false)
+        later.setOnClickListener { s.dismiss() }
+        s.add(later, 10)
+        s.show()
     }
 
     // ---- contacts ----
@@ -490,6 +521,16 @@ object Dialogs {
                     }
                 }
                 head.subtitle.text = memberCount(c.optInt("member_count"), channel)
+                if (c.optBoolean("can_edit_info") && !gone) {
+                    head.subtitle.text = head.subtitle.text.toString() + " · нажмите, чтобы сменить фото"
+                    head.isClickable = true
+                    head.contentDescription = "${c.str("title")}. Сменить фото"
+                    head.setOnClickListener {
+                        val menu = PopupMenu(act, head).add("Выбрать фото") { pickGroupPhoto(act, cid) { reload() } }
+                        if (c.str("avatar_path").isNotEmpty()) menu.add("Удалить фото", danger = true) { setGroupPhoto(act, cid, "") { reload() } }
+                        menu.show()
+                    }
+                }
                 add(head)
                 if (c.str("description").isNotEmpty()) add(ctx.label(c.str("description"), 14.5f).apply { setTextIsSelectable(true) }, 10)
                 if (c.optBoolean("can_edit_info") && !gone) {

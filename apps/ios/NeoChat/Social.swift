@@ -26,7 +26,8 @@ let chatSorts = [("activity", "По активности"), ("unread", "Снач
 /// The reaction a double tap puts on a message. It is an account setting: the core
 /// shares it with the user's other devices and reports changes as "settings_changed".
 enum QuickReaction {
-    static let choices = ["❤️", "👍", "🔥", "😂", "😮", "😢", "🙏", "👏", "🎉", "😍", "🤝", "👀"]
+    /// 5 columns by 7 rows; the same list on every platform.
+    static let choices = ["❤️", "👍", "🔥", "😂", "😮", "😢", "🙏", "👏", "🎉", "😍", "🤝", "👀", "👎", "😡", "🤔", "😎", "🥰", "😘", "🤩", "😁", "😭", "🤯", "😱", "🥳", "🤗", "💯", "✨", "⚡", "💔", "💪", "🙌", "👌", "🤮", "🥺", "😴"]
     private(set) static var current = UserDefaults.standard.string(forKey: "quick_reaction") ?? "❤️"
     private static var observer: NSObjectProtocol?
 
@@ -59,6 +60,64 @@ enum QuickReaction {
         current = e
         UserDefaults.standard.set(e, forKey: "quick_reaction")
         NotificationCenter.default.post(name: .prefsChanged, object: nil)
+    }
+}
+
+/// The quick reaction picker: a 5 by 7 grid, the chosen one is highlighted.
+final class QuickReactionViewController: SheetViewController {
+    private var cells: [String: UIButton] = [:]
+    var onPick: ((String) -> Void)?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Быстрая реакция"
+        muted("Её ставит двойное касание сообщения. Выбор общий для всех ваших устройств.")
+        let grid = UIStackView()
+        grid.axis = .vertical
+        grid.spacing = 8
+        grid.distribution = .fillEqually
+        let all = QuickReaction.choices
+        for r in stride(from: 0, to: all.count, by: 5) {
+            let row = UIStackView()
+            row.spacing = 8
+            row.distribution = .fillEqually
+            for e in all[r..<min(r + 5, all.count)] {
+                let b = UIButton(type: .custom)
+                b.setTitle(e, for: .normal)
+                b.titleLabel?.font = .systemFont(ofSize: 30)
+                b.layer.cornerRadius = 16
+                b.layer.cornerCurve = .continuous
+                b.layer.borderWidth = 2
+                b.accessibilityLabel = e
+                b.heightAnchor.constraint(equalTo: b.widthAnchor).isActive = true
+                b.addAction(UIAction { [weak self] _ in self?.pick(e) }, for: .touchUpInside)
+                cells[e] = b
+                row.addArrangedSubview(b)
+            }
+            grid.addArrangedSubview(row)
+        }
+        stack.addArrangedSubview(grid)
+        paint()
+    }
+
+    private func pick(_ e: String) {
+        guard e != QuickReaction.current else { return }
+        QuickReaction.set(e) { [weak self] err in
+            guard let self else { return }
+            if let err { return self.toast(err) }
+            UISelectionFeedbackGenerator().selectionChanged()
+            self.onPick?(e)
+            self.paint()
+        }
+    }
+
+    private func paint() {
+        for (e, b) in cells {
+            let on = e == QuickReaction.current
+            b.layer.borderColor = (on ? Theme.accent : UIColor.clear).cgColor
+            b.backgroundColor = on ? Theme.accent.withAlphaComponent(0.16) : Theme.incoming
+            b.accessibilityTraits = on ? [.button, .selected] : .button
+        }
     }
 }
 
@@ -492,13 +551,11 @@ enum ContactQr {
     }
 }
 
-// MARK: - Passcode lock for the app and the archive
+// MARK: - System biometrics lock for the app and the archive
 
 enum AppLock {
-    static var hasPasscode: Bool { Prefs.bool("has_passcode", false) }
-    static var lockApp: Bool { Prefs.bool("lock_app", true) }
-    static var lockArchive: Bool { Prefs.bool("lock_archive", false) }
-    static var useBio: Bool { Prefs.bool("lock_bio", true) }
+    static var lockApp: Bool { Prefs.bool("lock_app", false) && available }
+    static var lockArchive: Bool { Prefs.bool("lock_archive", false) && available }
     /// Seconds in the background before the app locks again.
     static var lockAfter: Int { UserDefaults.standard.object(forKey: "lock_after") as? Int ?? 0 }
     static let afterChoices = [(0, "Сразу"), (60, "Через 1 мин"), (300, "Через 5 мин"), (3600, "Через 1 час")]
@@ -507,27 +564,79 @@ enum AppLock {
     private static var cover: UIWindow?
     private static var backgroundAt: Date?
     private static var unlocked = false
+    /// The system prompt itself sends the app to the inactive state; it must not lock again.
+    private static var authenticating = false
 
-    static var biometryName: String? {
-        let c = LAContext()
+    /// Face ID, Touch ID or the device passcode is set up on this phone.
+    static var available: Bool {
         var e: NSError?
-        guard c.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &e) else { return nil }
-        return c.biometryType == .faceID ? "Face ID" : "Touch ID"
+        return LAContext().canEvaluatePolicy(.deviceOwnerAuthentication, error: &e)
     }
 
-    private static var appLocked: Bool { hasPasscode && lockApp }
+    static var biometryName: String {
+        let c = LAContext()
+        var e: NSError?
+        _ = c.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &e)
+        switch c.biometryType {
+        case .faceID: return "Face ID"
+        case .touchID: return "Touch ID"
+        default: return "код-пароль телефона"
+        }
+    }
+
+    /// The app's own passcode is gone: forget it and keep its switches meaningful.
+    static func migrate() {
+        guard UserDefaults.standard.object(forKey: "has_passcode") != nil else { return }
+        let had = Prefs.bool("has_passcode", false)
+        let app = Prefs.bool("lock_app", true)
+        UserDefaults.standard.removeObject(forKey: "has_passcode")
+        UserDefaults.standard.removeObject(forKey: "lock_bio")
+        UserDefaults.standard.set(had && app, forKey: "lock_app")
+        Core.shared.call("lock_clear") { _ in }
+    }
+
+    /// Asks the system for the user's identity. [done] gets the result on the main queue.
+    static func confirm(_ reason: String, _ done: @escaping (Bool) -> Void) {
+        guard !authenticating else { return }
+        authenticating = true
+        let c = LAContext()
+        c.localizedFallbackTitle = ""
+        c.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, _ in
+            DispatchQueue.main.async {
+                authenticating = false
+                if ok {
+                    unlocked = true
+                    backgroundAt = nil
+                }
+                done(ok)
+            }
+        }
+    }
+
+    /// Turning a lock on asks once; the app stays open afterwards.
+    static func enable(_ key: String, from host: UIViewController, done: @escaping (Bool) -> Void) {
+        guard available else {
+            host.toast("Включите Face ID, Touch ID или код-пароль в настройках телефона")
+            return done(false)
+        }
+        confirm("Подтвердите, чтобы включить вход по биометрии") { ok in
+            if ok { Prefs.set(key, true) }
+            done(ok)
+        }
+    }
 
     static func launched(_ scene: UIWindowScene) {
-        if appLocked { lock(scene) } else { unlocked = true }
+        migrate()
+        if lockApp { lock(scene) } else { unlocked = true }
     }
 
     static func backgrounded(_ scene: UIWindowScene) {
         backgroundAt = Date()
-        if appLocked && lockAfter == 0 { lock(scene) }
+        if lockApp && lockAfter == 0 { lock(scene) }
     }
 
     static func foreground(_ scene: UIWindowScene) {
-        guard appLocked else { return }
+        guard lockApp else { return }
         let away = backgroundAt.map { Date().timeIntervalSince($0) } ?? .infinity
         if !unlocked || away >= Double(lockAfter) { lock(scene) }
     }
@@ -561,9 +670,8 @@ enum AppLock {
         let w = UIWindow(windowScene: scene)
         w.windowLevel = .alert + 1
         Theme.apply(to: w, animated: false)
-        w.rootViewController = LockViewController(title: "NeoChat", hint: "Введите код-пароль", cancellable: false) { ok in
+        w.rootViewController = LockViewController(title: "NeoChat", hint: "Подтвердите, что это вы") { ok in
             guard ok else { return }
-            unlocked = true
             UIView.animate(withDuration: Theme.ms(0.22), animations: { w.alpha = 0 }) { _ in
                 w.isHidden = true
                 window = nil
@@ -574,83 +682,29 @@ enum AppLock {
         window = w
     }
 
-    /// Opens the archive after the passcode when the archive is locked.
+    /// Opens the archive after the system check when the archive is locked.
     static func unlockArchive(from host: UIViewController, _ then: @escaping () -> Void) {
-        guard hasPasscode && lockArchive else { return then() }
-        let vc = LockViewController(title: "Архив", hint: "Введите код-пароль, чтобы открыть архив", cancellable: true) { [weak host] ok in
-            host?.dismiss(animated: !Theme.reducedMotion) { if ok { then() } }
-        }
-        vc.modalPresentationStyle = .fullScreen
-        vc.modalTransitionStyle = .crossDissolve
-        host.present(vc, animated: !Theme.reducedMotion)
-    }
-
-    /// Asks a new passcode twice, 4–8 digits.
-    static func setPasscode(from host: UIViewController, done: @escaping () -> Void) {
-        let a = UIAlertController(title: "Новый код-пароль", message: "От 4 до 8 цифр. Код хранится только на этом телефоне; если забыть его, придётся выйти и войти снова.", preferredStyle: .alert)
-        for p in ["Код-пароль", "Ещё раз"] {
-            a.addTextField {
-                $0.placeholder = p
-                $0.isSecureTextEntry = true
-                $0.keyboardType = .numberPad
-                $0.textContentType = nil
-            }
-        }
-        a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
-        a.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak a] _ in
-            let one = a?.textFields?[0].text ?? "", two = a?.textFields?[1].text ?? ""
-            guard (4...8).contains(one.count), one.allSatisfy(\.isNumber) else { return host.toast("Код-пароль: от 4 до 8 цифр") }
-            guard one == two else { return host.toast("Коды не совпадают") }
-            Core.shared.call("lock_set", ["passcode": one]) { r in
-                switch r {
-                case .failure(let e): host.toast(e.message)
-                case .success:
-                    Prefs.set("has_passcode", true)
-                    unlocked = true
-                    host.toast("Код-пароль включён")
-                    done()
-                }
-            }
-        })
-        host.present(a, animated: !Theme.reducedMotion)
-    }
-
-    static func disable(from host: UIViewController, done: @escaping () -> Void) {
-        let vc = LockViewController(title: "Отключить код-пароль", hint: "Введите текущий код-пароль", cancellable: true) { [weak host] ok in
-            host?.dismiss(animated: !Theme.reducedMotion) {
-                guard ok else { return }
-                Core.shared.call("lock_clear") { _ in
-                    Prefs.set("has_passcode", false)
-                    done()
-                }
-            }
-        }
-        vc.modalPresentationStyle = .fullScreen
-        host.present(vc, animated: !Theme.reducedMotion)
+        guard lockArchive else { return then() }
+        confirm("Откройте архив") { ok in if ok { then() } }
     }
 }
 
-final class LockViewController: UIViewController, UITextFieldDelegate {
+/// A cover with one button; the system sheet (Face ID, Touch ID or the phone's passcode) does the checking.
+final class LockViewController: UIViewController {
     private let titleText: String
     private let hint: String
-    private let cancellable: Bool
     private let done: (Bool) -> Void
-    private let field = Field("Код-пароль", secure: true)
-    private let err = label("", 14, color: Theme.warning)
-    private let unlock = PillButton("Открыть")
-    private var bioTried = false
+    private let unlock = PillButton("Разблокировать")
+    private var tried = false
 
-    init(title: String, hint: String, cancellable: Bool, done: @escaping (Bool) -> Void) {
+    init(title: String, hint: String, done: @escaping (Bool) -> Void) {
         titleText = title
         self.hint = hint
-        self.cancellable = cancellable
         self.done = done
         super.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    private var bio: String? { AppLock.useBio ? AppLock.biometryName : nil }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -663,90 +717,37 @@ final class LockViewController: UIViewController, UITextFieldDelegate {
         t.accessibilityTraits = .header
         let h = label(hint, 15, color: Theme.muted)
         h.textAlignment = .center
-        field.keyboardType = .numberPad
-        field.textContentType = nil
-        field.textAlignment = .center
-        field.delegate = self
-        field.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            self.err.text = ""
-            if (self.field.text ?? "").count >= 8 { self.check() }
-        }, for: .editingChanged)
-        err.textAlignment = .center
-        unlock.addAction(UIAction { [weak self] _ in self?.check() }, for: .touchUpInside)
-        let stack = UIStackView(arrangedSubviews: [icon, t, h, field, err, unlock])
+        unlock.addAction(UIAction { [weak self] _ in self?.authenticate() }, for: .touchUpInside)
+        let stack = UIStackView(arrangedSubviews: [icon, t, h, unlock])
         stack.axis = .vertical
         stack.spacing = 14
         stack.setCustomSpacing(22, after: h)
-        if let bio {
-            let b = LinkButton(bio == "Face ID" ? "Войти по Face ID" : "Войти по отпечатку")
-            b.addAction(UIAction { [weak self] _ in self?.tryBio() }, for: .touchUpInside)
-            stack.addArrangedSubview(b)
-        }
-        if cancellable {
-            let c = LinkButton("Отмена", color: Theme.muted)
-            c.addAction(UIAction { [weak self] _ in self?.done(false) }, for: .touchUpInside)
-            stack.addArrangedSubview(c)
-        }
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
-            stack.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor, constant: -60),
+            stack.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor, constant: -40),
         ])
         view.accessibilityViewIsModal = true
+        NotificationCenter.default.addObserver(self, selector: #selector(becameActive), name: UIApplication.didBecomeActiveNotification, object: nil)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if bio != nil && !bioTried { tryBio() } else { field.becomeFirstResponder() }
+        if !tried { authenticate() }
     }
 
-    private func tryBio() {
-        bioTried = true
-        let c = LAContext()
-        c.localizedFallbackTitle = "Ввести код-пароль"
-        c.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: hint) { ok, _ in
-            DispatchQueue.main.async {
-                if ok { self.finish() } else { self.field.becomeFirstResponder() }
-            }
+    /// Back from the background with the cover still up: ask again right away.
+    @objc private func becameActive() {
+        if view.window != nil { authenticate() }
+    }
+
+    private func authenticate() {
+        tried = true
+        AppLock.confirm(hint) { [weak self] ok in
+            if ok { self?.done(true) }
         }
-    }
-
-    private func check() {
-        let code = field.text ?? ""
-        guard !code.isEmpty else { return }
-        unlock.isEnabled = false
-        Core.shared.call("lock_check", ["passcode": code]) { [weak self] r in
-            guard let self else { return }
-            self.unlock.isEnabled = true
-            switch r {
-            case .failure(let e): self.err.text = e.message
-            case .success(let v):
-                if (v as? JSON)?.bool("ok") == true { return self.finish() }
-                self.err.text = "Неверный код-пароль"
-                self.field.text = ""
-                UINotificationFeedbackGenerator().notificationOccurred(.error)
-                if !Theme.reducedMotion {
-                    let a = CAKeyframeAnimation(keyPath: "transform.translation.x")
-                    a.values = [0, -10, 10, -6, 6, 0]
-                    a.duration = 0.32
-                    self.field.layer.add(a, forKey: "shake")
-                }
-            }
-            UIAccessibility.post(notification: .announcement, argument: self.err.text)
-        }
-    }
-
-    private func finish() {
-        field.resignFirstResponder()
-        done(true)
-    }
-
-    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-        check()
-        return false
     }
 }
 

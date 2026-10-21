@@ -347,7 +347,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             case "messages_changed" where ev.str("conversation_id") == self.conversationId: self.scheduleReload()
             case "sync_reset": self.scheduleReload(); self.refreshConversation(first: false)
             case "conversations_changed", "contacts_changed", "identity_changed", "connection": self.refreshConversation(first: false)
-            case "presence" where ev.str("user_id") == self.conv.str("peer_user_id"): self.refreshConversation(first: false)
+            case "presence" where self.presenceIds().contains(ev.str("user_id")): self.refreshConversation(first: false)
             default: break
             }
         }
@@ -598,6 +598,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private func updateAttachMenu() {
         var acts: [UIMenuElement] = [
             UIAction(title: "Фото", image: UIImage(systemName: "photo")) { [weak self] _ in self?.pickPhotos() },
+            UIAction(title: "Камера", image: UIImage(systemName: "camera")) { [weak self] _ in self?.takePhoto() },
             UIAction(title: "Файл", image: UIImage(systemName: "doc")) { [weak self] _ in self?.pickFile() },
         ]
         if conv.bool("can_polls") && conv.str("kind") != "direct" {
@@ -660,6 +661,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
     }
 
+    /// The app's own camera; the shot is sent like a picked photo.
+    private func takePhoto() {
+        PhotoCameraViewController.present(from: self) { [weak self] url in
+            let thumb = Photos.makeThumb(url)
+            self?.sendPhoto(url, name: String(url.lastPathComponent.dropFirst(37)), mime: "image/jpeg", thumb: thumb)
+        }
+    }
+
     private func pickFile() {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
         picker.allowsMultipleSelection = true
@@ -696,7 +705,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             let handle = members.first { !$0.bool("me") }.map { "@" + $0.str("username") } ?? ""
             let seen = c.obj("presence")?.str("text") ?? ""
             self.peerOnline = c.obj("presence")?.bool("online") ?? false
-            self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) : channel ? memberCount(c.int("member_count"), channel: true)
+            self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) + (c.int("online_count") > 0 ? ", \(c.int("online_count")) в сети" : "") : channel ? memberCount(c.int("member_count"), channel: true)
                 : seen.isEmpty ? handle : seen
             self.titleLabel.text = c.str("title")
             self.updateSubtitle()
@@ -748,10 +757,18 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         titleBox.accessibilityLabel = (titleLabel.text ?? "") + ", " + (subLabel.text ?? "")
     }
 
-    private func refreshPresence() {
+    /// The peer of a direct chat, or the other members of a group.
+    private func presenceIds() -> [String] {
         let peer = conv.str("peer_user_id")
-        guard conv.str("kind") == "direct", !peer.isEmpty else { return }
-        Core.shared.call("presence", ["user_ids": [peer], "tz_offset": tzOffsetMinutes]) { [weak self] r in
+        if conv.str("kind") == "direct" { return peer.isEmpty ? [] : [peer] }
+        guard conv.str("kind") == "group" else { return [] }
+        return conv.arr("members").filter { !$0.bool("me") }.map { $0.str("user_id") }
+    }
+
+    private func refreshPresence() {
+        let ids = presenceIds()
+        guard !ids.isEmpty else { return }
+        Core.shared.call("presence", ["user_ids": ids, "tz_offset": tzOffsetMinutes]) { [weak self] r in
             if case .success = r { self?.refreshConversation(first: false) }
         }
     }
@@ -1141,9 +1158,13 @@ final class BubbleCell: UITableViewCell {
     private let replyPanDelegate = ReplySwipeDelegate()
     private let replyIcon = UIImageView(image: UIImage(systemName: "arrowshape.turn.up.left.fill"))
     private var replyArmed = false
+    private var replyIconTrailing: NSLayoutConstraint!
+    private var replyIconLeading: NSLayoutConstraint!
+    /// Own messages are answered with a swipe to the right, the others' with a swipe to the left.
+    private(set) var swipesRight = false
     var onTap: (() -> Void)?
     var onReact: ((String) -> Void)?
-    /// Swipe left anywhere on the row, the empty part included.
+    /// Swipe anywhere on the row, the empty part included: to the left for others' messages, to the right for own.
     var onSwipeReply: (() -> Void)?
     /// Double tap anywhere on the row: the quick reaction.
     var onDoubleTap: (() -> Void)? { didSet { doubleTap.isEnabled = onDoubleTap != nil } }
@@ -1225,8 +1246,10 @@ final class BubbleCell: UITableViewCell {
         replyIcon.isAccessibilityElement = false
         replyIcon.translatesAutoresizingMaskIntoConstraints = false
         addSubview(replyIcon)
+        replyIconTrailing = replyIcon.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18)
+        replyIconLeading = replyIcon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18)
+        replyIconTrailing.isActive = true
         NSLayoutConstraint.activate([
-            replyIcon.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
             replyIcon.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             replyIcon.widthAnchor.constraint(equalToConstant: 24), replyIcon.heightAnchor.constraint(equalToConstant: 24),
         ])
@@ -1272,18 +1295,19 @@ final class BubbleCell: UITableViewCell {
         onDoubleTap?()
     }
 
-    /// The row follows the finger to the left; past the threshold a release replies.
+    /// The row follows the finger toward the reply side; past the threshold a release replies.
     @objc private func panned(_ g: UIPanGestureRecognizer) {
         let threshold: CGFloat = 56
         switch g.state {
         case .changed:
-            let raw = min(0, g.translation(in: contentView).x)
-            let dx = raw > -threshold ? raw : -threshold + (raw + threshold) * 0.3
-            contentView.transform = CGAffineTransform(translationX: max(dx, -88), y: 0)
-            let p = min(1, -raw / threshold)
+            let sign: CGFloat = swipesRight ? 1 : -1
+            let raw = max(0, sign * g.translation(in: contentView).x)
+            let dx = raw < threshold ? raw : threshold + (raw - threshold) * 0.3
+            contentView.transform = CGAffineTransform(translationX: sign * min(dx, 88), y: 0)
+            let p = min(1, raw / threshold)
             replyIcon.alpha = p
             replyIcon.transform = CGAffineTransform(scaleX: 0.5 + 0.5 * p, y: 0.5 + 0.5 * p)
-            let armed = raw <= -threshold
+            let armed = raw >= threshold
             if armed != replyArmed {
                 replyArmed = armed
                 if armed { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
@@ -1327,6 +1351,9 @@ final class BubbleCell: UITableViewCell {
     func bind(_ m: JSON, group: Bool, first: Bool, last: Bool) {
         boundId = m.str("id")
         let out = m.bool("outgoing")
+        swipesRight = out
+        replyIconTrailing.isActive = !out
+        replyIconLeading.isActive = out
         let kind = m.str("kind")
         let col = bubble.superview as! UIStackView
         col.alignment = out ? .trailing : .leading
@@ -1507,15 +1534,20 @@ final class BubbleCell: UITableViewCell {
     }
 }
 
-/// Starts only on a mostly horizontal drag to the left, so scrolling and the
-/// edge swipe back (to the right) keep working.
+/// Starts only on a mostly horizontal drag toward the reply side, so scrolling and the
+/// edge swipe back keep working: a rightward drag (own messages) must not begin at the screen edge.
 private final class ReplySwipeDelegate: NSObject, UIGestureRecognizerDelegate {
     weak var cell: BubbleCell?
 
     func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
         guard let p = g as? UIPanGestureRecognizer, cell?.onSwipeReply != nil else { return false }
         let v = p.velocity(in: p.view)
-        return v.x < 0 && abs(v.x) > abs(v.y) * 1.5
+        guard abs(v.x) > abs(v.y) * 1.5 else { return false }
+        if cell?.swipesRight == true {
+            let x = p.location(in: p.view?.window).x
+            return v.x > 0 && x > 32
+        }
+        return v.x < 0
     }
 }
 

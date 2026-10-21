@@ -14,7 +14,6 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.CancellationSignal
-import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -35,7 +34,45 @@ import org.json.JSONObject
  * shares it with the user's other devices and reports changes as "settings_changed".
  */
 object QuickReaction {
-    val CHOICES = listOf("❤️", "👍", "🔥", "😂", "😮", "😢", "🙏", "👏", "🎉", "😍", "🤝", "👀")
+    /** 5 columns by 7 rows; every platform offers the same set. */
+    val CHOICES = "❤️ 👍 🔥 😂 😮 😢 🙏 👏 🎉 😍 🤝 👀 👎 😡 🤔 😎 🥰 😘 🤩 😁 😭 🤯 😱 🥳 🤗 💯 ✨ ⚡ 💔 💪 🙌 👌 🤮 🥺 😴".split(' ')
+
+    /** A sheet with the whole set; the current one is highlighted and a tap chooses it. */
+    fun pick(act: MainActivity, onPick: (String) -> Unit) {
+        val s = Sheet(act, "Быстрая реакция")
+        val ctx = s.ctx
+        val current = current(ctx)
+        val grid = GridLayout(ctx).apply { columnCount = 5 }
+        for (e in CHOICES) {
+            val on = e == current
+            val cell = TextView(ctx).apply {
+                text = e
+                textSize = 28f
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                contentDescription = "Быстрая реакция $e" + if (on) ", выбрана" else ""
+                background = if (on) android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = ctx.dpf(16)
+                    setColor((Theme.p.accent and 0x00FFFFFF) or 0x33000000)
+                    setStroke(ctx.dp(2), Theme.p.accent)
+                } else GlassDrawable(ctx, GlassDrawable.Kind.NONE, ctx.dpf(16), rim = false)
+                if (!on) pressFeedback()
+                setOnClickListener {
+                    onPick(e)
+                    s.dismiss()
+                }
+            }
+            grid.addView(cell, GridLayout.LayoutParams(GridLayout.spec(GridLayout.UNDEFINED, 1f), GridLayout.spec(GridLayout.UNDEFINED, 1f)).apply {
+                width = 0
+                height = ctx.dp(58)
+                setMargins(ctx.dp(3), ctx.dp(3), ctx.dp(3), ctx.dp(3))
+            })
+        }
+        s.add(grid, 4)
+        s.add(ctx.label("Двойное касание сообщения ставит эту реакцию. Выбор общий для всех ваших устройств.", 13.5f, 400, Theme.Role.MUTED), 10)
+        s.show()
+    }
 
     fun current(ctx: Context): String = Prefs.of(ctx).getString("quick_reaction", null) ?: "❤️"
 
@@ -330,44 +367,80 @@ object Qr {
 }
 
 /**
- * Local passcode lock for the app and the archive. The passcode hash lives in the
- * encrypted core database; the fingerprint goes through the system BiometricPrompt.
+ * Lock for the app and the archive through the system: fingerprint, face or the phone's own
+ * screen lock (BiometricPrompt). NeoChat keeps no passcode of its own.
  */
 object AppLock {
     private var backgroundAt = 0L
+    private var unlockedAt = 0L
+    private var authenticating = false
     var locked = false
         private set
     private var overlay: View? = null
 
-    fun enabled(ctx: Context) = Prefs.of(ctx).getBoolean("has_passcode", false)
-    fun appLock(ctx: Context) = enabled(ctx) && Prefs.of(ctx).getBoolean("lock_app", false)
-    fun archiveLock(ctx: Context) = enabled(ctx) && Prefs.of(ctx).getBoolean("lock_archive", false)
+    /** Needs Android 10: the system prompt can fall back to the screen lock only from there on. */
+    fun available(ctx: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 29) return false
+        if (Build.VERSION.SDK_INT >= 30) {
+            val bm = ctx.getSystemService(android.hardware.biometrics.BiometricManager::class.java) ?: return false
+            val auth = android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            return bm.canAuthenticate(auth) == android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS
+        }
+        return ctx.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceSecure == true
+    }
 
-    fun biometricAvailable(ctx: Context): Boolean {
-        if (Build.VERSION.SDK_INT < 29) return Build.VERSION.SDK_INT >= 28 && ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_FINGERPRINT)
-        val bm = ctx.getSystemService(android.hardware.biometrics.BiometricManager::class.java) ?: return false
-        @Suppress("DEPRECATION")
-        return bm.canAuthenticate() == android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS
+    fun appLock(ctx: Context) = available(ctx) && Prefs.of(ctx).getBoolean("lock_app", false)
+    fun archiveLock(ctx: Context) = available(ctx) && Prefs.of(ctx).getBoolean("lock_archive", false)
+
+    /** The passcode of 0.6.3 is gone: its hash is wiped and the switches now mean the system lock. */
+    fun migrate(ctx: Context) {
+        val prefs = Prefs.of(ctx)
+        if (!prefs.contains("has_passcode")) return
+        prefs.edit().remove("has_passcode").remove("lock_bio").apply()
+        CoreClient.call("lock_clear")
     }
 
     fun onBackground() {
-        backgroundAt = System.currentTimeMillis()
+        if (!authenticating) backgroundAt = System.currentTimeMillis()
     }
 
     /** On start and on return from the background after the auto-lock delay. */
     fun maybeLock(act: MainActivity) {
-        if (!appLock(act) || locked) return
+        if (!appLock(act) || locked || authenticating) return
+        val now = System.currentTimeMillis()
+        if (now - unlockedAt < 3000) return // returning from the system lock screen
         val after = Prefs.of(act).getInt("lock_after", 0) * 1000L
-        if (backgroundAt != 0L && System.currentTimeMillis() - backgroundAt < after) return
+        if (backgroundAt != 0L && now - backgroundAt < after) return
         locked = true
-        prompt(act, "Введите код-пароль", cancellable = false) { locked = false }
+        prompt(act, "NeoChat заблокирован", cancellable = false) { locked = false }
     }
 
     fun forceLockOnStart() {
         backgroundAt = 0L
     }
 
-    /** Full-screen passcode entry; the fingerprint is offered when enabled. */
+    /** Asks the system once; no screen of our own. [done] gets whether the user passed. */
+    fun confirm(act: MainActivity, title: String, done: (Boolean) -> Unit) {
+        if (!available(act) || authenticating) return done(false)
+        authenticating = true
+        val exec = act.mainExecutor
+        val b = android.hardware.biometrics.BiometricPrompt.Builder(act).setTitle(title).setSubtitle("NeoChat")
+        if (Build.VERSION.SDK_INT >= 30) b.setAllowedAuthenticators(
+            android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_WEAK or android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        ) else @Suppress("DEPRECATION") b.setDeviceCredentialAllowed(true)
+        fun finish(ok: Boolean) {
+            authenticating = false
+            if (ok) unlockedAt = System.currentTimeMillis()
+            done(ok)
+        }
+        b.build().authenticate(CancellationSignal(), exec, object : android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: android.hardware.biometrics.BiometricPrompt.AuthenticationResult) = finish(true)
+            override fun onAuthenticationError(code: Int, msg: CharSequence?) = finish(false)
+        })
+    }
+
+    /** Full-screen lock; the system prompt opens at once and again from the button. */
     fun prompt(act: MainActivity, title: String, cancellable: Boolean, ok: () -> Unit) {
         overlay?.let { act.overlay.removeView(it) }
         val ctx = act as Context
@@ -376,50 +449,32 @@ object AppLock {
             gravity = Gravity.CENTER_HORIZONTAL
             isClickable = true
             setBackgroundColor(Theme.p.bg0)
-            setPadding(ctx.dp(32), act.topInset + ctx.dp(96), ctx.dp(32), ctx.dp(32))
+            setPadding(ctx.dp(32), act.topInset + ctx.dp(120), ctx.dp(32), ctx.dp(32))
         }
         v.addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_lock); imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.accent) }, lp(ctx.dp(44), ctx.dp(44)))
         v.addView(ctx.label(title, 20f, 700).apply { gravity = Gravity.CENTER; heading() }, lp(WRAP, WRAP).apply { topMargin = ctx.dp(18) })
-        val field = FloatingField(ctx, "Код-пароль", password = true)
-        field.edit.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
-        v.addView(field, lp().apply { topMargin = ctx.dp(28) })
-        val err = ctx.label("", 13.5f, 400, Theme.Role.WARNING).apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
-        v.addView(err, lp().apply { topMargin = ctx.dp(8) })
-        val enter = PillButton(ctx, "Войти")
-        v.addView(enter, lp().apply { topMargin = ctx.dp(16) })
-        val bio = PillButton(ctx, "Отпечаток пальца", primary = false, icon = R.drawable.ic_fingerprint)
-        val useBio = Prefs.of(ctx).getBoolean("lock_bio", false) && biometricAvailable(ctx)
-        if (useBio) v.addView(bio, lp().apply { topMargin = ctx.dp(10) })
+        v.addView(ctx.label("Подтвердите отпечатком, лицом или блокировкой экрана телефона", 14.5f, 400, Theme.Role.MUTED).apply { gravity = Gravity.CENTER },
+            lp(WRAP, WRAP).apply { topMargin = ctx.dp(8) })
+        val unlock = PillButton(ctx, "Разблокировать", icon = R.drawable.ic_fingerprint)
+        v.addView(unlock, lp().apply { topMargin = ctx.dp(32) })
         if (cancellable) {
             val cancel = PillButton(ctx, "Отмена", primary = false)
             v.addView(cancel, lp().apply { topMargin = ctx.dp(10) })
             cancel.setOnClickListener { close(act) }
         }
         val back: () -> Boolean = { if (cancellable) close(act) else act.moveTaskToBack(true); true }
-        fun success() {
-            close(act)
-            ok()
-        }
-        enter.setOnClickListener {
-            val code = field.text
-            if (code.isEmpty()) return@setOnClickListener
-            enter.isEnabled = false
-            CoreClient.call("lock_check", JSONObject().put("passcode", code)) { r, e ->
-                enter.isEnabled = true
-                if (e != null) return@call run { err.text = e.message }
-                if ((r as JSONObject).optBoolean("ok")) success() else {
-                    err.text = "Неверный код-пароль"
-                    field.setText("")
-                }
+        fun ask() = confirm(act, title) { passed ->
+            if (passed) {
+                close(act)
+                ok()
             }
         }
-        field.edit.setOnEditorActionListener { _, _, _ -> enter.performClick(); true }
-        bio.setOnClickListener { biometric(act, title) { success() } }
+        unlock.setOnClickListener { ask() }
         act.overlay.addView(v, FrameLayout.LayoutParams(MATCH, MATCH))
         act.pushBack(back)
         overlay = v
         v.tag = back
-        if (useBio) v.post { biometric(act, title) { success() } }
+        v.post { ask() }
     }
 
     private fun close(act: MainActivity) {
@@ -427,49 +482,7 @@ object AppLock {
         overlay = null
         @Suppress("UNCHECKED_CAST")
         (v.tag as? () -> Boolean)?.let { act.popBack(it) }
-        (act.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(v.windowToken, 0)
         act.overlay.removeView(v)
-    }
-
-    private fun biometric(act: MainActivity, title: String, ok: () -> Unit) {
-        if (Build.VERSION.SDK_INT < 28) return
-        val exec = act.mainExecutor
-        val prompt = android.hardware.biometrics.BiometricPrompt.Builder(act)
-            .setTitle(title)
-            .setSubtitle("NeoChat")
-            .setNegativeButton("Код-пароль", exec) { _, _ -> }
-            .build()
-        prompt.authenticate(CancellationSignal(), exec, object : android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: android.hardware.biometrics.BiometricPrompt.AuthenticationResult) = ok()
-        })
-    }
-
-    /** Asks twice for a new numeric passcode of 4 to 8 digits. */
-    fun setPasscode(act: MainActivity, done: () -> Unit) {
-        val s = Sheet(act, "Код-пароль")
-        val ctx = s.ctx
-        val a = FloatingField(ctx, "Новый код-пароль (4–8 цифр)", password = true)
-        val b = FloatingField(ctx, "Повторите код-пароль", password = true)
-        for (f in listOf(a, b)) f.edit.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
-        val err = ctx.label("", 13.5f, 400, Theme.Role.WARNING)
-        val save = PillButton(ctx, "Сохранить")
-        s.add(a, 4)
-        s.add(b, 10)
-        s.add(ctx.label("Код хранится только на этом телефоне. Если забудете его, придётся выйти из аккаунта и войти заново.", 13.5f, 400, Theme.Role.MUTED), 10)
-        s.add(err, 6)
-        s.add(save, 14)
-        save.setOnClickListener {
-            val code = a.text
-            if (code.length !in 4..8 || !code.all { it.isDigit() }) return@setOnClickListener run { err.text = "Нужно от 4 до 8 цифр" }
-            if (code != b.text) return@setOnClickListener run { err.text = "Коды не совпадают" }
-            CoreClient.call("lock_set", JSONObject().put("passcode", code)) { _, e ->
-                if (e != null) return@call run { err.text = e.message }
-                Prefs.of(act).edit().putBoolean("has_passcode", true).apply()
-                s.dismiss()
-                done()
-            }
-        }
-        s.show()
     }
 }
 

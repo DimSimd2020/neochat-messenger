@@ -44,6 +44,7 @@ final class CallManager {
         NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.notify()
         }
+        warmUp()
     }
 
     private func notify() {
@@ -59,10 +60,16 @@ final class CallManager {
 
     // MARK: WebRTC objects
 
-    private lazy var factory: RTCPeerConnectionFactory = {
+    /// Creating the factory loads the codecs and takes a noticeable time: it is made once, off the main thread, ahead of the first call.
+    private static let sharedFactory: RTCPeerConnectionFactory = {
         RTCInitializeSSL()
         return RTCPeerConnectionFactory(encoderFactory: RTCDefaultVideoEncoderFactory(), decoderFactory: RTCDefaultVideoDecoderFactory())
     }()
+    private var factory: RTCPeerConnectionFactory { Self.sharedFactory }
+
+    func warmUp() {
+        DispatchQueue.global(qos: .userInitiated).async { _ = Self.sharedFactory }
+    }
     private var pc: RTCPeerConnection?
     private var observer: Observer?
     private var audioTrack: RTCAudioTrack?
@@ -118,7 +125,10 @@ final class CallManager {
         func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
             if newState == .complete { post { $0.sendLocal() } }
         }
-        func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
+        func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+            // The relay candidate comes last: with it the description is complete enough to send.
+            if candidate.sdp.contains(" typ relay") { post { $0.relayGathered($0.gen) } }
+        }
         func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
         func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
         func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
@@ -199,8 +209,15 @@ final class CallManager {
         }
     }
 
-    // Non-trickle: the description goes once gathering completes, or after
-    // 4 s with whatever candidates were found by then.
+    /// A short pause lets the remaining candidates of the same round in.
+    private func relayGathered(_ g: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            if self?.gen == g { self?.sendLocal() }
+        }
+    }
+
+    // Non-trickle: the description goes once gathering completes, once the relay
+    // candidate is in, or after 2 s with whatever candidates were found by then.
     private func setLocal(_ g: Int, _ d: RTCSessionDescription) {
         guard let conn = pc else { return }
         conn.setLocalDescription(d) { [weak self] err in
@@ -210,7 +227,7 @@ final class CallManager {
                 if conn.iceGatheringState == .complete { self.sendLocal() }
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             if self?.gen == g { self?.sendLocal() }
         }
     }
@@ -417,8 +434,16 @@ final class CallManager {
         return top
     }
 
-    func openScreen() {
+    func openScreen(retries: Int = 8) {
         guard let top = topController(), !(top is CallViewController) else { return }
+        // A screen that is still sliding in or out cannot present another one: try again shortly.
+        if top.isBeingPresented || top.isBeingDismissed || top.isMovingToParent || top.isMovingFromParent {
+            guard retries > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                if let self, self.live || self.phase == .incoming { self.openScreen(retries: retries - 1) }
+            }
+            return
+        }
         let vc = CallViewController()
         vc.modalPresentationStyle = .fullScreen
         vc.modalTransitionStyle = .crossDissolve

@@ -2,6 +2,7 @@ package app.neochat.ui
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -28,6 +29,7 @@ class SettingsPage(private val act: MainActivity) {
     private val cacheValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val lastSeenValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val batteryValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
+    private val lockScreenValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val quickValue = ctx.label(QuickReaction.current(ctx), 14f, 400, Theme.Role.MUTED)
 
     init {
@@ -99,6 +101,7 @@ class SettingsPage(private val act: MainActivity) {
             addView(toggle("Мгновенная доставка", "realtime", true) { app.neochat.RealtimeService.sync(ctx) })
             addView(note("NeoChat держит соединение с сервером в фоне, поэтому сообщения и звонки приходят сразу. В шторке остаётся тихое уведомление «NeoChat на связи». Если выключить, новые сообщения проверяются примерно раз в 15 минут, а звонки в фоне не приходят."))
             addView(nav(R.drawable.ic_shield, "Работа в фоне", batteryValue) { requestUnrestricted() })
+            if (Build.VERSION.SDK_INT >= 34) addView(nav(R.drawable.ic_phone, "Звонки на заблокированном экране", lockScreenValue) { openLockScreenCalls(act) })
             addView(nav(R.drawable.ic_bell, "Звук и вибрация") {
                 act.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName))
             })
@@ -136,7 +139,7 @@ class SettingsPage(private val act: MainActivity) {
                 choose(loadValue, loads, prefs.getString("autoload", "always")!!) { prefs.edit().putString("autoload", it).apply() }
             })
             addView(nav(R.drawable.ic_chat, "Быстрая реакция", quickValue) {
-                choose(quickValue, QuickReaction.CHOICES.map { it to it }, QuickReaction.current(ctx)) { e ->
+                QuickReaction.pick(act) { e ->
                     QuickReaction.set(ctx, e) { err -> if (err != null) act.toast(err) else quickValue.text = e }
                 }
             })
@@ -169,7 +172,7 @@ class SettingsPage(private val act: MainActivity) {
             PopupMenu(act, logout).add("Выйти: ключи и история на этом телефоне будут удалены", danger = true) {
                 CoreClient.call("logout") { _, e ->
                     if (e != null) act.toast(e.message)
-                    prefs.edit().remove("has_passcode").remove("lock_app").remove("lock_archive").apply()
+                    prefs.edit().remove("lock_app").remove("lock_archive").apply()
                     CoreClient.call("status") { sv, _ -> act.showOnboarding(sv as? JSONObject ?: JSONObject()) }
                 }
             }.show()
@@ -178,43 +181,43 @@ class SettingsPage(private val act: MainActivity) {
         updateCache()
     }
 
-    /** Passcode rows depend on whether a passcode is set. */
+    /** App and archive lock go through the system prompt: fingerprint, face or the phone's screen lock. */
     private fun buildLock() {
         lockBox.removeAllViews()
-        if (!AppLock.enabled(ctx)) {
-            lockBox.addView(nav(R.drawable.ic_lock, "Код-пароль", ctx.label("Выкл.", 14f, 400, Theme.Role.MUTED)) {
-                AppLock.setPasscode(act) {
-                    prefs.edit().putBoolean("lock_app", true).apply()
-                    act.toast("Код-пароль включён")
-                    buildLock()
-                }
+        if (!AppLock.available(ctx)) {
+            lockBox.addView(nav(R.drawable.ic_lock, "Вход по биометрии", ctx.label("Недоступно", 14f, 400, Theme.Role.MUTED)) {
+                act.toast("Нужен Android 10 и настроенная блокировка экрана или отпечаток")
             })
             return
         }
-        lockBox.addView(nav(R.drawable.ic_lock, "Сменить код-пароль") { AppLock.setPasscode(act) { act.toast("Код-пароль изменён") } })
-        lockBox.addView(toggle("Код при входе в приложение", "lock_app", false))
-        lockBox.addView(toggle("Код при входе в архив", "lock_archive", false))
-        if (AppLock.biometricAvailable(ctx)) lockBox.addView(toggle("Разблокировка отпечатком", "lock_bio", false))
+        // Turning a lock on asks the system once, so a lock that cannot be opened is never left on.
+        fun lockToggle(text: String, key: String): ToggleRow {
+            val t = ToggleRow(ctx, text)
+            t.setPadding(dp(14), 0, dp(14), 0)
+            t.setChecked(prefs.getBoolean(key, false), false)
+            t.onToggle = { on ->
+                if (!on) prefs.edit().putBoolean(key, false).apply()
+                else AppLock.confirm(act, "Подтвердите, что это вы") { ok ->
+                    prefs.edit().putBoolean(key, ok).apply()
+                    if (!ok) t.setChecked(false, true)
+                }
+            }
+            return t
+        }
+        lockBox.addView(lockToggle("Вход по биометрии", "lock_app"))
+        lockBox.addView(lockToggle("Биометрия при входе в архив", "lock_archive"))
         val delays = listOf("0" to "Сразу", "60" to "Через 1 мин", "300" to "Через 5 мин", "3600" to "Через 1 час")
         val cur = prefs.getInt("lock_after", 0).toString()
         val value = ctx.label(delays.firstOrNull { it.first == cur }?.second ?: "Сразу", 14f, 400, Theme.Role.MUTED)
         lockBox.addView(nav(R.drawable.ic_clock, "Автоблокировка", value) {
             choose(value, delays, prefs.getInt("lock_after", 0).toString()) { prefs.edit().putInt("lock_after", it.toInt()).apply() }
         })
-        val off = nav(R.drawable.ic_trash, "Отключить код-пароль") {
-            AppLock.prompt(act, "Введите текущий код-пароль", cancellable = true) {
-                CoreClient.call("lock_clear") { _, _ ->
-                    prefs.edit().putBoolean("has_passcode", false).putBoolean("lock_app", false).putBoolean("lock_archive", false).apply()
-                    act.toast("Код-пароль отключён")
-                    buildLock()
-                }
-            }
-        }
-        lockBox.addView(off)
+        lockBox.addView(note("Спрашивает система телефона: отпечаток, лицо или тот же код, что открывает экран. Своего пароля у NeoChat нет."))
     }
 
     fun load() {
         batteryValue.text = if (unrestricted()) "Без ограничений" else "Ограничена"
+        lockScreenValue.text = if (app.neochat.calls.CallNotifications.canShowOnLockScreen(ctx)) "Разрешены" else "Запрещены"
         QuickReaction.load(ctx) { quickValue.text = QuickReaction.current(ctx) }
         CoreClient.call("status") { v, _ ->
             val s = v as? JSONObject ?: return@call
@@ -282,11 +285,24 @@ class SettingsPage(private val act: MainActivity) {
 
     private fun unrestricted() = ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
 
-    /** Battery optimization may cut the background connection while the phone sleeps. */
-    private fun requestUnrestricted() {
-        val intent = if (unrestricted()) Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-        else Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:" + ctx.packageName))
-        runCatching { act.startActivity(intent) }.onFailure { act.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+    private fun requestUnrestricted() = openBatterySettings(act)
+
+    companion object {
+        /** Battery optimization may cut the background connection while the phone sleeps. */
+        fun openBatterySettings(act: MainActivity) {
+            val unrestricted = act.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(act.packageName)
+            val intent = if (unrestricted) Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            else Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:" + act.packageName))
+            runCatching { act.startActivity(intent) }.onFailure { act.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        }
+
+        /** Android 14 asks for the right to take over a locked screen with a ringing call. */
+        fun openLockScreenCalls(act: MainActivity) {
+            val intent = if (Build.VERSION.SDK_INT >= 34)
+                Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, android.net.Uri.parse("package:" + act.packageName))
+            else Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, act.packageName)
+            runCatching { act.startActivity(intent) }
+        }
     }
 
     private fun chooseLastSeen() {

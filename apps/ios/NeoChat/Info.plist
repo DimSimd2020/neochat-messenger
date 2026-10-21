@@ -11,7 +11,7 @@
 	<key>CFBundleAllowMixedLocalizations</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Камера нужна для видеозвонков и чтобы отсканировать QR-код при привязке нового устройства или добавлении контакта.</string>
+	<string>Камера нужна для видеозвонков, фотографий в чате и чтобы отсканировать QR-код при привязке нового устройства или добавлении контакта.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Микрофон нужен для звонков.</string>
 	<key>NSFaceIDUsageDescription</key>

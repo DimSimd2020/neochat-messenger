@@ -437,6 +437,11 @@ impl Inner {
                     drop(slot);
                     self.ring_timer(id.to_string(), Phase::Incoming);
                     self.emit_call(&call, "incoming", json!({}));
+                    // The relay credentials are fetched while the phone rings, so answering does not wait for them.
+                    let me = self.clone();
+                    let _ = std::thread::Builder::new().name("neocore-ice".into()).spawn(move || {
+                        let _ = me.ice_servers();
+                    });
                     return Ok(());
                 }
             }

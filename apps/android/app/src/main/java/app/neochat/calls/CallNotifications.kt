@@ -47,23 +47,35 @@ object CallNotifications {
         ctx, what.hashCode(), Intent(ctx, CallActionReceiver::class.java).setAction(what), PendingIntent.FLAG_IMMUTABLE,
     )
 
-    /** Full-screen ring on a locked or inactive phone; a heads-up card otherwise. */
-    fun showIncoming(ctx: Context) {
-        if (!canNotify(ctx)) return
+    /** Whether a ringing call may take over a locked screen (a permission of its own since Android 14). */
+    fun canShowOnLockScreen(ctx: Context) = Build.VERSION.SDK_INT < 34 || ctx.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+
+    /**
+     * Full-screen ring on a locked or inactive phone; a heads-up card otherwise. Since Android 12
+     * the system's own call card (with Answer and Decline) is used. False when it cannot be shown.
+     */
+    fun showIncoming(ctx: Context): Boolean {
+        if (!canNotify(ctx)) return false
         val call = CallManager.call
-        val n = Notification.Builder(ctx, CHANNEL_INCOMING)
+        val video = call.optBoolean("video")
+        val b = Notification.Builder(ctx, CHANNEL_INCOMING)
             .setSmallIcon(R.drawable.ic_phone)
             .setContentTitle(call.str("peer_name"))
-            .setContentText(if (call.optBoolean("video")) "Входящий видеозвонок" else "Входящий звонок")
+            .setContentText(if (video) "Входящий видеозвонок" else "Входящий звонок")
             .setCategory(Notification.CATEGORY_CALL)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(true)
             .setContentIntent(screen(ctx))
             .setFullScreenIntent(screen(ctx), true)
-            .addAction(Notification.Action.Builder(null, "Отклонить", action(ctx, CallActionReceiver.DECLINE)).build())
-            .addAction(Notification.Action.Builder(null, "Ответить", screen(ctx, answer = true)).build())
-            .build()
-        ctx.getSystemService(NotificationManager::class.java).notify(ID_INCOMING, n)
+        if (Build.VERSION.SDK_INT >= 31) {
+            val who = android.app.Person.Builder().setName(call.str("peer_name").ifEmpty { "NeoChat" }).setImportant(true).build()
+            b.setStyle(Notification.CallStyle.forIncomingCall(who, action(ctx, CallActionReceiver.DECLINE), screen(ctx, answer = true)))
+        } else {
+            b.addAction(Notification.Action.Builder(null, "Отклонить", action(ctx, CallActionReceiver.DECLINE)).build())
+                .addAction(Notification.Action.Builder(null, "Ответить", screen(ctx, answer = true)).build())
+        }
+        ctx.getSystemService(NotificationManager::class.java).notify(ID_INCOMING, b.build())
+        return true
     }
 
     fun cancelIncoming(ctx: Context) = ctx.getSystemService(NotificationManager::class.java).cancel(ID_INCOMING)

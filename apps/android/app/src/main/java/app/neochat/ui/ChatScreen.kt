@@ -478,7 +478,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val members = conv.optJSONArray("members") ?: JSONArray()
             val channel = conv.str("kind") == "channel"
             baseSubtitle = when (conv.str("kind")) {
-                "group" -> memberCount(conv.optInt("member_count"))
+                "group" -> memberCount(conv.optInt("member_count")) + conv.optInt("online_count").takeIf { it > 0 }?.let { ", $it в сети" }.orEmpty()
                 "channel" -> memberCount(conv.optInt("member_count"), true)
                 else -> conv.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }
                     ?: members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
@@ -491,6 +491,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val muteComposer = left || !conv.optBoolean("can_post", true)
             // Calls are one-to-one, through a direct chat the peer can receive in.
             val callable = conv.str("kind") == "direct" && !left && conv.optBoolean("can_post", true) && conv.str("peer_user_id").isNotEmpty()
+            if (callable) app.neochat.calls.CallManager.warmUp()
             audioCall.visibility = if (callable) View.VISIBLE else View.GONE
             videoCall.visibility = if (callable) View.VISIBLE else View.GONE
             composer.visibility = if (muteComposer) View.GONE else View.VISIBLE
@@ -526,11 +527,21 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         subtitle.role(if (typing != null || avatar.online) Theme.Role.ACCENT else Theme.Role.MUTED)
     }
 
-    private fun requestPresence() {
+    /** The other person of a direct chat, or the other members of a group ("N участников, X в сети"). */
+    private fun presenceIds(): JSONArray {
+        val ids = JSONArray()
         val peer = conv.str("peer_user_id")
-        if (peer.isEmpty() || !shown) return
+        if (peer.isNotEmpty()) ids.put(peer)
+        if (conv.str("kind") == "group")
+            for (m in (conv.optJSONArray("members") ?: JSONArray()).objects()) if (!m.optBoolean("me")) ids.put(m.str("user_id"))
+        return ids
+    }
+
+    private fun requestPresence() {
+        val ids = presenceIds()
+        if (ids.length() == 0 || !shown) return
         val tz = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000
-        CoreClient.call("presence", JSONObject().put("user_ids", JSONArray().put(peer)).put("tz_offset", tz)) { _, e ->
+        CoreClient.call("presence", JSONObject().put("user_ids", ids).put("tz_offset", tz)) { _, e ->
             if (e == null) refreshConversation(false)
         }
     }
@@ -1348,7 +1359,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         attach.setOnClickListener {
             edit.clearFocus()
             hideKeyboard()
-            val pm = PopupMenu(act, attach).add("Фото") { pickPhotos() }.add("Файл") { pickFile() }
+            val pm = PopupMenu(act, attach).add("Фото") { pickPhotos() }.add("Камера") { takePhoto() }.add("Файл") { pickFile() }
             if (conv.optBoolean("can_polls") && conv.str("kind") != "direct") pm.add("Опрос") { Dialogs.newPoll(act, conversationId) }
             pm.show(above = true)
         }
@@ -1530,14 +1541,33 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                     tmp.delete()
                     return@runOnUiThread act.toast("Не удалось прочитать файл")
                 }
-                val p = JSONObject().put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
-                if (thumb != null) p.put("thumb", thumb.first).put("width", thumb.second).put("height", thumb.third)
-                CoreClient.call("send_file", p) { _, e ->
-                    tmp.delete()
-                    if (e != null) act.toast(e.message)
-                }
+                dispatchFile(tmp, mime, name, thumb)
             }
         }.start()
+    }
+
+    /** Hands a prepared file to the core and removes it afterwards. */
+    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?) {
+        val p = JSONObject().put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
+        if (thumb != null) p.put("thumb", thumb.first).put("width", thumb.second).put("height", thumb.third)
+        CoreClient.call("send_file", p) { _, e ->
+            tmp.delete()
+            if (e != null) act.toast(e.message)
+        }
+    }
+
+    /** The in-app camera: zoom by pinching, one shutter button. */
+    private fun takePhoto() {
+        act.withPermission(android.Manifest.permission.CAMERA) { granted ->
+            if (!granted) return@withPermission act.toast("Для съёмки нужен доступ к камере")
+            PhotoCamera(act) { file ->
+                Thread {
+                    val thumb = Photos.makeThumb(file.absolutePath)
+                    val name = "photo_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + ".jpg"
+                    act.runOnUiThread { dispatchFile(file, "image/jpeg", name, thumb) }
+                }.start()
+            }.show()
+        }
     }
 
     private fun hideKeyboard() {
@@ -1611,7 +1641,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 refreshConversation(false)
             }
             "conversations_changed", "contacts_changed", "identity_changed" -> refreshConversation(false)
-            "presence" -> if (ev.str("user_id") == conv.str("peer_user_id")) refreshConversation(false)
+            "presence" -> {
+                val who = ev.str("user_id")
+                if (who == conv.str("peer_user_id") || (conv.optJSONArray("members") ?: JSONArray()).objects().any { it.str("user_id") == who }) refreshConversation(false)
+            }
             "connection" -> refreshConversation(false)
         }
     }
