@@ -4,6 +4,7 @@
 #include "popupmenu.h"
 #include "sheet.h"
 #include "theme.h"
+#include "transition.h"
 #include "widgets.h"
 
 #include <QButtonGroup>
@@ -251,7 +252,8 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
         ui::paintIcon(p, QRectF(right - 18, top + titleH + 4 + (prevH - 18) / 2, 18, 18), "pin", c.muted, 1.8);
         badgeW = 26;
     }
-    QString preview = archiveRow ? o.value("titles").toString() : o.value("last_preview").toString();
+    // Names of archived chats stay hidden; the row only counts them.
+    QString preview = archiveRow ? QStringLiteral("Чатов: %1").arg(o.value("count").toInt()) : o.value("last_preview").toString();
     QColor prevColor = selected ? c.text : c.muted;
     const QString draft = o.value("draft").toString().simplified();
     if (!draft.isEmpty() && !selected) {
@@ -431,6 +433,13 @@ ChatPanel::ChatPanel(QWidget *parent) : QWidget(parent)
     statusWrap->addWidget(m_status);
     lay->addLayout(statusWrap);
 
+    m_selectAnim.setStartValue(0.0);
+    connect(&m_selectAnim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+        const qreal t = v.toReal();
+        m_selectBar->setMaximumHeight(t >= 1.0 ? QWIDGETSIZE_MAX : int(t * m_selectBar->sizeHint().height()));
+        if (t <= 0.001 && m_selectAnim.endValue().toReal() == 0)
+            m_selectBar->hide();
+    });
     m_refresh.setStartValue(0.0);
     m_refresh.setEndValue(1.0);
     m_refresh.setEasingCurve(Theme::surfaceEasing());
@@ -525,7 +534,11 @@ void ChatPanel::updateSelection()
         if (!id.isEmpty()) m_checked.insert(id);
     }
     if (m_checked.size() > 1) m_selecting = true;
-    m_selectBar->setVisible(m_selecting);
+    if ((m_selectAnim.endValue().toReal() > 0.5) != m_selecting) {
+        if (m_selecting)
+            m_selectBar->show();
+        ui::animate(m_selectAnim, m_selecting ? 1 : 0, Theme::ms(180), Theme::surfaceEasing());
+    }
     m_selectCount->setText(QStringLiteral("Выбрано: %1").arg(m_checked.size()));
     if (!m_selecting) m_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
 }
@@ -556,12 +569,20 @@ void ChatPanel::setArchiveMode(bool on)
 {
     if (m_archive == on)
         return;
-    m_archive = on;
-    m_title->setText(on ? QStringLiteral("Архив") : QStringLiteral("Сообщения"));
-    m_title->setAccessibleName(m_title->text());
-    m_back->setVisible(on);
-    m_compose->setVisible(!on);
-    m_search->edit()->clear();
+    // The panel pushes to the archive and back like a phone screen; both pictures are built from what is cached.
+    ui::transition(this, rect(), on ? ui::Motion::Forward : ui::Motion::Back, [this, on] {
+        if (on)
+            m_mainRows = m_all;
+        m_archive = on;
+        m_title->setText(on ? QStringLiteral("Архив") : QStringLiteral("Сообщения"));
+        m_title->setAccessibleName(m_title->text());
+        m_back->setVisible(on);
+        m_compose->setVisible(!on);
+        m_search->edit()->clear();
+        apply(on ? m_archived : m_mainRows, false);
+        m_view->doItemsLayout();
+        m_view->verticalScrollBar()->setValue(0);
+    });
     reload();
 }
 
@@ -594,6 +615,8 @@ void ChatPanel::reload()
         if (archive || !query.isEmpty()) {
             if (!archive)
                 m_archived.clear();
+            else if (query.isEmpty())
+                m_archived = rows;
             apply(rows, queryChanged);
             return;
         }
@@ -625,13 +648,9 @@ void ChatPanel::apply(const QList<QJsonObject> &all, bool animate)
     }
     if (!m_archive && filter == 0 && !m_archived.isEmpty() && m_search->edit()->text().isEmpty()) {
         int unread = 0;
-        QStringList titles;
-        for (const auto &c : m_archived) {
+        for (const auto &c : m_archived)
             unread += c.value("unread").toInt();
-            if (titles.size() < 4)
-                titles << c.value("title").toString();
-        }
-        rows.prepend(QJsonObject{{"_archive", true}, {"id", "_archive"}, {"count", int(m_archived.size())}, {"unread", unread}, {"titles", titles.join(", ")}});
+        rows.prepend(QJsonObject{{"_archive", true}, {"id", "_archive"}, {"count", int(m_archived.size())}, {"unread", unread}});
     }
     const auto checked = m_checked;
     QSignalBlocker selectionBlock(m_view->selectionModel());

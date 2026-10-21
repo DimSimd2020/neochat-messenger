@@ -4,6 +4,7 @@
 #include <QMainWindow>
 #include <QQueue>
 #include <QVariantAnimation>
+#include <functional>
 
 class QStackedWidget;
 class QSystemTrayIcon;
@@ -13,9 +14,14 @@ class MessageView;
 class Composer;
 class Onboarding;
 class Rail;
+class SlideBox;
 class ConversationHeader;
 class NoticeBar;
+namespace dialogs {
+class Page;
+}
 namespace ui {
+enum class Motion;
 class Toast;
 class SearchField;
 class IconButton;
@@ -43,6 +49,10 @@ private:
     void applyConversation(const QJsonObject &c);
     void updateNotice();
     void setSidebarHidden(bool hidden, bool animated = true);
+    void setTab(int tab);
+    void selectTab(int tab);
+    void showList(bool list);
+    void animateConversation(ui::Motion motion, const std::function<void()> &change);
     void updateLayoutMode();
     void sendText(const QString &text, const QString &replyTo);
     void editText(const QString &id, const QString &text);
@@ -59,10 +69,15 @@ private:
     QStackedWidget *m_stack;
     Onboarding *m_onboarding;
     QWidget *m_main;
-    QWidget *m_side;
+    SlideBox *m_side;
     Rail *m_rail;
     ChatPanel *m_panel;
     QWidget *m_conversationArea;
+    QWidget *m_pagesArea;
+    QStackedWidget *m_pages;
+    dialogs::Page *m_contacts = nullptr;
+    dialogs::Page *m_calls = nullptr;
+    int m_tab = 0; // rail section: 0 chats, 1 calls, 2 contacts
     QWidget *m_conversation;
     QWidget *m_placeholder;
     ConversationHeader *m_header;

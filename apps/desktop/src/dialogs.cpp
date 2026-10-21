@@ -25,6 +25,7 @@
 #include <QTemporaryFile>
 #include <QThreadPool>
 #include <QLinearGradient>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QPainter>
@@ -189,43 +190,85 @@ private:
     QString m_name, m_sub, m_seed;
 };
 
-// Scrollable column of rows that grows up to a height limit.
+// Scrollable rows. In a dialog it is one column that grows up to a height limit; a page fills its space
+// and spreads the rows over several columns while they stay at least `colWidth` wide.
 class RowList : public QScrollArea {
 public:
-    explicit RowList(int maxHeight = 360)
+    explicit RowList(int maxHeight = 360, int maxColumns = 1, int colWidth = 380) : m_max(maxHeight), m_maxCols(maxColumns), m_colWidth(colWidth)
     {
         setWidgetResizable(true);
         setFrameShape(QFrame::NoFrame);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         auto *w = new QWidget;
         w->setAutoFillBackground(false);
-        m_lay = new QVBoxLayout(w);
+        m_lay = new QGridLayout(w);
         m_lay->setContentsMargins(0, 0, 0, 0);
-        m_lay->setSpacing(2);
-        m_lay->addStretch();
+        m_lay->setVerticalSpacing(2);
+        m_lay->setHorizontalSpacing(10);
         setWidget(w);
+        // setWidget turns the fill back on; a page lets its backdrop show through the rows.
+        w->setAutoFillBackground(false);
         viewport()->setAutoFillBackground(false);
-        setMaximumHeight(maxHeight);
-        m_max = maxHeight;
+        if (maxHeight > 0)
+            setMaximumHeight(maxHeight);
     }
     void clear()
     {
-        while (m_lay->count() > 1) {
-            QLayoutItem *it = m_lay->takeAt(0);
-            delete it->widget();
+        for (auto *it : m_items)
             delete it;
-        }
+        m_items.clear();
+        place();
     }
-    void add(QWidget *w) { m_lay->insertWidget(m_lay->count() - 1, w); }
+    void add(QWidget *w)
+    {
+        m_items << w;
+        const int i = int(m_items.size()) - 1;
+        m_lay->addWidget(w, i / m_cols, i % m_cols);
+        stretchBelow();
+    }
     void fit()
     {
+        if (m_max <= 0)
+            return;
         widget()->adjustSize();
         setFixedHeight(qMin(m_max, qMax(60, widget()->sizeHint().height())));
     }
 
+protected:
+    void resizeEvent(QResizeEvent *e) override
+    {
+        QScrollArea::resizeEvent(e);
+        const int cols = qBound(1, viewport()->width() / m_colWidth, m_maxCols);
+        if (cols != m_cols) {
+            m_cols = cols;
+            place();
+        }
+    }
+
 private:
-    QVBoxLayout *m_lay;
-    int m_max;
+    void place()
+    {
+        for (auto *w : m_items)
+            m_lay->removeWidget(w);
+        for (int i = 0; i < m_items.size(); ++i)
+            m_lay->addWidget(m_items[i], i / m_cols, i % m_cols);
+        for (int c = 0; c < m_maxCols; ++c)
+            m_lay->setColumnStretch(c, c < m_cols ? 1 : 0);
+        stretchBelow();
+    }
+    // The free space goes under the last row, so rows keep their height.
+    void stretchBelow()
+    {
+        m_lay->setRowStretch(m_stretchRow, 0);
+        m_stretchRow = (int(m_items.size()) + m_cols - 1) / m_cols;
+        m_lay->setRowStretch(m_stretchRow, 1);
+    }
+
+    QGridLayout *m_lay;
+    QList<QWidget *> m_items;
+    int m_max, m_maxCols, m_colWidth;
+    int m_cols = 1;
+    int m_stretchRow = 0;
 };
 
 // Profile QR in the Telegram style: round dots and rounded eyes on a white plate
@@ -359,32 +402,38 @@ namespace dialogs {
 
 // ---- contacts ----
 
-void contacts(const DialogHost &h)
+Page *contactsPage(const DialogHost &h)
 {
-    auto *sheet = new Sheet(h.host, QStringLiteral("Контакты"));
-    auto *search = new ui::SearchField(QStringLiteral("Поиск контактов"));
-    sheet->body()->addWidget(search);
-    auto *actions = new QHBoxLayout;
+    auto *page = new Page;
+    auto *root = new QVBoxLayout(page);
+    root->setContentsMargins(36, 30, 36, 20);
+    root->setSpacing(14);
+    auto *head = new QHBoxLayout;
+    head->addWidget(new ui::Label(QStringLiteral("Контакты"), 26, QFont::Bold), 1);
     auto *add = new ui::Button(QStringLiteral("Новый контакт"), ui::Button::Secondary);
-    actions->addWidget(add);
-    actions->addStretch();
+    head->addWidget(add);
+    root->addLayout(head);
+    auto *tools = new QHBoxLayout;
+    auto *search = new ui::SearchField(QStringLiteral("Поиск контактов"));
+    search->setMaximumWidth(460);
+    tools->addWidget(search, 100);
+    tools->addStretch(1);
     auto *sortBtn = new ui::Button(QStringLiteral("Имя А–Я"), ui::Button::Flat);
     sortBtn->setAccessibleName(QStringLiteral("Сортировать по"));
-    actions->addWidget(new ui::Label(QStringLiteral("Сортировать по"), 13, 400, ui::Label::Muted));
-    actions->addWidget(sortBtn);
-    sheet->body()->addLayout(actions);
-    auto *list = new RowList(380);
+    tools->addWidget(new ui::Label(QStringLiteral("Сортировать по"), 13, 400, ui::Label::Muted));
+    tools->addWidget(sortBtn);
+    root->addLayout(tools);
+    auto *list = new RowList(0, 3, 400);
     auto *empty = mutedText({});
-    sheet->body()->addWidget(list);
-    sheet->body()->addWidget(empty);
+    root->addWidget(list, 1);
+    root->addWidget(empty, 1, Qt::AlignTop);
 
     auto sort = std::make_shared<QString>(QSettings().value("contacts/sort", "name-asc").toString());
-    QPointer<Sheet> guard(sheet);
     auto reload = std::make_shared<std::function<void()>>();
     *reload = [=] {
         static const QHash<QString, QString> names{{"name-asc", QStringLiteral("Имя А–Я")}, {"name-desc", QStringLiteral("Имя Я–А")}, {"recent", QStringLiteral("Дата добавления")}};
         sortBtn->setText(names.value(*sort));
-        Core::instance()->call("list_contacts", {{"query", search->edit()->text()}, {"sort", *sort}}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+        Core::instance()->call("list_contacts", {{"query", search->edit()->text()}, {"sort", *sort}}, page, [=](const QJsonValue &v, const CoreError &e) {
             if (!e.ok())
                 return fail(h, e);
             list->clear();
@@ -396,11 +445,10 @@ void contacts(const DialogHost &h)
                 if (c.value("key_changed").toBool())
                     row->warning = QStringLiteral("Ключ изменился — сверьте код");
                 const QString uid = c.value("user_id").toString();
-                QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
-                    Core::instance()->call("open_direct", {{"user_id", uid}}, sheet, [=](const QJsonValue &cv, const CoreError &ce) {
+                QObject::connect(row, &QAbstractButton::clicked, page, [=] {
+                    Core::instance()->call("open_direct", {{"user_id", uid}}, page, [=](const QJsonValue &cv, const CoreError &ce) {
                         if (!ce.ok())
                             return fail(h, ce);
-                        sheet->close();
                         h.openChat(cv.toObject().value("id").toString());
                     });
                 });
@@ -414,12 +462,12 @@ void contacts(const DialogHost &h)
             list->setVisible(!arr.isEmpty());
         });
     };
-    QObject::connect(search->edit(), &QLineEdit::textChanged, sheet, [=] { (*reload)(); });
-    QObject::connect(sortBtn, &QAbstractButton::clicked, sheet, [=] {
+    QObject::connect(search->edit(), &QLineEdit::textChanged, page, [=] { (*reload)(); });
+    QObject::connect(sortBtn, &QAbstractButton::clicked, page, [=] {
         auto *menu = new PopupMenu(sortBtn);
         const QList<QPair<QString, QString>> modes{{"name-asc", QStringLiteral("Имя А–Я")}, {"name-desc", QStringLiteral("Имя Я–А")}, {"recent", QStringLiteral("Дата добавления")}};
         for (const auto &m : modes) {
-            menu->addChoice(m.second, *sort == m.first, sheet, [=] {
+            menu->addChoice(m.second, *sort == m.first, page, [=] {
                 *sort = m.first;
                 QSettings().setValue("contacts/sort", m.first);
                 (*reload)();
@@ -427,13 +475,14 @@ void contacts(const DialogHost &h)
         }
         menu->popup(sortBtn->mapToGlobal(QPoint(0, sortBtn->height())));
     });
-    QObject::connect(add, &QAbstractButton::clicked, sheet, [=] { newContact(h, [=] { (*reload)(); }); });
-    QObject::connect(Core::instance(), &Core::event, sheet, [=](const QJsonObject &ev) {
+    QObject::connect(add, &QAbstractButton::clicked, page, [=] { newContact(h, [=] { (*reload)(); }); });
+    QObject::connect(Core::instance(), &Core::event, page, [=](const QJsonObject &ev) {
         if (ev.value("type").toString() == "contacts_changed")
             (*reload)();
     });
+    page->reload = [=] { (*reload)(); };
     (*reload)();
-    sheet->open();
+    return page;
 }
 
 void newContact(const DialogHost &h, std::function<void()> added)
@@ -633,6 +682,7 @@ void newChat(const DialogHost &h)
 void devices(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Устройства"));
+    sheet->setBack([h] { dialogs::settings(h); });
     auto *list = new RowList(300);
     sheet->body()->addWidget(list);
     sheet->body()->addWidget(mutedText(QStringLiteral("Отзыв устройства прекращает доставку новых сообщений на него. "
@@ -689,17 +739,21 @@ void devices(const DialogHost &h)
 
 // ---- calls ----
 
-void recentCalls(const DialogHost &h)
+Page *callsPage(const DialogHost &h)
 {
-    auto *sheet = new Sheet(h.host, QStringLiteral("Звонки"));
-    auto *list = new RowList(420);
+    auto *page = new Page;
+    auto *root = new QVBoxLayout(page);
+    root->setContentsMargins(36, 30, 36, 20);
+    root->setSpacing(14);
+    root->addWidget(new ui::Label(QStringLiteral("Звонки"), 26, QFont::Bold));
+    auto *list = new RowList(0, 3, 400);
     auto *empty = mutedText(QStringLiteral("Звонков пока нет. Позвонить можно из личного чата: кнопки звонка в шапке переписки."));
-    sheet->body()->addWidget(list);
-    sheet->body()->addWidget(empty);
-    sheet->body()->addWidget(mutedText(QStringLiteral("Звонки идут напрямую между устройствами и шифруются. Журнал хранится только на этом компьютере.")));
+    root->addWidget(list, 1);
+    root->addWidget(empty, 1, Qt::AlignTop);
+    root->addWidget(mutedText(QStringLiteral("Звонки идут напрямую между устройствами и шифруются. Журнал хранится только на этом компьютере.")));
     auto reload = std::make_shared<std::function<void()>>();
     *reload = [=] {
-        Core::instance()->call("list_calls", {{"limit", 100}}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+        Core::instance()->call("list_calls", {{"limit", 100}}, page, [=](const QJsonValue &v, const CoreError &e) {
             if (!e.ok())
                 return fail(h, e);
             list->clear();
@@ -714,22 +768,18 @@ void recentCalls(const DialogHost &h)
                 if (c.value("missed").toBool())
                     row->warning = sub;
                 const QString cid = c.value("conversation_id").toString();
-                QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
+                QObject::connect(row, &QAbstractButton::clicked, page, [=] {
                     auto *menu = new PopupMenu(row);
                     auto call = [=](bool video) {
-                        Core::instance()->call("get_conversation", {{"conversation_id", cid}}, sheet, [=](const QJsonValue &cv, const CoreError &ce) {
+                        Core::instance()->call("get_conversation", {{"conversation_id", cid}}, page, [=](const QJsonValue &cv, const CoreError &ce) {
                             if (!ce.ok())
                                 return fail(h, ce);
-                            sheet->close();
                             CallController::instance()->start(cv.toObject(), video);
                         });
                     };
-                    menu->addAction(QStringLiteral("Позвонить"), sheet, [=] { call(false); });
-                    menu->addAction(QStringLiteral("Видеозвонок"), sheet, [=] { call(true); });
-                    menu->addAction(QStringLiteral("Открыть чат"), sheet, [=] {
-                        sheet->close();
-                        h.openChat(cid);
-                    });
+                    menu->addAction(QStringLiteral("Позвонить"), page, [=] { call(false); });
+                    menu->addAction(QStringLiteral("Видеозвонок"), page, [=] { call(true); });
+                    menu->addAction(QStringLiteral("Открыть чат"), page, [=] { h.openChat(cid); });
                     menu->popup(row->mapToGlobal(QPoint(60, row->height())));
                 });
                 list->add(row);
@@ -739,12 +789,13 @@ void recentCalls(const DialogHost &h)
             list->setVisible(!arr.isEmpty());
         });
     };
-    QObject::connect(Core::instance(), &Core::event, sheet, [=](const QJsonObject &ev) {
+    QObject::connect(Core::instance(), &Core::event, page, [=](const QJsonObject &ev) {
         if (ev.value("type").toString() == "conversations_changed")
             (*reload)();
     });
+    page->reload = [=] { (*reload)(); };
     (*reload)();
-    sheet->open();
+    return page;
 }
 
 // Devices for the next call. Ids are kept even while the device is unplugged;
@@ -907,6 +958,12 @@ void settings(const DialogHost &h)
     groups->addWidget(privacy);
     groups->addWidget(calls);
     sheet->body()->addLayout(groups);
+    auto *devicesBtn = new ui::Button(QStringLiteral("Устройства"), ui::Button::Secondary);
+    QObject::connect(devicesBtn, &QAbstractButton::clicked, sheet, [=] {
+        sheet->close();
+        devices(h);
+    });
+    sheet->body()->addWidget(devicesBtn);
 
     sheet->body()->addSpacing(4);
     auto *enter = new ui::Toggle(QStringLiteral("Enter отправляет сообщение"));

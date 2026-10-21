@@ -153,7 +153,8 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private var allChats: List<JSONObject> = emptyList()
     private var archiveRow: JSONObject? = null
     private var archiveShown = false
-    private val archiveEntry = ListRow(ctx, 32)
+    private val archiveEntry = ListRow(ctx)
+    private val archiveHeight = dp(72)
     private val archiveWrap = FrameLayout(ctx)
     private var archiveAnim: ValueAnimator? = null
     private var chatGen = 0
@@ -278,8 +279,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
         }
         chatsPage.addView(selection.bar, lp())
         archiveWrap.clipChildren = true
-        archiveWrap.addView(archiveEntry, FrameLayout.LayoutParams(MATCH, dp(56)))
-        archiveEntry.subtitle.visibility = View.GONE
+        archiveWrap.addView(archiveEntry, FrameLayout.LayoutParams(MATCH, archiveHeight))
         archiveWrap.visibility = View.GONE
         chatsPage.addView(archiveWrap, lp(MATCH, 0).apply { setMargins(dp(8), 0, dp(8), 0) })
         chatList.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
@@ -296,6 +296,12 @@ class HomeScreen(private val act: MainActivity) : Screen {
                     return true
                 }
                 return false
+            }
+        })
+        // The archive entry belongs to the very top of the list: scrolling down puts it away.
+        chatList.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                if (dy > 0 && archiveShown && rv.canScrollVertically(-1)) showArchiveEntry(false)
             }
         })
         androidx.recyclerview.widget.ItemTouchHelper(ChatSwipe(act, false, { chatAdapter.rows.getOrNull(it) }, { selection.active }) { reloadChats(false) }).attachToRecyclerView(chatList)
@@ -362,12 +368,12 @@ class HomeScreen(private val act: MainActivity) : Screen {
         archiveAnim?.cancel()
         if (visible) archiveWrap.visibility = View.VISIBLE
         val from = archiveWrap.layoutParams.height
-        archiveAnim = ValueAnimator.ofInt(from, if (visible) dp(56) else 0).apply {
+        archiveAnim = ValueAnimator.ofInt(from, if (visible) archiveHeight else 0).apply {
             duration = if (Theme.reducedMotion) 0 else 220
             interpolator = Theme.surfaceCurve
             addUpdateListener {
                 archiveWrap.layoutParams = archiveWrap.layoutParams.apply { height = it.animatedValue as Int }
-                archiveEntry.alpha = (it.animatedValue as Int).toFloat() / dp(56)
+                archiveEntry.alpha = (it.animatedValue as Int).toFloat() / archiveHeight
                 if (!archiveShown && it.animatedValue as Int == 0) archiveWrap.visibility = View.GONE
             }
             start()

@@ -338,6 +338,12 @@ void UiTest::addContactAndOpenChat()
 
     button("Контакты")->click();
     QTRY_VERIFY(button("Новый контакт"));
+    // Contacts is a page of the window: no dialog, the chat list gives way, and the page is wide.
+    QVERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
+    QVERIFY(!find<ChatPanel>([](ChatPanel *) { return true; }));
+    auto *contactsPage = find<dialogs::Page>([](dialogs::Page *) { return true; });
+    QVERIFY(contactsPage);
+    QVERIFY2(contactsPage->width() > m_window->width() / 2, qPrintable(QString::number(contactsPage->width())));
     shot("04-contacts-empty");
     button("Новый контакт")->click();
     QTRY_VERIFY(field("Имя (необязательно)"));
@@ -351,6 +357,7 @@ void UiTest::addContactAndOpenChat()
     shot("06-contacts");
     find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().startsWith("Алиса Смирнова"); })->click();
     QTRY_VERIFY(find<MessageView>([](MessageView *) { return true; }));
+    QTRY_VERIFY(find<ChatPanel>([](ChatPanel *) { return true; })); // opening a chat from the page returns to chats
     auto *view = find<MessageView>([](MessageView *) { return true; });
     QTRY_VERIFY_WITH_TIMEOUT(messageCount(view) >= 1, 20000);
     QCOMPARE(view->conversation(), m_conv);
@@ -775,10 +782,16 @@ void UiTest::socialFeatures()
     QTRY_VERIFY(list->model()->index(1, 0).data(ChatListModel::ObjectRole).toJsonObject().value("pinned").toBool());
     shot("11f-archive-row-pinned");
     panel->setArchiveMode(true);
+    // Mid-way the picture of the old list still covers part of the panel (the overlay of ui::transition).
+    QTest::qWait(120);
+    QVERIFY(Theme::reducedMotion() || panel->findChild<QWidget *>(QStringLiteral("ui-transition")));
+    m_window->grab().save(m_shots + "/11f2-archive-sliding.png");
     QTRY_VERIFY_WITH_TIMEOUT(list->model()->rowCount() == 1 && list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("id").toString() == gid, 10000);
     shot("11g-archive");
     Core::instance()->call("set_archived", {{"conversation_id", gid}, {"archived", false}});
     panel->setArchiveMode(false);
+    QTest::qWait(120);
+    m_window->grab().save(m_shots + "/11g2-archive-leaving.png");
     QTRY_VERIFY_WITH_TIMEOUT(!panel->conversation(gid).value("in_archive").toBool() && !list->model()->index(0, 0).data(ChatListModel::ObjectRole).toJsonObject().value("_archive").toBool(), 10000);
 }
 
@@ -798,6 +811,14 @@ void UiTest::dialogsAndPickers()
     // The sidebar has a button with the same accessible name; the settings one has the text.
     find<QAbstractButton>([](QAbstractButton *b) { return b->text() == "Звонки"; })->click();
     QTRY_VERIFY(button("Назад"));
+    button("Назад")->click();
+    QTRY_VERIFY(button("Графика"));
+    // Devices live in settings now, not on the rail.
+    QTRY_VERIFY(!button("Назад")); // wait for the calls settings sheet to finish closing
+    QVERIFY(!find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName() == "Устройства" && b->text().isEmpty(); }));
+    find<QAbstractButton>([](QAbstractButton *b) { return b->text() == "Устройства"; })->click();
+    QTRY_VERIFY(button("Назад"));
+    shot("20c-devices-in-settings");
     button("Назад")->click();
     QTRY_VERIFY(button("Графика"));
     // The old settings sheet is still fading out for a moment: wait until only one is left.
@@ -942,9 +963,10 @@ void UiTest::calls()
 
     button("Звонки")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().contains(QStringLiteral("Отклонённый звонок")); }), 5000);
+    QVERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
     shot("46-recent-calls");
-    Sheet::closeAll(sheetHost()); // offscreen has no keyboard focus for Escape to arrive at
-    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
+    button("Чаты")->click();
+    QTRY_VERIFY(find<ChatPanel>([](ChatPanel *) { return true; }));
     button("Настройки")->click();
     QTRY_VERIFY(find<ui::Button>([](ui::Button *b) { return b->text() == QStringLiteral("Звонки"); }));
     find<ui::Button>([](ui::Button *b) { return b->text() == QStringLiteral("Звонки"); })->click();

@@ -109,6 +109,8 @@ private:
     ui::IconButton *m_compose;
     ui::IconButton *m_sort;
     QList<QJsonObject> m_archived;
+    QList<QJsonObject> m_mainRows; // the main list while the archive is open
+    QVariantAnimation m_selectAnim;
     bool m_archive = false;
     QVariantAnimation m_refresh;
     QList<QJsonObject> m_all;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NeoChat VERSION 0.6.5.1 LANGUAGES CXX)
+project(NeoChat VERSION 0.6.5.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,7 @@ add_library(neochat_ui STATIC
     src/theme.cpp src/theme.h
     src/widgets.cpp src/widgets.h
     src/sheet.cpp src/sheet.h
+    src/transition.cpp src/transition.h
     src/popupmenu.cpp src/popupmenu.h
     src/filepicker.cpp src/filepicker.h
     src/chrome.cpp src/chrome.h

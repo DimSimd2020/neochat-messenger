@@ -3,9 +3,8 @@
 #include <QJsonArray>
 #include <QString>
 #include <QStringList>
+#include <QWidget>
 #include <functional>
-
-class QWidget;
 
 // What the dialogs need from the main window.
 struct DialogHost {
@@ -18,11 +17,18 @@ struct DialogHost {
 };
 
 namespace dialogs {
-void contacts(const DialogHost &h);
+// A section of the main window that fills the space next to the rail; `reload` refreshes its data.
+class Page : public QWidget {
+    Q_OBJECT
+public:
+    using QWidget::QWidget;
+    std::function<void()> reload;
+};
+Page *contactsPage(const DialogHost &h);
+Page *callsPage(const DialogHost &h);
 void newContact(const DialogHost &h, std::function<void()> added = {});
 void newChat(const DialogHost &h);
 void devices(const DialogHost &h);
-void recentCalls(const DialogHost &h);
 void settings(const DialogHost &h);
 void whatsNew(const DialogHost &h);
 void profile(const DialogHost &h);

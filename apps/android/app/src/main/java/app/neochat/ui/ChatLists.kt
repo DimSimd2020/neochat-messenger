@@ -115,7 +115,8 @@ fun bindArchiveRow(act: MainActivity, row: ListRow, a: JSONObject) {
     row.title.text = "Архив"
     row.time.text = ""
     row.pin.visibility = View.GONE
-    row.subtitle.text = a.str("titles")
+    // Names of archived chats stay out of sight; only the count shows.
+    row.subtitle.text = "Чатов: ${a.optInt("count")}"
     row.subtitle.role(Theme.Role.MUTED)
     row.setBadge(a.optInt("unread"))
     row.setChecked(null)
@@ -132,7 +133,6 @@ fun archiveSummary(archived: List<JSONObject>): JSONObject? {
     if (archived.isEmpty()) return null
     return JSONObject().put("_archive", true).put("count", archived.size)
         .put("unread", archived.sumOf { it.optInt("unread") })
-        .put("titles", archived.take(4).joinToString(", ") { it.str("title") })
 }
 
 val CHAT_SORTS = listOf("activity" to "По активности", "unread" to "Сначала непрочитанные", "name" to "По названию")

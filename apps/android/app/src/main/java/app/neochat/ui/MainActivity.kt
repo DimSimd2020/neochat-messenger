@@ -56,6 +56,7 @@ class MainActivity : Activity(), Sheet.Host {
     private val listener: (JSONObject) -> Unit = { onEvent(it) }
     private var updateBanner: View? = null
     private var lastUpdateCheck = 0L
+    private var slideAnim: android.animation.ValueAnimator? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -196,7 +197,7 @@ class MainActivity : Activity(), Sheet.Host {
         if (home == null || archive != null) return
         val a = ArchiveScreen(this)
         archive = a
-        show(a, dp(22).toFloat())
+        show(a, dp(22).toFloat(), slide = true)
     }
 
     fun closeArchive() {
@@ -204,14 +205,15 @@ class MainActivity : Activity(), Sheet.Host {
         if (archive == null) return
         archive = null
         h.hideArchiveEntry()
-        show(h, -dp(22).toFloat())
+        show(h, -dp(22).toFloat(), slide = true)
     }
 
     /**
      * Cross-fade to [next] with a horizontal shift over 220 ms. Home stays alive under an
      * open conversation so the selected tab, drafts and searches survive.
      */
-    private fun show(next: Screen, shift: Float) {
+    private fun show(next: Screen, shift: Float, slide: Boolean = false) {
+        slideAnim?.end()
         val prev = current
         current = next
         prev?.onHidden()
@@ -233,6 +235,7 @@ class MainActivity : Activity(), Sheet.Host {
             drop()
             return
         }
+        if (slide) return slideBetween(pv, v, shift > 0f, drop)
         v.alpha = 0f
         v.translationX = shift
         v.animate().alpha(1f).translationX(0f).setDuration(220).setInterpolator(Theme.surfaceCurve).setListener(null).start()
@@ -245,6 +248,49 @@ class MainActivity : Activity(), Sheet.Host {
                     if (current !== prev) drop()
                 }
             }).start()
+    }
+
+    /**
+     * Telegram-style push: the upper screen travels the full width on a plate of the app background,
+     * the one beneath drifts a third of the way the other direction. [forward] opens, otherwise closes.
+     */
+    private fun slideBetween(pv: View, v: View, forward: Boolean, drop: () -> Unit) {
+        val w = content.width.toFloat().takeIf { it > 0f } ?: resources.displayMetrics.widthPixels.toFloat()
+        val plate = BackgroundView(this)
+        content.addView(plate, FrameLayout.LayoutParams(MATCH, MATCH))
+        val over = if (forward) v else pv
+        val under = if (forward) pv else v
+        under.bringToFront()
+        plate.bringToFront()
+        over.bringToFront()
+        // p is how far the upper screen has come in: 0 off to the right, 1 at rest.
+        val place = { p: Float ->
+            over.translationX = (1f - p) * w
+            plate.translationX = over.translationX
+            under.translationX = -p * 0.3f * w
+            under.alpha = 1f - 0.35f * p
+        }
+        place(if (forward) 0f else 1f)
+        val anim = android.animation.ValueAnimator.ofFloat(0f, 1f)
+        anim.duration = 360
+        anim.interpolator = Theme.surfaceCurve
+        anim.addUpdateListener {
+            val t = it.animatedValue as Float
+            place(if (forward) t else 1f - t)
+        }
+        anim.addListener(object : AnimatorListenerAdapter() {
+            override fun onAnimationEnd(a: Animator) {
+                if (slideAnim === anim) slideAnim = null
+                content.removeView(plate)
+                over.translationX = 0f
+                under.translationX = 0f
+                over.alpha = 1f
+                under.alpha = 1f
+                if (current?.view !== pv) drop()
+            }
+        })
+        slideAnim = anim
+        anim.start()
     }
 
     private fun onEvent(ev: JSONObject) {

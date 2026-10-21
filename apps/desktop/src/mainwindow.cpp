@@ -11,6 +11,7 @@
 #include "popupmenu.h"
 #include "sheet.h"
 #include "theme.h"
+#include "transition.h"
 #include "widgets.h"
 
 #include <QApplication>
@@ -111,7 +112,7 @@ QString memberNames(const QJsonArray &members)
 
 } // namespace
 
-// Narrow navigation strip: chats, contacts, devices; settings and profile at the bottom.
+// Narrow navigation strip: chats, calls, contacts; settings and profile at the bottom.
 class Rail : public QWidget {
 public:
     explicit Rail(QWidget *parent) : QWidget(parent)
@@ -123,23 +124,49 @@ public:
         chats = new ui::IconButton("chat", QStringLiteral("Чаты"), this, 48);
         calls = new ui::IconButton("phone", QStringLiteral("Звонки"), this, 48);
         people = new ui::IconButton("people", QStringLiteral("Контакты"), this, 48);
-        devices = new ui::IconButton("devices", QStringLiteral("Устройства"), this, 48);
         settings = new ui::IconButton("settings", QStringLiteral("Настройки"), this, 48);
         profile = new ui::IconButton("profile", QStringLiteral("Профиль"), this, 48);
-        for (auto *b : {chats, calls, people, devices, settings, profile})
+        for (auto *b : {chats, calls, people, settings, profile})
             b->setRail(true);
-        chats->setCheckable(true);
+        for (auto *b : {chats, calls, people})
+            b->setCheckable(true);
         chats->setChecked(true);
         lay->addWidget(chats);
         lay->addWidget(calls);
         lay->addWidget(people);
-        lay->addWidget(devices);
         lay->addStretch();
         lay->addWidget(settings);
         lay->addWidget(profile);
         connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
+        connect(&m_mark, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+            m_t = v.toReal();
+            update();
+        });
     }
-    ui::IconButton *chats, *calls, *people, *devices, *settings, *profile;
+    ui::IconButton *chats, *calls, *people, *settings, *profile;
+
+    // Section 0 is chats, 1 calls, 2 contacts; the accent mark glides to its button.
+    void setTab(int tab)
+    {
+        ui::IconButton *const buttons[] = {chats, calls, people};
+        for (int i = 0; i < 3; ++i)
+            buttons[i]->setChecked(i == tab);
+        if (tab == m_to)
+            return;
+        m_fromY = markY();
+        m_to = tab;
+        m_mark.stop();
+        m_t = 1;
+        if (isVisible() && Theme::ms(1) > 0) {
+            m_t = 0;
+            m_mark.setStartValue(0.0);
+            m_mark.setEndValue(1.0);
+            m_mark.setDuration(240);
+            m_mark.setEasingCurve(Theme::surfaceEasing());
+            m_mark.start();
+        }
+        update();
+    }
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -149,11 +176,48 @@ protected:
         QColor glass = Theme::p().rail;
         glass.setAlphaF(0.72);
         Theme::paintBackdrop(p, this, glass);
-        const QRect r = chats->geometry();
         p.setPen(Qt::NoPen);
         p.setBrush(Theme::p().accent);
-        p.drawRoundedRect(QRectF(0, r.center().y() - 10, 3, 20), 1.5, 1.5);
+        p.drawRoundedRect(QRectF(0, markY() - 10, 3, 20), 1.5, 1.5);
     }
+
+private:
+    qreal center(int tab) const { return (tab == 0 ? chats : tab == 1 ? calls : people)->geometry().center().y(); }
+    qreal markY() const
+    {
+        const qreal to = center(m_to);
+        return m_t >= 1 ? to : m_fromY + (to - m_fromY) * m_t;
+    }
+
+    QVariantAnimation m_mark;
+    qreal m_t = 1;
+    qreal m_fromY = 0;
+    int m_to = 0;
+};
+
+// Holds the side column flush with its right edge: as the box narrows the column slides out to the left
+// instead of being squeezed.
+class SlideBox : public QWidget {
+public:
+    explicit SlideBox(QWidget *inner) : m_inner(inner) { inner->setParent(this); }
+    // Width of the column inside; 0 makes it as wide as the box.
+    void setInnerWidth(int w)
+    {
+        m_width = w;
+        place();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *) override { place(); }
+
+private:
+    void place()
+    {
+        const int w = m_width > 0 ? m_width : width();
+        m_inner->setGeometry(width() - w, 0, w, height());
+    }
+    QWidget *m_inner;
+    int m_width = 0;
 };
 
 class HeaderTitle : public QAbstractButton {
@@ -351,14 +415,15 @@ MainWindow::MainWindow()
     auto *row = new QHBoxLayout(m_main);
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(0);
-    m_side = new QWidget;
-    auto *sideLay = new QHBoxLayout(m_side);
+    auto *sideInner = new QWidget;
+    auto *sideLay = new QHBoxLayout(sideInner);
     sideLay->setContentsMargins(0, 0, 0, 0);
     sideLay->setSpacing(0);
-    m_rail = new Rail(m_side);
-    m_panel = new ChatPanel(m_side);
+    m_rail = new Rail(sideInner);
+    m_panel = new ChatPanel(sideInner);
     sideLay->addWidget(m_rail);
     sideLay->addWidget(m_panel, 1);
+    m_side = new SlideBox(sideInner);
     row->addWidget(m_side);
 
     m_conversationArea = new Surface;
@@ -395,6 +460,14 @@ MainWindow::MainWindow()
     conv->addWidget(m_composer);
     areaLay->addWidget(m_conversation);
     row->addWidget(m_conversationArea, 1);
+    // Contacts and calls take the whole window next to the rail.
+    m_pagesArea = new Surface;
+    auto *pagesLay = new QVBoxLayout(m_pagesArea);
+    pagesLay->setContentsMargins(0, 0, 0, 0);
+    m_pages = new QStackedWidget;
+    pagesLay->addWidget(m_pages);
+    m_pagesArea->hide();
+    row->addWidget(m_pagesArea, 1);
     m_stack->addWidget(m_main);
 
     m_toast = new ui::Toast(m_stack);
@@ -425,27 +498,23 @@ MainWindow::MainWindow()
     connect(Core::instance(), &Core::event, this, &MainWindow::onEvent);
     connect(m_panel, &ChatPanel::activated, this, &MainWindow::openConversation);
     connect(m_panel, &ChatPanel::newChat, this, [this] { dialogs::newChat(host()); });
-    connect(m_rail->people, &QAbstractButton::clicked, this, [this] { dialogs::contacts(host()); });
-    connect(m_rail->calls, &QAbstractButton::clicked, this, [this] { dialogs::recentCalls(host()); });
+    connect(m_rail->people, &QAbstractButton::clicked, this, [this] { setTab(2); });
+    connect(m_rail->calls, &QAbstractButton::clicked, this, [this] { setTab(1); });
     CallController::instance()->toast = [this](const QString &t) { toast(t); };
     connect(m_header->audioCall, &QAbstractButton::clicked, this, [this] { CallController::instance()->start(m_current, false); });
     connect(m_header->videoCall, &QAbstractButton::clicked, this, [this] { CallController::instance()->start(m_current, true); });
-    connect(m_rail->devices, &QAbstractButton::clicked, this, [this] { dialogs::devices(host()); });
     connect(m_rail->settings, &QAbstractButton::clicked, this, [this] { dialogs::settings(host()); });
     connect(m_rail->profile, &QAbstractButton::clicked, this, [this] { dialogs::profile(host()); });
     connect(m_rail->chats, &QAbstractButton::clicked, this, [this] {
-        m_rail->chats->setChecked(true);
-        if (m_onePane) {
-            m_listMode = true;
-            updateLayoutMode();
-        }
+        if (m_tab != 0)
+            return setTab(0);
+        m_rail->setTab(0);
+        if (m_onePane)
+            showList(true);
         m_panel->focusSearch();
     });
     connect(m_header->toggle, &QAbstractButton::clicked, this, [this] { setSidebarHidden(!m_sidebarHidden); });
-    connect(m_header->back, &QAbstractButton::clicked, this, [this] {
-        m_listMode = true;
-        updateLayoutMode();
-    });
+    connect(m_header->back, &QAbstractButton::clicked, this, [this] { showList(true); });
     connect(m_header->title, &QAbstractButton::clicked, this, [this] {
         if (!m_current.isEmpty())
             dialogs::conversationInfo(host(), m_current.value("id").toString());
@@ -552,12 +621,12 @@ MainWindow::MainWindow()
     connect(ctrlK, &QShortcut::activated, this, [this] {
         if (m_stack->currentWidget() != m_main || Sheet::anyOpen(m_stack))
             return;
+        if (m_tab != 0)
+            selectTab(0);
         if (m_sidebarHidden)
             setSidebarHidden(false);
-        if (m_onePane) {
-            m_listMode = true;
-            updateLayoutMode();
-        }
+        if (m_onePane)
+            showList(true);
         m_panel->focusSearch();
     });
     auto *find = new QShortcut(QKeySequence::Find, this);
@@ -655,6 +724,17 @@ void MainWindow::showOnboarding(const QJsonObject &status)
 void MainWindow::showMain()
 {
     m_stack->setCurrentWidget(m_main);
+    if (!m_contacts) {
+        m_calls = dialogs::callsPage(host());
+        m_contacts = dialogs::contactsPage(host());
+        m_pages->addWidget(m_calls);
+        m_pages->addWidget(m_contacts);
+    } else {
+        m_calls->reload();
+        m_contacts->reload();
+    }
+    m_tab = 0;
+    m_rail->setTab(0);
     Core::instance()->call("set_foreground", {{"active", true}});
     m_panel->reload();
     QTimer::singleShot(1500, this, &MainWindow::refreshPresence);
@@ -702,8 +782,7 @@ void MainWindow::onEvent(const QJsonObject &ev)
             if (ev.value("hidden").toBool()) {
                 m_current = {};
                 QSettings().remove("window/lastConversation");
-                m_listMode = true;
-                updateLayoutMode();
+                showList(true);
             }
         }
         m_listTimer->start();
@@ -742,26 +821,79 @@ void MainWindow::openConversation(const QString &id)
             return toast(e.message);
         const QJsonObject c = v.toObject();
         const bool switched = m_current.value("id").toString() != id;
-        m_current = c;
-        QSettings().setValue("window/lastConversation", id);
-        if (switched) {
-            if (m_searchAnim.endValue().toReal() == 1.0) {
-                m_search->edit()->clear();
-                ui::animate(m_searchAnim, 0, 0);
+        auto apply = [this, id, c, switched] {
+            m_current = c;
+            QSettings().setValue("window/lastConversation", id);
+            if (switched) {
+                if (m_searchAnim.endValue().toReal() == 1.0) {
+                    m_search->edit()->clear();
+                    ui::animate(m_searchAnim, 0, 0);
+                }
+                m_composer->clearReply();
+                m_composer->setDraft(c.value("draft").toString());
+                m_view->setConversation(id, c.value("kind").toString() == "group");
             }
-            m_composer->clearReply();
-            m_composer->setDraft(c.value("draft").toString());
-            m_view->setConversation(id, c.value("kind").toString() == "group");
-        }
-        applyConversation(c);
-        m_listMode = false;
-        updateLayoutMode();
-        if (switched) {
-            m_composer->focusInput();
-            if (c.value("kind").toString() == "group")
-                refreshPresence();
-        }
+            applyConversation(c);
+            m_listMode = false;
+            if (m_tab != 0)
+                selectTab(0);
+            else
+                updateLayoutMode();
+            if (switched) {
+                m_composer->focusInput();
+                if (c.value("kind").toString() == "group")
+                    refreshPresence();
+            }
+        };
+        if (m_tab != 0)
+            ui::transition(m_main, QRect(m_rail->width(), 0, m_main->width() - m_rail->width(), m_main->height()), ui::Motion::Fade, apply);
+        else if (m_onePane && m_listMode)
+            animateConversation(ui::Motion::PullLeft, apply);
+        else if (switched)
+            animateConversation(ui::Motion::Dissolve, apply);
+        else
+            apply();
     });
+}
+
+// The conversation area (everything in one-pane mode) moves as `change` is applied.
+void MainWindow::animateConversation(ui::Motion motion, const std::function<void()> &change)
+{
+    ui::transition(m_main, m_onePane ? m_main->rect() : m_conversationArea->geometry(), motion, change);
+}
+
+// One-pane mode: the list or the conversation is on screen.
+void MainWindow::showList(bool list)
+{
+    const bool animate = m_onePane && m_tab == 0 && m_listMode != list;
+    auto change = [this, list] {
+        m_listMode = list;
+        updateLayoutMode();
+    };
+    if (animate)
+        animateConversation(list ? ui::Motion::PullRight : ui::Motion::PullLeft, change);
+    else
+        change();
+}
+
+void MainWindow::selectTab(int tab)
+{
+    m_tab = tab;
+    m_rail->setTab(tab);
+    if (tab == 1 && m_calls)
+        m_pages->setCurrentWidget(m_calls);
+    if (tab == 2 && m_contacts)
+        m_pages->setCurrentWidget(m_contacts);
+    updateLayoutMode();
+}
+
+// Rail sections: 0 chats, 1 calls, 2 contacts.
+void MainWindow::setTab(int tab)
+{
+    m_rail->setTab(m_tab); // the click toggled the button; it shows the real section until the switch
+    if (tab == m_tab || (tab != 0 && !m_contacts))
+        return;
+    ui::transition(m_main, QRect(m_rail->width(), 0, m_main->width() - m_rail->width(), m_main->height()), ui::Motion::Fade, [this, tab] { selectTab(tab); });
 }
 
 void MainWindow::refreshHeader()
@@ -885,9 +1017,22 @@ void MainWindow::updateLayoutMode()
     const int panelW = w <= 1050 ? 286 : 324;
     auto *area = static_cast<QStackedWidget *>(m_conversationArea->layout()->itemAt(0)->widget());
     area->setCurrentWidget(m_current.isEmpty() ? m_placeholder : m_conversation);
+    if (m_tab != 0) {
+        // Contacts or calls: the rail stays and the page takes the rest.
+        m_panel->hide();
+        m_side->setInnerWidth(m_rail->width());
+        m_side->setFixedWidth(m_rail->width());
+        m_side->show();
+        m_conversationArea->hide();
+        m_pagesArea->show();
+        return;
+    }
+    m_panel->show();
+    m_pagesArea->hide();
     if (m_onePane) {
         const bool list = m_listMode || m_current.isEmpty();
         m_side->setVisible(list);
+        m_side->setInnerWidth(0);
         m_side->setMinimumWidth(0);
         m_side->setMaximumWidth(QWIDGETSIZE_MAX);
         m_conversationArea->setVisible(!list);
@@ -901,6 +1046,7 @@ void MainWindow::updateLayoutMode()
     m_header->back->hide();
     const qreal t = m_sideAnim.currentValue().isValid() ? m_sideAnim.currentValue().toReal() : 1.0;
     const int full = 76 + panelW;
+    m_side->setInnerWidth(full);
     m_side->setFixedWidth(int(full * t));
 }
 

@@ -971,13 +971,28 @@ class SwipeToReplyLayout(
         val nowArmed = abs(tx) >= threshold
         if (nowArmed && !armed) {
             armed = true
-            val kind = if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
-            else HapticFeedbackConstants.KEYBOARD_TAP
-            performHapticFeedback(kind)
+            tick()
         } else if (!nowArmed) {
             armed = false
         }
         applyIcon(tx)
+    }
+
+    /**
+     * A short tick when the swipe reaches the reply point. The vibrator is used directly because
+     * view haptics are silent on many phones with "touch feedback" switched off.
+     */
+    private fun tick() {
+        val vibrator = if (Build.VERSION.SDK_INT >= 31) context.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
+        else @Suppress("DEPRECATION") context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+        if (vibrator == null || !vibrator.hasVibrator()) {
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            return
+        }
+        vibrator.vibrate(
+            if (Build.VERSION.SDK_INT >= 29) android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_TICK)
+            else android.os.VibrationEffect.createOneShot(12, 90)
+        )
     }
 
     private fun applyIcon(tx: Float) {

@@ -380,15 +380,73 @@ class ChatListViewController: ListViewController {
     }
 }
 
+/// The "Архив" entry above the chat list, as tall as a chat row. Names of archived chats stay out of sight.
+final class ArchiveEntryView: UIControl {
+    private let icon = UIImageView(image: UIImage(systemName: "archivebox.fill"))
+    private let disc = UIView()
+    private let title = label("Архив", 17, .semibold)
+    private let subtitle = label("", 15, color: Theme.muted)
+    private let badge = PaddedBadge()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = Theme.glass
+        layer.cornerRadius = 25
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+        disc.backgroundColor = Theme.accent.withAlphaComponent(0.16)
+        disc.layer.cornerRadius = 26
+        icon.tintColor = Theme.accent
+        icon.contentMode = .scaleAspectFit
+        let text = UIStackView(arrangedSubviews: [title, subtitle])
+        text.axis = .vertical
+        text.spacing = 4
+        for v in [disc, icon, text, badge] as [UIView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            v.isUserInteractionEnabled = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            disc.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            disc.centerYAnchor.constraint(equalTo: centerYAnchor),
+            disc.widthAnchor.constraint(equalToConstant: 52),
+            disc.heightAnchor.constraint(equalToConstant: 52),
+            icon.centerXAnchor.constraint(equalTo: disc.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: disc.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 26),
+            icon.heightAnchor.constraint(equalToConstant: 26),
+            text.leadingAnchor.constraint(equalTo: disc.trailingAnchor, constant: 14),
+            text.centerYAnchor.constraint(equalTo: centerYAnchor),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -8),
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isHighlighted: Bool {
+        didSet { alpha = isHighlighted ? 0.7 : 1 }
+    }
+
+    func set(count: Int, unread: Int) {
+        subtitle.text = "Чатов: \(count)"
+        badge.set(unread)
+        accessibilityLabel = "Архив, чатов: \(count)" + (unread > 0 ? ", непрочитанных: \(unread)" : "")
+    }
+}
+
 final class ChatsViewController: ChatListViewController {
     private var filter = 0
     private var all: [JSON] = []
     private var archived: [JSON] = []
     private var presenceTimer: Timer?
     private var archiveShown = false
-    private let archiveButton = UIButton(type: .system)
+    private let archiveButton = ArchiveEntryView()
+    private var offsetObserver: NSKeyValueObservation?
     private var logoItem: UIBarButtonItem?
-    private var archiveHeight: CGFloat { archiveShown && query.isEmpty && filter == 0 && !archived.isEmpty ? 56 : 0 }
+    // A chat row (72) and the gap under the entry.
+    private var archiveHeight: CGFloat { archiveShown && query.isEmpty && filter == 0 && !archived.isEmpty ? 80 : 0 }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -405,19 +463,17 @@ final class ChatsViewController: ChatListViewController {
         logoItem = navigationItem.leftBarButtonItem
         navigationItem.title = "NeoChat"
         updateBarItems()
-        archiveButton.setImage(UIImage(systemName: "archivebox.fill"), for: .normal)
-        archiveButton.tintColor = Theme.accent
-        archiveButton.backgroundColor = Theme.glass
-        archiveButton.layer.cornerRadius = 18
-        archiveButton.contentHorizontalAlignment = .leading
-        archiveButton.contentEdgeInsets = UIEdgeInsets(top: 0, left: 18, bottom: 0, right: 18)
-        archiveButton.accessibilityLabel = "Архив"
         archiveButton.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             AppLock.unlockArchive(from: self) { [weak self] in self?.navigationController?.pushViewController(ArchiveViewController(), animated: !Theme.reducedMotion) }
         }, for: .touchUpInside)
         tableView.addSubview(archiveButton)
         tableView.alwaysBounceVertical = true
+        // The entry belongs to the very top of the list: once the first chat has moved up past the bar, it goes away.
+        offsetObserver = tableView.observe(\.contentOffset, options: []) { [weak self] tv, _ in
+            guard let self, self.archiveShown, !self.isEditing else { return }
+            if tv.contentOffset.y > -(tv.adjustedContentInset.top - tv.contentInset.top) + 24 { self.setArchiveShown(false) }
+        }
         let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(hideArchiveBySwipe(_:)))
         back.edges = .left
         tableView.addGestureRecognizer(back)
@@ -462,7 +518,7 @@ final class ChatsViewController: ChatListViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        archiveButton.frame = CGRect(x: 12, y: -archiveHeight, width: tableView.bounds.width - 24, height: 48)
+        archiveButton.frame = CGRect(x: 12, y: -archiveHeight, width: tableView.bounds.width - 24, height: 72)
         archiveButton.isHidden = archiveHeight == 0
     }
 
@@ -475,15 +531,18 @@ final class ChatsViewController: ChatListViewController {
         archiveShown = on && query.isEmpty && filter == 0 && !archived.isEmpty
         let height = archiveHeight
         guard oldHeight != height else { return }
-        archiveButton.setTitle("  Архив · \(archived.count)", for: .normal)
         archiveButton.isHidden = height == 0
-        let offset = tableView.contentOffset.y - (height - oldHeight)
-        Theme.animate(0.22) {
+        // Where the first chat rests under the bar without the entry.
+        let base = tableView.adjustedContentInset.top - oldHeight
+        let scrolledAway = height == 0 && tableView.contentOffset.y > -base
+        let settle = {
             self.tableView.contentInset.top = height
-            self.tableView.contentOffset.y = offset
+            // Leave the offset alone when the entry is already out of sight, so a fling is not cut short.
+            if !scrolledAway { self.tableView.contentOffset.y = -(base + height) }
             self.view.setNeedsLayout()
             self.view.layoutIfNeeded()
         }
+        if scrolledAway { settle() } else { Theme.animate(0.22, settle) }
         navigationItem.leftBarButtonItem = archiveShown ? UIBarButtonItem(image: UIImage(systemName: "chevron.left"), primaryAction: UIAction { [weak self] _ in self?.setArchiveShown(false) }) : logoItem
         if archiveShown { navigationItem.leftBarButtonItem?.accessibilityLabel = "Скрыть архив" }
     }
@@ -525,6 +584,7 @@ final class ChatsViewController: ChatListViewController {
     }
 
     private func applyFilter() {
+        archiveButton.set(count: archived.count, unread: archived.reduce(0) { $0 + $1.int("unread") })
         let rows = all.filter { filter == 0 || (filter == 1 ? $0.str("kind") == "direct" : ["group", "channel"].contains($0.str("kind"))) }
         if !query.isEmpty || filter != 0 || archived.isEmpty { setArchiveShown(false) }
         apply(rows, empty: all.isEmpty && query.isEmpty ? "Чатов пока нет. Начните переписку с человеком по его имени пользователя." : "Ничего не нашли")
