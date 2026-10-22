@@ -55,11 +55,17 @@ func main() {
 		}
 		mem, _ := strconv.Atoi(env("NEOCHAT_ARGON_MEMORY_KIB", "65536"))
 		par, _ := strconv.Atoi(env("NEOCHAT_ARGON_PARALLEL", "2"))
+		fcm, err := app.NewFCMClient(ctx, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+		if err != nil {
+			fatal(log, "FCM configuration", err)
+		}
 		srv := app.New(db, app.Config{
 			DataDir: dataDir, ArgonMemoryKiB: uint32(mem), ArgonParallel: par,
 			TurnSecret: os.Getenv("NEOCHAT_TURN_SECRET"), TurnURIs: strings.Fields(os.Getenv("NEOCHAT_TURN_URIS")),
+			FCM: fcm,
 		}, log)
 		go srv.RunCleanup(ctx)
+		go srv.RunPush(ctx)
 		hs := &http.Server{
 			Addr:              env("NEOCHAT_LISTEN", "127.0.0.1:8090"),
 			Handler:           srv,

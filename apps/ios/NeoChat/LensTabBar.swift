@@ -11,25 +11,33 @@ final class LensTabBar: UIView {
     var onReselect: (() -> Void)?
     private(set) var selected = 0
     private let titles: [String]
+    private let textOnly: Bool
+    private let equalWidth: Bool
+    private var textWidths: [CGFloat] = []
+    private var buttons: [LensTextButton] = []
     private var plainIcons: [UIImage] = []
     private var lensIcons: [UIImage] = []
     private var lensX: CGFloat = 0
     private var lift: CGFloat = 0
     private var slide: Spring!
+    private var sizing: Spring!
+    private var lensWidth: CGFloat = 0
     private var lifting: Spring!
     private var hops: [Spring] = []
     private var downX: CGFloat = 0
     private var dragging = false
     private var near = 0
 
-    init(items: [(title: String, icon: String)]) {
+    init(items: [(title: String, icon: String)], textOnly: Bool = false, equalWidth: Bool = true) {
         titles = items.map { $0.title }
+        self.textOnly = textOnly
+        self.equalWidth = equalWidth
         super.init(frame: .zero)
         backgroundColor = .clear
         isOpaque = false
         contentMode = .redraw
         isAccessibilityElement = false
-        accessibilityElementsHidden = true
+        accessibilityElementsHidden = !textOnly
         let config = UIImage.SymbolConfiguration(pointSize: 19, weight: .semibold)
         for it in items {
             let image = UIImage(systemName: it.icon, withConfiguration: config) ?? UIImage()
@@ -37,22 +45,50 @@ final class LensTabBar: UIView {
             lensIcons.append(image.withTintColor(Theme.accent, renderingMode: .alwaysOriginal))
         }
         slide = Spring(0.42, 0.72, precision: 0.3) { [weak self] v in self?.lensX = v; self?.setNeedsDisplay() }
+        sizing = Spring(0.42, 0.72, precision: 0.3) { [weak self] v in self?.lensWidth = v; self?.setNeedsDisplay() }
         lifting = Spring(0.34, 0.72) { [weak self] v in self?.lift = v; self?.setNeedsDisplay() }
         hops = items.map { _ in Spring(0.38, 0.42) { [weak self] _ in self?.setNeedsDisplay() } }
         hops.forEach { $0.snap(1) }
+        if textOnly {
+            textWidths = titles.map { ($0 as NSString).size(withAttributes: [.font: Theme.font(14, .semibold)]).width + 28 }
+            for (i, title) in titles.enumerated() {
+                let button = LensTextButton(type: .custom)
+                button.bar = self
+                button.accessibilityLabel = title
+                button.isSelected = i == selected
+                button.accessibilityTraits = i == selected ? [.button, .selected] : .button
+                button.addAction(UIAction { [weak self] _ in
+                    guard let self, self.selected != i else { return }
+                    Haptics.select()
+                    self.setSelected(i)
+                    self.onSelect?(i)
+                }, for: .primaryActionTriggered)
+                buttons.append(button)
+                addSubview(button)
+            }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     private var bar: CGRect { bounds.insetBy(dx: Self.room.width, dy: Self.room.height) }
     private var inner: CGRect { bar.insetBy(dx: 4, dy: 4) }
-    private var cell: CGFloat { inner.width / CGFloat(titles.count) }
-    private func center(_ i: Int) -> CGFloat { inner.minX + cell * (CGFloat(i) + 0.5) }
-    private func nearest(_ x: CGFloat) -> Int { min(titles.count - 1, max(0, Int((x - inner.minX) / cell))) }
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: textWidths.reduce(0, +) + 2 * Self.room.width + 8, height: textOnly ? 68 : 76)
+    }
+    private func itemWidth(_ i: Int) -> CGFloat { equalWidth ? inner.width / CGFloat(titles.count) : textWidths[i] }
+    private func center(_ i: Int) -> CGFloat {
+        inner.minX + (0..<i).reduce(CGFloat(0)) { $0 + itemWidth($1) } + itemWidth(i) / 2
+    }
+    private func nearest(_ x: CGFloat) -> Int { titles.indices.min { abs(center($0) - x) < abs(center($1) - x) } ?? 0 }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         if !slide.running { slide.snap(center(selected)) }
+        if !sizing.running { sizing.snap(itemWidth(selected)) }
+        for (i, button) in buttons.enumerated() {
+            button.frame = CGRect(x: center(i) - itemWidth(i) / 2, y: bar.minY, width: itemWidth(i), height: bar.height)
+        }
         layer.shadowPath = UIBezierPath(roundedRect: bar, cornerRadius: bar.height / 2).cgPath
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOpacity = 0.12
@@ -66,17 +102,24 @@ final class LensTabBar: UIView {
     }
 
     /// Follows a selection made elsewhere, e.g. opening a chat from a notification.
-    func setSelected(_ i: Int) {
+    func setSelected(_ i: Int, animated: Bool = true) {
         guard i != selected, titles.indices.contains(i) else { return }
         mark(i)
         slide.response = 0.44
         slide.damping = 0.72
-        if bounds.width > 0 { slide.to(center(i)) }
+        if bounds.width > 0 {
+            if animated { slide.to(center(i)); sizing.to(itemWidth(i)) }
+            else { slide.snap(center(i)); sizing.snap(itemWidth(i)) }
+        }
     }
 
     private func mark(_ i: Int) {
         selected = i
-        hops[i].snap(0.72)
+        for (j, button) in buttons.enumerated() {
+            button.isSelected = j == i
+            button.accessibilityTraits = j == i ? [.button, .selected] : .button
+        }
+        hops[i].snap(textOnly ? 0.92 : 0.72)
         hops[i].to(1)
     }
 
@@ -111,6 +154,7 @@ final class LensTabBar: UIView {
         slide.response = dragging ? 0.16 : 0.22
         slide.damping = 0.86
         slide.to(min(center(titles.count - 1), max(center(0), x)))
+        sizing.to(itemWidth(nearest(x)))
     }
 
     private func land(_ i: Int) {
@@ -119,6 +163,7 @@ final class LensTabBar: UIView {
         slide.response = 0.42
         slide.damping = 0.7
         slide.to(center(i))
+        sizing.to(itemWidth(i))
         lifting.to(0)
         if i != selected {
             mark(i)
@@ -138,6 +183,7 @@ final class LensTabBar: UIView {
         barPath.lineWidth = 1
         barPath.stroke()
         let cy = bar.midY
+        let cell = lensWidth
         // At rest the lens is the pill on the chosen item; lifted it is wider and taller than the bar.
         let stretch = min(abs(slide.velocity) * 0.02, cell * 0.3)
         let w = cell * (1 + 0.24 * lift) + stretch
@@ -186,10 +232,21 @@ final class LensTabBar: UIView {
     }
 
     private func drawItems(_ icons: [UIImage], _ color: UIColor, _ cy: CGFloat) {
-        let font = UIFont.systemFont(ofSize: 10.5, weight: .semibold)
+        let font = textOnly ? Theme.font(14, .semibold) : UIFont.systemFont(ofSize: 10.5, weight: .semibold)
         for (i, t) in titles.enumerated() {
             let x = center(i)
             let s = hops[i].value
+            if textOnly {
+                let text = NSAttributedString(string: t, attributes: [.font: font, .foregroundColor: color])
+                let size = text.size()
+                guard let ctx = UIGraphicsGetCurrentContext() else { continue }
+                ctx.saveGState()
+                ctx.translateBy(x: x, y: cy)
+                ctx.scaleBy(x: s, y: s)
+                text.draw(at: CGPoint(x: -size.width / 2, y: -size.height / 2))
+                ctx.restoreGState()
+                continue
+            }
             let img = icons[i]
             let size = CGSize(width: img.size.width * s, height: img.size.height * s)
             img.draw(in: CGRect(x: x - size.width / 2, y: cy - 8 - size.height / 2, width: size.width, height: size.height))
@@ -207,4 +264,14 @@ final class LensTabBar: UIView {
         let k = min(1, max(0, t))
         return UIColor(red: r1 + (r2 - r1) * k, green: g1 + (g2 - g1) * k, blue: b1 + (b2 - b1) * k, alpha: a1 + (a2 - a1) * k)
     }
+}
+
+/// Native buttons keep text tabs accessible to VoiceOver and the hardware keyboard;
+/// forwarding touch phases gives them the same lifted lens as the main navigation.
+private final class LensTextButton: UIButton {
+    weak var bar: LensTabBar?
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { super.touchesBegan(touches, with: event); bar?.touchesBegan(touches, with: event) }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { super.touchesMoved(touches, with: event); bar?.touchesMoved(touches, with: event) }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { bar?.touchesEnded(touches, with: event); super.touchesEnded(touches, with: event) }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { bar?.touchesCancelled(touches, with: event); super.touchesCancelled(touches, with: event) }
 }

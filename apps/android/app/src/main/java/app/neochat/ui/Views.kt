@@ -100,12 +100,22 @@ class GlassDrawable(
     var kind: Kind = Kind.GLASS,
     var radius: Float = ctx.dpf(25),
     var rim: Boolean = true,
+    private val selectionTint: Boolean = false,
 ) : Drawable() {
     enum class Kind { GLASS, STRONG, INCOMING, OUTGOING, ACTION, WARNING, NONE }
 
     /** Optional per-corner radii (tl, tr, br, bl); null = uniform. */
     var corners: FloatArray? = null
     var pressed = 0f
+    private var selected = false
+    override fun isStateful() = true
+    override fun onStateChange(state: IntArray): Boolean {
+        val on = android.R.attr.state_selected in state
+        if (on == selected) return false
+        selected = on
+        invalidateSelf()
+        return true
+    }
     /** How much of the fill and rim is drawn, for surfaces that fade in and out. */
     var level = 1f
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -138,6 +148,11 @@ class GlassDrawable(
         if (pressed > 0f) {
             fill.color = if (p.dark) 0x22FFFFFF else 0x14000000
             fill.alpha = (fill.alpha * pressed).toInt()
+            c.drawPath(path, fill)
+        }
+        if (selected && selectionTint) {
+            fill.color = p.accent
+            fill.alpha = 41
             c.drawPath(path, fill)
         }
         if (rim && kind != Kind.ACTION && kind != Kind.OUTGOING && level > 0f) {

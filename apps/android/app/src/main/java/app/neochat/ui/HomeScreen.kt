@@ -57,6 +57,7 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
     private val badge = TextView(ctx)
     val check = ImageView(ctx)
     val pin = ImageView(ctx)
+    val groupIcon = ImageView(ctx)
     /** What the row shows now, so a recycled row does not pop for another chat's count. */
     var bound = ""
     private var badgeFor = ""
@@ -69,13 +70,17 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
         setPadding(dp(12), dp(10), dp(14), dp(10))
         isClickable = true
         isFocusable = true
-        background = GlassDrawable(ctx, GlassDrawable.Kind.NONE, ctx.dpf(25), rim = false)
+        background = GlassDrawable(ctx, GlassDrawable.Kind.NONE, ctx.dpf(25), rim = false, selectionTint = true)
         pressFeedback()
         addView(avatar)
         val text = LinearLayout(ctx).apply { orientation = VERTICAL }
         val top = LinearLayout(ctx).apply { gravity = Gravity.CENTER_VERTICAL }
         title.maxLines = 1
         title.ellipsize = TextUtils.TruncateAt.END
+        groupIcon.setImageResource(R.drawable.ic_people)
+        groupIcon.visibility = GONE
+        groupIcon.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        top.addView(groupIcon, lp(dp(17), dp(17)).apply { marginEnd = dp(6) })
         top.addView(title, lp(0, WRAP, 1f))
         pin.setImageResource(R.drawable.ic_pin)
         pin.visibility = GONE
@@ -113,12 +118,14 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
 
     fun setChecked(on: Boolean?) {
         check.visibility = if (on == true) VISIBLE else if (on == false) INVISIBLE else GONE
+        isSelected = on == true
     }
 
     override fun applyTheme() {
         badge.setTextColor(Theme.p.onAccent)
         pin.imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.muted)
         check.imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.accent)
+        groupIcon.imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.muted)
     }
 }
 
@@ -156,7 +163,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
     // chats
     private val chatsPage = LinearLayout(ctx)
     private val chatSearch = SearchBox(ctx, "Поиск чатов")
-    private val filterChips = listOf(Chip(ctx, "Все"), Chip(ctx, "Личные"), Chip(ctx, "Группы"))
+    private val filterTabs = BottomNav(ctx, listOf("Все", "Личные", "Группы").map { 0 to it }, textOnly = true)
     private var filter = 0
     private val chatList = RecyclerView(ctx)
     private val chatEmpty = ctx.label("Чатов пока нет. Начните переписку с человеком по его имени пользователя.", 14.5f, 400, Theme.Role.MUTED)
@@ -164,7 +171,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private var archiveRow: JSONObject? = null
     private var archiveShown = false
     private val archiveEntry = ListRow(ctx)
-    private val archiveIcon = ArchiveIcon()
+    private val archiveIcon = ArchiveIcon(ring = true)
     private val archiveHeight = dp(72)
     private val archiveWrap = FrameLayout(ctx)
     private var archiveAnim: ValueAnimator? = null
@@ -262,16 +269,11 @@ class HomeScreen(private val act: MainActivity) : Screen {
         watch(chatSearch) { reloadChats(true) }
         val chips = LinearLayout(ctx)
         chips.gravity = Gravity.CENTER_VERTICAL
-        filterChips.forEachIndexed { i, c ->
-            c.isSelected = i == 0
-            c.setOnClickListener {
-                filter = i
-                filterChips.forEachIndexed { j, o -> o.isSelected = j == i }
-                applyChats(true)
-            }
-            chips.addView(c, lp(WRAP, WRAP).apply { marginEnd = dp(4) })
+        filterTabs.onSelect = { i ->
+            filter = i
+            applyChats(true)
         }
-        chips.addView(View(ctx), lp(0, 1, 1f))
+        chips.addView(filterTabs, lp(0, dp(68), 1f))
         val sortBtn = IconButton(ctx, R.drawable.ic_sort, "Сортировка чатов")
         sortBtn.setOnClickListener {
             val cur = Prefs.of(ctx).getString("chat_sort", "activity")
@@ -419,6 +421,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
         val visible = on && archiveRow != null && filter == 0 && chatSearch.edit.text.isEmpty()
         val target = if (visible) archiveHeight else 0
         if (archiveShown == visible && archiveWrap.layoutParams.height == target) return
+        val opening = visible && !archiveShown
         archiveShown = visible
         archiveAnim?.cancel()
         if (visible) archiveWrap.visibility = View.VISIBLE
@@ -431,6 +434,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
             }
             start()
         }
+        if (opening) archiveEntry.pop(0.96f, 0.38f, 0.72f)
     }
 
     private fun setArchiveHeight(height: Int) {
@@ -662,13 +666,13 @@ class TintedIcon(ctx: Context, icon: Int, private val role: Theme.Role = Theme.R
  * The view is [ROOM_X]/[ROOM_Y] dp larger than the bar on each side so the lens can reach past it.
  * Every item is also an invisible child view for TalkBack and the keyboard.
  */
-class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx), Themed {
+class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOnly: Boolean = false, private val equalWidth: Boolean = true) : LinearLayout(ctx), Themed {
     var onSelect: ((Int) -> Unit)? = null
     private var selected = 0
     private val count = items.size
     private val titles = items.map { it.second }
-    private val plainIcons = items.map { ctx.getDrawable(it.first)!!.mutate() }
-    private val lensIcons = items.map { ctx.getDrawable(it.first)!!.mutate() }
+    private val plainIcons = items.map { if (it.first == 0) null else ctx.getDrawable(it.first)!!.mutate() }
+    private val lensIcons = items.map { if (it.first == 0) null else ctx.getDrawable(it.first)!!.mutate() }
     private val bar = GlassDrawable(ctx, radius = ctx.dpf(28))
     private val roomX = ctx.dpf(ROOM_X)
     private val roomY = ctx.dpf(ROOM_Y)
@@ -678,13 +682,15 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
     private val title = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
         typeface = weightFace(600)
-        textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 11.5f, ctx.resources.displayMetrics)
+        textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, if (textOnly) 14f else 11.5f, ctx.resources.displayMetrics)
     }
     private val lens = RectF()
     private val lensPath = Path()
     private var lensX = 0f
+    private var lensWidth = 0f
     private var lift = 0f
     private val slide = Spring(0.42f, 0.72f, 0.5f) { lensX = it; invalidate() }
+    private val sizing = Spring(0.42f, 0.72f, 0.5f) { lensWidth = it; invalidate() }
     private val lifting = Spring(0.34f, 0.72f) { lift = it; invalidate() }
     private val hops = List(count) { Spring(0.38f, 0.42f) { _ -> invalidate() } }
     private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
@@ -705,19 +711,21 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
                 isFocusable = true
                 setOnClickListener { choose(i) }
                 setOnFocusChangeListener { _, _ -> this@BottomNav.invalidate() }
-            }, LayoutParams(0, MATCH, 1f))
+            }, if (equalWidth) LayoutParams(0, MATCH, 1f) else LayoutParams((title.measureText(text) + ctx.dpf(28)).toInt(), MATCH))
         }
         updateState()
         applyTheme()
     }
 
     /** Moves the selection without a touch, e.g. back to the chats. */
-    fun select(i: Int) {
+    fun select(i: Int, animated: Boolean = true) {
+        if (i !in 0 until count) return
         if (i == selected) return
         mark(i)
         slide.response = 0.44f
         slide.damping = 0.72f
-        slide.to(center(i))
+        if (animated) { slide.to(center(i)); sizing.to(itemWidth(i)) }
+        else { slide.snap(center(i)); sizing.snap(itemWidth(i)) }
     }
 
     private fun choose(i: Int) {
@@ -730,7 +738,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
     private fun mark(i: Int) {
         selected = i
         updateState()
-        hops[i].snap(0.72f)
+        hops[i].snap(if (textOnly) 0.92f else 0.72f)
         hops[i].to(1f)
     }
 
@@ -738,14 +746,15 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
         for (i in 0 until childCount) getChildAt(i).isSelected = i == selected
     }
 
-    private fun cell() = (width - paddingLeft - paddingRight) / count.toFloat()
-    private fun center(i: Int) = paddingLeft + cell() * (i + 0.5f)
-    private fun nearest(x: Float) = ((x - paddingLeft) / cell()).toInt().coerceIn(0, count - 1)
+    private fun itemWidth(i: Int) = getChildAt(i).width.toFloat()
+    private fun center(i: Int) = getChildAt(i).left + itemWidth(i) / 2
+    private fun nearest(x: Float) = (0 until count).minBy { kotlin.math.abs(center(it) - x) }
     private fun onBar(x: Float, y: Float) = x >= roomX && x <= width - roomX && y >= roomY && y <= height - roomY
 
-    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        super.onSizeChanged(w, h, ow, oh)
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        super.onLayout(changed, l, t, r, b)
         if (!slide.running) slide.snap(center(selected))
+        if (!sizing.running) sizing.snap(itemWidth(selected))
     }
 
     // The bar takes every touch on itself; the room around it lets touches through to the list.
@@ -759,7 +768,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
                 downX = e.x
                 dragging = false
                 near = selected
-                parent.requestDisallowInterceptTouchEvent(true)
+                parent.requestDisallowInterceptTouchEvent(!textOnly || equalWidth)
                 lifting.to(1f)
                 follow(e.x)
             }
@@ -783,6 +792,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
         slide.response = if (dragging) 0.16f else 0.22f
         slide.damping = 0.86f
         slide.to(x.coerceIn(center(0), center(count - 1)))
+        sizing.to(itemWidth(nearest(x)))
     }
 
     private fun land(i: Int) {
@@ -792,6 +802,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
         slide.response = 0.42f
         slide.damping = 0.7f
         slide.to(center(i))
+        sizing.to(itemWidth(i))
         lifting.to(0f)
         if (i != selected) {
             mark(i)
@@ -806,7 +817,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
         val bottom = height - roomY
         bar.setBounds(roomX.toInt(), top.toInt(), (width - roomX).toInt(), bottom.toInt())
         bar.draw(c)
-        val cw = cell()
+        val cw = lensWidth
         val cy = (top + bottom) / 2
         // At rest the lens is the pill on the chosen item; lifted it is wider and taller than the bar.
         val stretch = (kotlin.math.abs(slide.velocity) * 0.02f).coerceAtMost(cw * 0.3f)
@@ -820,7 +831,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
         // Outside the lens: the plain items and the lens's shadow. Inside, only the lens content shows.
         c.save()
         c.clipOutPath(lensPath)
-        items(c, cw, cy, plainIcons)
+        items(c, cy, plainIcons)
         if (lift > 0.01f) {
             fill.color = android.graphics.Color.BLACK
             fill.setShadowLayer(dpf(14) * lift, 0f, dpf(4) * lift, android.graphics.Color.argb((70 * lift).toInt(), 0, 0, 0))
@@ -835,7 +846,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
         c.clipPath(lensPath)
         val m = 1f + 0.18f * lift
         c.scale(m, m, lensX, cy)
-        items(c, cw, cy, lensIcons)
+        items(c, cy, lensIcons)
         c.restore()
         if (lift > 0.01f) {
             // A highlight along the top edge, as light catching the glass.
@@ -849,26 +860,33 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>) : LinearLayout(ctx
             rimPaint.color = p.accent
             rimPaint.strokeWidth = dpf(2)
             val x = center(i)
-            c.drawRoundRect(x - cw / 2, top + dpf(4), x + cw / 2, bottom - dpf(4), dpf(24), dpf(24), rimPaint)
+            c.drawRoundRect(x - itemWidth(i) / 2, top + dpf(4), x + itemWidth(i) / 2, bottom - dpf(4), dpf(24), dpf(24), rimPaint)
         }
     }
 
-    private fun items(c: Canvas, cw: Float, cy: Float, icons: List<android.graphics.drawable.Drawable>) {
+    private fun items(c: Canvas, cy: Float, icons: List<android.graphics.drawable.Drawable?>) {
         val half = dpf(11)
         title.color = if (icons === lensIcons) Theme.p.accent else Theme.p.text
         for (i in 0 until count) {
-            val x = paddingLeft + cw * (i + 0.5f)
+            val x = center(i)
+            if (textOnly) {
+                c.save()
+                c.scale(hops[i].value, hops[i].value, x, cy)
+                c.drawText(titles[i], x, cy - (title.ascent() + title.descent()) / 2, title)
+                c.restore()
+                continue
+            }
             val s = half * hops[i].value
             val iy = cy - dpf(8)
-            icons[i].setBounds((x - s).toInt(), (iy - s).toInt(), (x + s).toInt(), (iy + s).toInt())
-            icons[i].draw(c)
+            icons[i]?.setBounds((x - s).toInt(), (iy - s).toInt(), (x + s).toInt(), (iy + s).toInt())
+            icons[i]?.draw(c)
             c.drawText(titles[i], x, cy + dpf(15.5f), title)
         }
     }
 
     override fun applyTheme() {
-        plainIcons.forEach { it.setTint(Theme.p.text) }
-        lensIcons.forEach { it.setTint(Theme.p.accent) }
+        plainIcons.forEach { it?.setTint(Theme.p.text) }
+        lensIcons.forEach { it?.setTint(Theme.p.accent) }
         invalidate()
     }
 

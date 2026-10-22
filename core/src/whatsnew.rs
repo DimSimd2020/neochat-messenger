@@ -10,6 +10,12 @@ use crate::store::{kv_del, kv_get_str, kv_set};
 /// Notes per version; a platform tag limits an item to one client ("" = all).
 const NOTES: &[(&str, &[(&str, &str)])] = &[
     (
+        "0.6.8",
+        &[
+            ("android", "Добавлены фоновые уведомления и звонки на Android."),
+        ],
+    ),
+    (
         "0.6.7.4",
         &[
             ("windows", "В звонке микрофон больше не замолкает через пару секунд: автоматическая громкость его не убавляет."),

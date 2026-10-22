@@ -5,6 +5,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// The local Firebase configuration is supplied separately, including on CI.
+if (file("google-services.json").isFile) apply(plugin = "com.google.gms.google-services")
+
 // Release signing material lives outside the repository. Point NEOCHAT_SIGNING
 // (env or -P) at a properties file with storeFile, storePassword, keyAlias, keyPassword.
 val signingProps = (System.getenv("NEOCHAT_SIGNING") ?: findProperty("NEOCHAT_SIGNING") as String?)
@@ -19,8 +22,8 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 21
-        versionName = "0.6.7.3"
+        versionCode = 22
+        versionName = "0.6.8"
     }
 
     signingConfigs {
@@ -62,6 +65,8 @@ android {
 }
 
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:35.0.2"))
+    implementation("com.google.firebase:firebase-messaging")
     implementation("androidx.recyclerview:recyclerview:1.3.0")
     // QR decoding for device linking; Apache-2.0.
     implementation("com.google.zxing:core:3.5.3")

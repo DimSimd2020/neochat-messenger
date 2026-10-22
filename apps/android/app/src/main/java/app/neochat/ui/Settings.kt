@@ -103,7 +103,7 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
             addView(toggle("Уведомления о сообщениях", "notifications", true))
             addView(note("В уведомлении видно только название чата, текст не показывается."))
             addView(toggle("Мгновенная доставка", "realtime", true) { app.neochat.RealtimeService.sync(ctx) })
-            addView(note("NeoChat держит соединение с сервером в фоне, поэтому сообщения и звонки приходят сразу. В шторке остаётся тихое уведомление «NeoChat на связи». Если выключить, новые сообщения проверяются примерно раз в 15 минут, а звонки в фоне не приходят."))
+            addView(note("NeoChat держит дополнительное соединение с сервером в фоне. В шторке остаётся тихое уведомление «NeoChat на связи». Если выключить, сообщения и звонки приходят через push; когда push недоступен, новые сообщения проверяются примерно раз в 15 минут."))
             addView(nav(R.drawable.ic_shield, "Работа в фоне", batteryValue) { requestUnrestricted() })
             if (Build.VERSION.SDK_INT >= 34) addView(nav(R.drawable.ic_phone, "Звонки на заблокированном экране", lockScreenValue) { openLockScreenCalls(act) })
             addView(nav(R.drawable.ic_bell, "Звук и вибрация") {

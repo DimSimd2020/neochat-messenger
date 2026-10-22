@@ -38,8 +38,16 @@ final class OnboardingUITests: XCTestCase {
             XCTFail("chat list did not appear")
         }
         shot("04-chats")
+        for filter in ["Группы", "Личные", "Все"] {
+            app.buttons[filter].tap()
+            XCTAssertTrue(app.buttons[filter].isSelected)
+        }
         app.tabBars.buttons["Профиль"].tap()
-        XCTAssertTrue(app.staticTexts["Устройства"].waitForExistence(timeout: 10) || app.buttons["Устройства"].waitForExistence(timeout: 1))
+        XCTAssertTrue(app.buttons["Медиа"].waitForExistence(timeout: 10))
+        app.buttons["Файлы"].tap()
+        XCTAssertTrue(app.buttons["Файлы"].isSelected)
+        app.buttons["Медиа"].tap()
+        XCTAssertTrue(app.buttons["Медиа"].isSelected)
         shot("05-profile")
         app.tabBars.buttons["Чаты"].tap()
         app.buttons["Новый чат"].tap()
@@ -80,12 +88,17 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Новый чат"].waitForExistence(timeout: 5))
         let archive = app.buttons["Архив"]
         XCTAssertFalse(archive.isHittable)
+        let table = app.tables.firstMatch
+        let shortStart = table.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+        shortStart.press(forDuration: 0.05, thenDragTo: shortStart.withOffset(CGVector(dx: 0, dy: 45)))
+        XCTAssertFalse(app.buttons["Скрыть архив"].exists, "A short pull must settle closed")
         revealArchive()
         XCTAssertTrue(archive.isHittable)
         shot("07-archive-revealed")
         app.buttons["Скрыть архив"].tap()
         XCTAssertFalse(archive.isHittable)
         revealArchive()
+        XCTAssertTrue(archive.isHittable, "Archive must stay tappable after releasing the pull")
         archive.tap()
         XCTAssertTrue(app.buttons["Сортировка архива"].waitForExistence(timeout: 5))
         app.tables.cells.firstMatch.tap()

@@ -16,9 +16,8 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
     private var before: Int64?
     private var generation = 0
     private var items: [JSON] = []
-    private var tabs: [UIButton] = []
-    private let tabCanvas = UIView()
-    private let indicator = UIView()
+    private let tabKeys = ["media", "files", "links", "groups", "privacy"]
+    private let tabs = LensTabBar(items: ["Медиа", "Файлы", "Ссылки", "Группы", "Конфиденциальность"].map { (title: $0, icon: "") }, textOnly: true, equalWidth: false)
     private var tabIndex = 0
 
     init(userId: String? = nil) { self.userId = userId; super.init(nibName: nil, bundle: nil); hidesBottomBarWhenPushed = userId != nil }
@@ -42,33 +41,19 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
         [avatar, name, subtitle, details].forEach(stack.addArrangedSubview)
         let tabScroll = UIScrollView()
         tabScroll.showsHorizontalScrollIndicator = false
-        let row = UIStackView()
-        row.spacing = 6
-        indicator.backgroundColor = Theme.action.withAlphaComponent(0.22)
-        indicator.layer.cornerRadius = 19
-        indicator.isUserInteractionEnabled = false
-        tabCanvas.addSubview(indicator)
-        for (key, title) in [("media","Медиа"),("files","Файлы"),("links","Ссылки"),("groups","Группы"),("privacy","Конфиденциальность")] {
-            let b = UIButton(type: .system)
-            b.setTitle(title, for: .normal)
-            b.titleLabel?.font = Theme.font(14, .semibold)
-            b.setTitleColor(Theme.muted, for: .normal)
-            b.contentEdgeInsets = UIEdgeInsets(top: 13, left: 14, bottom: 13, right: 14)
-            b.accessibilityIdentifier = key
-            b.addAction(UIAction { [weak self] _ in self?.select(key) }, for: .touchUpInside)
-            tabs.append(b); row.addArrangedSubview(b)
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        tabs.onSelect = { [weak self] i in
+            guard let self else { return }
+            self.select(self.tabKeys[i])
         }
-        row.translatesAutoresizingMaskIntoConstraints = false
-        tabCanvas.translatesAutoresizingMaskIntoConstraints = false
-        tabCanvas.addSubview(row)
-        tabScroll.addSubview(tabCanvas)
-        tabScroll.heightAnchor.constraint(equalToConstant: 48).isActive = true
+        tabScroll.addSubview(tabs)
+        tabScroll.heightAnchor.constraint(equalToConstant: 68).isActive = true
         NSLayoutConstraint.activate([
-            tabCanvas.topAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.topAnchor), tabCanvas.bottomAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.bottomAnchor),
-            tabCanvas.leadingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.leadingAnchor), tabCanvas.trailingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.trailingAnchor),
-            tabCanvas.heightAnchor.constraint(equalTo: tabScroll.frameLayoutGuide.heightAnchor),
-            row.topAnchor.constraint(equalTo: tabCanvas.topAnchor), row.bottomAnchor.constraint(equalTo: tabCanvas.bottomAnchor),
-            row.leadingAnchor.constraint(equalTo: tabCanvas.leadingAnchor), row.trailingAnchor.constraint(equalTo: tabCanvas.trailingAnchor),
+            tabs.topAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.topAnchor),
+            tabs.bottomAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.bottomAnchor),
+            tabs.leadingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.leadingAnchor),
+            tabs.trailingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.trailingAnchor),
+            tabs.heightAnchor.constraint(equalTo: tabScroll.frameLayoutGuide.heightAnchor),
         ])
         stack.addArrangedSubview(tabScroll)
         stack.addArrangedSubview(content)
@@ -175,7 +160,7 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
         let dir = next == tabIndex ? 0 : (next > tabIndex ? 1 : -1)
         tabIndex = next
         category = key; before = nil; items = []; generation += 1
-        placeIndicator(animated: animated && dir != 0)
+        tabs.setSelected(next, animated: animated && dir != 0)
         clear(content)
         if key == "privacy" {
             let text = profile.bool("me") ? "Коды безопасности доступны в профилях ваших собеседников." : profile.str("safety_number")
@@ -193,30 +178,6 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
             for g in groups { content.addArrangedSubview(button(g.str("title"),"person.3") { NotificationCenter.default.post(name:.openConversation,object:nil,userInfo:["id":g.str("id")]) }) }
             reveal(dir, animated)
         } else { loadItems(dir: dir, animated: animated) }
-    }
-    private func placeIndicator(animated: Bool) {
-        for (i, b) in tabs.enumerated() {
-            let on = i == tabIndex
-            b.backgroundColor = .clear
-            b.setTitleColor(on ? Theme.accent : Theme.muted, for: .normal)
-            b.accessibilityTraits = on ? [.button, .selected] : .button
-        }
-        view.layoutIfNeeded()
-        guard tabs.indices.contains(tabIndex) else { return }
-        let frame = tabs[tabIndex].convert(tabs[tabIndex].bounds, to: tabCanvas).insetBy(dx: 0, dy: 5)
-        guard frame.width > 1 else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.tabs.indices.contains(self.tabIndex) else { return }
-                let again = self.tabs[self.tabIndex].convert(self.tabs[self.tabIndex].bounds, to: self.tabCanvas).insetBy(dx: 0, dy: 5)
-                if again.width > 1 { self.indicator.frame = again }
-            }
-            return
-        }
-        let apply = { self.indicator.frame = frame }
-        if animated && !Theme.reducedMotion {
-            Haptics.select()
-            Motion.animate(0.42, 0.74, apply)
-        } else { apply() }
     }
     private func reveal(_ dir: Int, _ animated: Bool) {
         guard animated, !Theme.reducedMotion else { content.alpha = 1; content.transform = .identity; return }

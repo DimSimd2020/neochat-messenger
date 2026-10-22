@@ -1,6 +1,5 @@
 package app.neochat.ui
 
-import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
@@ -32,9 +31,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     private val avatar = AvatarView(act, 112)
     private val name = act.label("", 27f, 700)
     private val sub = act.label("", 14f, 400, Theme.Role.MUTED)
-    private val tabHost = FrameLayout(act)
-    private val tabs = LinearLayout(act)
-    private val indicator = View(act)
+    private val tabs = BottomNav(act, listOf("Медиа", "Файлы", "Ссылки", "Группы", "Конфиденциальность").map { 0 to it }, textOnly = true, equalWidth = false)
     private val tabKeys = listOf("media", "files", "links", "groups", "privacy")
     private var tabIndex = 0
     private var profile = JSONObject()
@@ -59,24 +56,12 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         name.gravity = Gravity.CENTER; sub.gravity = Gravity.CENTER
         col.addView(name,lp().apply { topMargin = dp(16) }); col.addView(sub,lp().apply { topMargin = dp(6) })
         col.addView(details,lp().apply { topMargin = dp(22) })
-        indicator.background = GlassDrawable(act, GlassDrawable.Kind.GLASS, act.dpf(19))
-        indicator.isClickable = false
-        tabHost.addView(indicator, FrameLayout.LayoutParams(0, dp(40), Gravity.CENTER_VERTICAL))
-        tabHost.addView(tabs)
-        val tabScroll = HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(tabHost) }
-        for ((key,title) in listOf("media" to "Медиа","files" to "Файлы","links" to "Ссылки","groups" to "Группы","privacy" to "Конфиденциальность")) {
-            val b = LinearLayout(act).apply {
-                gravity = Gravity.CENTER
-                setPadding(dp(14), 0, dp(14), 0)
-                isClickable = true
-                isFocusable = true
-                tag = key
-                contentDescription = title
-                setOnClickListener { select(key) }
-                addView(act.label(title, 15f, 600, Theme.Role.MUTED))
-            }
-            tabs.addView(b, lp(WRAP, dp(48)).apply { marginEnd = dp(6) })
+        val tabScroll = HorizontalScrollView(act).apply {
+            isHorizontalScrollBarEnabled = false
+            clipChildren = false
+            addView(tabs, android.widget.FrameLayout.LayoutParams(WRAP, dp(68)))
         }
+        tabs.onSelect = { select(tabKeys[it]) }
         col.addView(tabScroll,lp().apply { topMargin = dp(22) }); col.addView(content,lp().apply { topMargin = dp(16) })
         scroll.addView(col); column.addView(scroll,lp(MATCH,0,1f)); root.addView(column,flp(MATCH,MATCH))
         load()
@@ -156,7 +141,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         val dir = when { next > tabIndex -> 1; next < tabIndex -> -1; else -> 0 }
         tabIndex = next
         category=key;before=null;items.clear();generation++;content.animate().cancel();content.removeAllViews()
-        placeIndicator(animated && dir != 0)
+        tabs.select(next, animated && dir != 0)
         if(key=="groups") {
             val groups=profile.optJSONArray("groups")?.objects().orEmpty()
             if(groups.isEmpty()) content.addView(act.label("Общих групп пока нет",15f,400,Theme.Role.MUTED))
@@ -174,46 +159,6 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             }
             reveal(dir, animated)
         } else loadItems(dir, animated)
-    }
-    private fun placeIndicator(animated: Boolean) {
-        val selected = tabs.getChildAt(tabIndex) ?: return
-        for (i in 0 until tabs.childCount) {
-            val child = tabs.getChildAt(i)
-            ((child as? ViewGroup)?.getChildAt(0) as? android.widget.TextView)?.role(if (child === selected) Theme.Role.TEXT else Theme.Role.MUTED)
-        }
-        if (selected.width == 0) {
-            selected.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
-                override fun onLayoutChange(v: View, a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int) {
-                    v.removeOnLayoutChangeListener(this)
-                    placeIndicator(animated)
-                }
-            })
-            return
-        }
-        tabHost.post {
-            val targetX = selected.left.toFloat()
-            val targetW = selected.width
-            if (targetW == 0) return@post
-            val lp = indicator.layoutParams as FrameLayout.LayoutParams
-            if (!animated || Theme.reducedMotion || lp.width <= 1) {
-                indicator.stopSprings(Prop.X)
-                lp.width = targetW
-                indicator.layoutParams = lp
-                indicator.translationX = targetX
-                return@post
-            }
-            Haptics.select(tabs)
-            indicator.springTo(Prop.X, targetX, 0.42f, 0.74f)
-            ValueAnimator.ofInt(indicator.width.coerceAtLeast(1), targetW).apply {
-                duration = Theme.ms(300)
-                interpolator = Theme.surfaceCurve
-                addUpdateListener {
-                    lp.width = it.animatedValue as Int
-                    indicator.layoutParams = lp
-                }
-                start()
-            }
-        }
     }
     private fun reveal(dir: Int, animated: Boolean) {
         content.animate().cancel()

@@ -20,9 +20,10 @@ type Config struct {
 	DataDir        string // encrypted attachment objects
 	ArgonMemoryKiB uint32
 	ArgonTime      uint32
-	ArgonParallel  int      // concurrent password hashes
-	TurnSecret     string   // coturn static-auth-secret; empty disables TURN
-	TurnURIs       []string // e.g. turn:host:3478?transport=udp
+	ArgonParallel  int        // concurrent password hashes
+	TurnSecret     string     // coturn static-auth-secret; empty disables TURN
+	TurnURIs       []string   // e.g. turn:host:3478?transport=udp
+	FCM            *FCMClient // nil keeps push delivery disabled
 }
 
 type Server struct {

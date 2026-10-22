@@ -458,7 +458,13 @@ func (c *commitThen) Error() string { return c.err.Error() }
 func errCommitThen(err error) error { return &commitThen{err} }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, a *authCtx) {
-	_, err := s.db.Exec(r.Context(), `UPDATE sessions SET revoked_at=now() WHERE id=$1`, a.SessionID)
+	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(r.Context(), `UPDATE sessions SET revoked_at=now() WHERE id=$1`, a.SessionID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(r.Context(), `DELETE FROM push_tokens WHERE device_id=$1`, a.DeviceID)
+		return err
+	})
 	if err != nil {
 		s.fail(w, r, err)
 		return

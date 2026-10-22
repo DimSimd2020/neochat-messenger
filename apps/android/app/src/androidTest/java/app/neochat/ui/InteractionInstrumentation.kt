@@ -17,8 +17,9 @@ import java.io.File
 class InteractionInstrumentation : Instrumentation() {
     private var archive = false
     private var fixes = false
+    private var push = false
     private var profileServer = ""
-    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); archive = arguments?.getString("archive") == "true"; fixes = arguments?.getString("fixes") == "true"; profileServer=arguments?.getString("profile_server") ?: ""; start() }
+    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); archive = arguments?.getString("archive") == "true"; fixes = arguments?.getString("fixes") == "true"; push = arguments?.getString("push") == "true"; profileServer=arguments?.getString("profile_server") ?: ""; start() }
 
     override fun onStart() {
         val result = Bundle()
@@ -64,6 +65,7 @@ class InteractionInstrumentation : Instrumentation() {
                 } finally { Theme.forceReduced = oldReduced; row.reset() }
             }
             if (archive) archiveInteraction()
+            if (push) pushInteraction()
             if (fixes) screenAndFileRegressions()
             result.putString("stream", "OK: reply gestures; archive follows finger, partial/cancelled pull, scroll hiding, navigation cleanup, inline undo; tab bar lens lifts, follows and lands\n")
             finish(-1, result)
@@ -71,6 +73,35 @@ class InteractionInstrumentation : Instrumentation() {
             result.putString("stream", "FAIL: ${e.message}\n")
             finish(0, result)
         }
+    }
+
+    private fun pushInteraction() {
+        val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
+        waitForIdleSync()
+        try {
+            runOnMainSync {
+                check(com.google.firebase.FirebaseApp.getApps(activity).isNotEmpty()) { "Local Firebase configuration was not loaded" }
+                val service = app.neochat.PushService()
+                android.content.ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", android.content.Context::class.java)
+                    .apply { isAccessible = true }.invoke(service, activity)
+                val scheduler = activity.getSystemService(android.app.job.JobScheduler::class.java)
+                scheduler.cancel(app.neochat.SyncJob.PUSH_ID)
+                service.onMessageReceived(com.google.firebase.messaging.RemoteMessage.Builder("fictional-sender").addData("type", "unrelated").build())
+                check(scheduler.getPendingJob(app.neochat.SyncJob.PUSH_ID) == null) { "Unknown push started a sync" }
+                val message = com.google.firebase.messaging.RemoteMessage(Bundle().apply {
+                    putString("type", "sync")
+                    putString("google.delivered_priority", "high")
+                })
+                check(message.priority == com.google.firebase.messaging.RemoteMessage.PRIORITY_HIGH)
+                service.onMessageReceived(message)
+                val job = scheduler.getPendingJob(app.neochat.SyncJob.PUSH_ID)
+                check(job != null && job.service.className == app.neochat.SyncJob::class.java.name) { "FCM did not schedule the encrypted sync" }
+                if (android.os.Build.VERSION.SDK_INT >= 31) check(job.isExpedited) { "High-priority FCM did not get an expedited job" }
+                repeat(10) { service.onMessageReceived(message) }
+                check(scheduler.allPendingJobs.count { it.id == app.neochat.SyncJob.PUSH_ID } == 1) { "Push burst created duplicate jobs" }
+                scheduler.cancel(app.neochat.SyncJob.PUSH_ID)
+            }
+        } finally { runOnMainSync { activity.finish() } }
     }
 
     private fun screenAndFileRegressions() {
@@ -251,6 +282,95 @@ class InteractionInstrumentation : Instrumentation() {
             navTouch(MotionEvent.ACTION_UP, 2.5f); pause(); pause()
             runOnMainSync { check(field(home, "tab") == 2 && (field(nav, "lift") as Float) < 0.05f) { "Lens did not land on the profile" } }
             capture("lens-landed")
+            // Text filters use the navigation lens too, and recycled rows retain selection and kind.
+            runOnMainSync {
+                val filters = field(home, "filterTabs") as BottomNav
+                home.javaClass.getDeclaredField("allChats").apply { isAccessible = true }.set(home, listOf(
+                    JSONObject().put("id", "direct-fixture").put("kind", "direct").put("title", "Личный"),
+                    JSONObject().put("id", "group-fixture").put("kind", "group").put("title", "Группа")))
+                filters.getChildAt(2).performClick()
+                check(field(home, "filter") == 2 && filters.getChildAt(2).isSelected) { "Group filter and lens disagree" }
+                check((list.adapter as RowAdapter).rows.single().str("kind") == "group")
+                filters.getChildAt(1).performClick(); filters.getChildAt(0).performClick()
+                check(field(home, "filter") == 0 && (list.adapter as RowAdapter).rows.size == 2) { "Fast filters left stale rows" }
+
+                val row = ListRow(activity)
+                bindChatRow(activity, row, JSONObject().put("id", "group").put("kind", "group").put("title", "Группа"))
+                check(row.groupIcon.visibility == View.VISIBLE) { "Group icon missing" }
+                bindChatRow(activity, row, JSONObject().put("id", "direct").put("kind", "direct").put("title", "Контакт"))
+                check(row.groupIcon.visibility == View.GONE) { "Recycled contact kept the group icon" }
+                row.measure(View.MeasureSpec.makeMeasureSpec(activity.dp(360), View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(activity.dp(72), View.MeasureSpec.EXACTLY))
+                row.layout(0, 0, row.measuredWidth, row.measuredHeight)
+                fun tint(): Int {
+                    val bitmap = Bitmap.createBitmap(row.width, row.height, Bitmap.Config.ARGB_8888)
+                    row.draw(Canvas(bitmap))
+                    val color = bitmap.getPixel(activity.dp(6), row.height / 2)
+                    bitmap.recycle()
+                    return color
+                }
+                row.setChecked(false)
+                val plain = tint()
+                row.setChecked(true)
+                val selectedTint = tint()
+                check(row.isSelected && selectedTint != plain && tint() == selectedTint) { "Selected contact lost its blue fill after release" }
+                row.setChecked(false)
+                check(!row.isSelected && tint() == plain) { "Deselected contact kept its blue fill" }
+            }
+            pause(); pause()
+            runOnMainSync {
+                val filters = field(home, "filterTabs") as BottomNav
+                check((field(filters, "lift") as Float) < 0.05f) { "Text lens stayed lifted" }
+                val reduced = Theme.forceReduced
+                Theme.forceReduced = true
+                try {
+                    filters.getChildAt(2).performClick()
+                    check(!(field(filters, "slide") as Spring).running && !(field(filters, "sizing") as Spring).running) { "Reduced motion animated text filters" }
+                    filters.getChildAt(0).performClick()
+                } finally { Theme.forceReduced = reduced }
+            }
+            lateinit var profileTabs: BottomNav
+            lateinit var profilePage: Any
+            runOnMainSync {
+                profilePage = field(home, "settingsPage")
+                profileTabs = field(profilePage, "tabs") as BottomNav
+            }
+            val textStart = SystemClock.uptimeMillis()
+            fun textTouch(action: Int, index: Int) = runOnMainSync {
+                val item = profileTabs.getChildAt(index)
+                val e = MotionEvent.obtain(textStart, SystemClock.uptimeMillis(), action,
+                    item.left + item.width / 2f, profileTabs.height / 2f, 0)
+                profileTabs.dispatchTouchEvent(e)
+                e.recycle()
+            }
+            textTouch(MotionEvent.ACTION_DOWN, 0)
+            textTouch(MotionEvent.ACTION_MOVE, 1)
+            SystemClock.sleep(220)
+            runOnMainSync {
+                check((field(profileTabs, "lift") as Float) > 0.5f && field(profilePage, "category") == "media") { "Text lens chose before release" }
+            }
+            capture("text-lens-drag")
+            textTouch(MotionEvent.ACTION_CANCEL, 1); pause(); pause()
+            runOnMainSync { check(profileTabs.getChildAt(0).isSelected && field(profilePage, "category") == "media") { "Cancelled text drag changed the tab" } }
+            textTouch(MotionEvent.ACTION_DOWN, 1); textTouch(MotionEvent.ACTION_UP, 1); pause(); pause()
+            runOnMainSync { check(profileTabs.getChildAt(1).isSelected && field(profilePage, "category") == "files") { "Text lens did not select files" } }
+            capture("text-lens-files")
+            // A horizontal swipe still scrolls the long profile tabs rather than trapping the finger.
+            val tabScroll = profileTabs.parent as android.widget.HorizontalScrollView
+            val scrollStart = SystemClock.uptimeMillis()
+            fun scrollTouch(action: Int, fraction: Float) = runOnMainSync {
+                val e = MotionEvent.obtain(scrollStart, SystemClock.uptimeMillis(), action, tabScroll.width * fraction, tabScroll.height / 2f, 0)
+                tabScroll.dispatchTouchEvent(e)
+                e.recycle()
+            }
+            scrollTouch(MotionEvent.ACTION_DOWN, 0.85f)
+            for (step in 1..8) { scrollTouch(MotionEvent.ACTION_MOVE, 0.85f - step * 0.075f); SystemClock.sleep(25) }
+            scrollTouch(MotionEvent.ACTION_UP, 0.25f); pause(); pause()
+            runOnMainSync {
+                check(tabScroll.scrollX > 0 && field(profilePage, "category") == "files") { "Profile tab scrolling changed selection or was blocked" }
+                profileTabs.getChildAt(4).performClick()
+                check(field(profilePage, "category") == "privacy" && profileTabs.getChildAt(4).isSelected) { "Last profile tab is inaccessible" }
+            }
+            pause(); pause(); capture("text-lens-privacy")
             if (profileServer.isNotEmpty()) {
                 runOnMainSync { activity.overlay.findViewWithTag<View>("toast")?.let {activity.overlay.removeView(it)} }
                 check(profileServer == "http://127.0.0.1:8097")
@@ -282,9 +402,9 @@ class InteractionInstrumentation : Instrumentation() {
                     pause();capture("profile-067-qr")
                     runOnMainSync {activity.onBackPressed()};pause()
                     runOnMainSync {
-                        val found=arrayListOf<View>();activity.window.decorView.findViewsWithText(found,"Конфиденциальность",View.FIND_VIEWS_WITH_TEXT)
+                        val found=arrayListOf<View>();activity.window.decorView.findViewsWithText(found,"Конфиденциальность",View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION)
                         check(found.isNotEmpty()) { "Profile tabs missing" }
-                        (found.first().parent as View).performClick()
+                        found.first().performClick()
                     }
                     pause();capture("profile-067-privacy")
                     runOnMainSync {activity.closePage()};pause()

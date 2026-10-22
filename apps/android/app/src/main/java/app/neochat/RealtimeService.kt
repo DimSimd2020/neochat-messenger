@@ -18,9 +18,9 @@ import org.json.JSONObject
 
 /**
  * Keeps the core's WebSocket open while NeoChat is in the background, so
- * messages and calls arrive at once. This build has no push service (FCM
- * needs Google credentials), so without it new messages wait for the
- * periodic job. A background socket does not mark the user as online.
+ * messages and calls arrive at once even without Google Play services.
+ * FCM and the periodic job remain independent wake-up paths.
+ * A background socket does not mark the user as online.
  */
 class RealtimeService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null

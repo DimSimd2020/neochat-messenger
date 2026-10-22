@@ -188,6 +188,7 @@ class MainActivity : Activity(), Sheet.Host {
         chat = null
         Notifier.visibleConversation = null
         RealtimeService.stop(this)
+        app.neochat.PushRegistration.sync(this)
         show(OnboardingScreen(this, status) { showMain() }, 0f)
     }
 
@@ -201,6 +202,7 @@ class MainActivity : Activity(), Sheet.Host {
         chat = null
         show(h, 0f)
         RealtimeService.sync(this)
+        app.neochat.PushRegistration.sync(this)
         AppLock.migrate(this)
         AppLock.maybeLock(this)
         QuickReaction.load(this)

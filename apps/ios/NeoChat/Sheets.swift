@@ -250,6 +250,9 @@ final class NewChatViewController: SheetViewController {
                 let uid = c.str("user_id")
                 let on = self.selected.contains(uid)
                 let row = self.personRow(c.str("display_name"), (self.group && on ? "✓ выбран · " : "") + "@" + c.str("username"), seed: uid) { [weak self] in self?.tap(uid) }
+                row.layer.cornerRadius = 20
+                row.backgroundColor = self.group && on ? Theme.accent.withAlphaComponent(0.16) : .clear
+                row.accessibilityTraits = self.group && on ? [.button, .selected] : .button
                 self.list.addArrangedSubview(row)
             }
         }
