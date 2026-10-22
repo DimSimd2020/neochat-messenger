@@ -249,6 +249,7 @@ func insertPrekeys(ctx context.Context, tx pgx.Tx, deviceID string, ec, kyber []
 // ---- handlers ----
 
 type registerReq struct {
+	EmailTicket        string   `json:"email_ticket"`
 	Username           string   `json:"username"`
 	DisplayName        string   `json:"display_name"`
 	Password           string   `json:"password"`
@@ -305,10 +306,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	userID := newUUID()
 	var out tokensOut
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash, key_backup, nickname, display_name)
-			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7,$8,$9,$10)`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup,
-			nickname, displayName)
+		email, err := registrationEmail(tx, r, req.EmailTicket)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash, key_backup, nickname, display_name, email, email_verified_at)
+			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7,$8,$9,$10,$11,now())`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup,
+			nickname, displayName, email)
 		if isUniqueViolation(err) {
+			if constraintName(err) == "users_email" {
+				return errf(409, "email_taken", "Этот адрес уже привязан к аккаунту NeoChat")
+			}
 			return errf(409, "username_taken", "Это имя пользователя уже занято")
 		}
 		if err != nil {

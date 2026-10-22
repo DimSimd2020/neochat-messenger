@@ -65,6 +65,7 @@ private:
     DialogHost host();
     void checkUpdate(bool manual = false);
     void refreshPresence();
+    void refreshEmail();
 
     QStackedWidget *m_stack;
     Onboarding *m_onboarding;
@@ -83,6 +84,8 @@ private:
     ConversationHeader *m_header;
     NoticeBar *m_notice;
     NoticeBar *m_updateBar;
+    NoticeBar *m_emailBar;
+    bool m_emailPrompted = false;
     QString m_updatePath;
     ui::SearchField *m_search;
     QWidget *m_searchWrap;

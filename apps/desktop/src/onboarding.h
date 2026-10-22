@@ -50,6 +50,8 @@ private:
     ui::TextField *m_password;
     ui::TextField *m_code;
     ui::TextField *m_loginCode;
+    ui::Button *m_email;
+    QString m_emailTicket;
     ui::Label *m_error;
     ui::Button *m_submit;
     ui::Button *m_switch;

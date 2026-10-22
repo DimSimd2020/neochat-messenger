@@ -18,6 +18,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private let password = Field("Пароль", secure: true)
     private let code = Field("Код восстановления")
     private let loginCode = Field("Код из чата «NeoChat уведомления»")
+    private let email = EmailVerificationView(registration:true)
     private let error = label("", 14, color: Theme.warning)
     private let submit = PillButton("Войти")
     private let switchMode = LinkButton("Создать аккаунт")
@@ -73,7 +74,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func showForm() {
         reset()
         setSecure(false)
-        for v in [heading, hint, name, username, password, code, loginCode, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
+        for v in [heading, hint, name, username, password, code, loginCode, email, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
         stack.setCustomSpacing(18, after: error)
         for f in [name, username, password, code, loginCode] { f.delegate = self }
         name.autocapitalizationType = .words
@@ -92,6 +93,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         mode = m
         code.isHidden = m != .recover
         name.isHidden = m != .register
+        email.isHidden = m != .register
         if m != .login { loginCode.isHidden = true }
         password.placeholder = m == .recover ? "Новый пароль" : "Пароль"
         password.accessibilityLabel = password.placeholder
@@ -142,7 +144,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         if user.isEmpty { return showError("Введите никнейм") }
         if pass.isEmpty { return showError("Введите пароль") }
         if mode != .login && pass.count < 8 { return showError("Пароль — не меньше 8 символов") }
-        var p: JSON = ["username": user, "device_name": UIDevice.current.name, "platform": "ios"]
+        var p: JSON = registrationServerParams(["username": user, "device_name": UIDevice.current.name, "platform": "ios"])
         let method: String
         switch mode {
         case .login:
@@ -152,6 +154,8 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         case .register:
             let n = (name.text ?? "").trimmingCharacters(in: .whitespaces)
             if n.isEmpty { return showError("Введите имя") }
+            if email.verifiedTicket.isEmpty { return showError("Подтвердите электронную почту по ссылке из письма") }
+            p["email_ticket"] = email.verifiedTicket
             method = "register"
             p["password"] = pass
             p["display_name"] = n

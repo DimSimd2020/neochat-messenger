@@ -6,16 +6,20 @@ final class OnboardingUITests: XCTestCase {
 
     override func setUp() {
         continueAfterFailure = false
+        guard let server = ProcessInfo.processInfo.environment["NEOCHAT_TEST_SERVER"], !server.isEmpty else { return }
+        app.launchEnvironment["NEOCHAT_TEST_SERVER"] = server
         app.launch()
     }
 
     func testRegisterAndReachChats() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["NEOCHAT_TEST_SERVER"] == nil,"Requires the local API with the test mailbox")
         shot("01-login")
         // Fill the fields in sign-in mode: in registration mode the simulator covers the
         // password field with its own strong password, which typed text cannot replace.
         let user = app.textFields["Никнейм"]
         user.tap()
-        user.typeText("ios_ci_\(Int.random(in: 100000...999999))")
+        let username = "ios_ci_\(Int.random(in: 100000...999999))"
+        user.typeText(username)
         let pass = app.secureTextFields["Пароль"]
         pass.tap()
         pass.typeText("correct horse battery")
@@ -24,6 +28,15 @@ final class OnboardingUITests: XCTestCase {
         let name = app.textFields["Имя"]
         name.tap()
         name.typeText("Тест")
+        let email = app.textFields["Электронная почта"]
+        app.scrollViews.firstMatch.swipeUp()
+        email.tap()
+        email.typeText(username+"@example.test")
+        app.buttons["Отправить ссылку"].tap()
+        let checked = app.buttons["Я подтвердил почту"]
+        XCTAssertTrue(checked.waitForExistence(timeout:10))
+        checked.tap()
+        XCTAssertTrue(app.staticTexts["Почта подтверждена"].waitForExistence(timeout:10))
         shot("02-register")
         app.buttons["Создать аккаунт"].tap()
         if !app.staticTexts["Сохраните код восстановления"].waitForExistence(timeout: 30) {

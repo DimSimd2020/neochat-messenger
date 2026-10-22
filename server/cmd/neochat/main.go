@@ -59,10 +59,15 @@ func main() {
 		if err != nil {
 			fatal(log, "FCM configuration", err)
 		}
+		email, err := app.NewFirebaseEmailSender(ctx, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), os.Getenv("NEOCHAT_FIREBASE_API_KEY"))
+		if err != nil {
+			fatal(log, "email configuration", err)
+		}
 		srv := app.New(db, app.Config{
 			DataDir: dataDir, ArgonMemoryKiB: uint32(mem), ArgonParallel: par,
 			TurnSecret: os.Getenv("NEOCHAT_TURN_SECRET"), TurnURIs: strings.Fields(os.Getenv("NEOCHAT_TURN_URIS")),
-			FCM: fcm,
+			FCM:   fcm,
+			Email: email, EmailBaseURL: os.Getenv("NEOCHAT_EMAIL_BASE_URL"),
 		}, log)
 		go srv.RunCleanup(ctx)
 		go srv.RunPush(ctx)

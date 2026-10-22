@@ -24,6 +24,8 @@ type Config struct {
 	TurnSecret     string     // coturn static-auth-secret; empty disables TURN
 	TurnURIs       []string   // e.g. turn:host:3478?transport=udp
 	FCM            *FCMClient // nil keeps push delivery disabled
+	Email          EmailSender
+	EmailBaseURL   string // public HTTPS origin for email confirmation
 }
 
 type Server struct {
@@ -72,6 +74,12 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/app/files/{name}", s.handleUpdateFile)
 
 	m.HandleFunc("POST /v1/accounts", s.handleRegister)
+	m.HandleFunc("POST /v1/accounts/email", s.handleRegistrationEmail)
+	m.HandleFunc("POST /v1/accounts/email/status", s.handleEmailTicket)
+	m.HandleFunc("GET /v1/accounts/email/confirm", s.handleEmailConfirm)
+	m.HandleFunc("POST /v1/accounts/email/confirm", s.handleEmailConfirm)
+	m.HandleFunc("GET /v1/accounts/current/email", s.authed(s.handleEmailStatus))
+	m.HandleFunc("POST /v1/accounts/current/email", s.authed(s.handleLinkEmail))
 	m.HandleFunc("POST /v1/accounts/recover", s.handleRecover)
 	m.HandleFunc("POST /v1/accounts/password-salt", s.handlePasswordSalt)
 	m.HandleFunc("POST /v1/sessions", s.handleLogin)

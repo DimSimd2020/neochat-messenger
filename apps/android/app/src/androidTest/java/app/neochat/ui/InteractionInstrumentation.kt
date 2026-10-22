@@ -67,7 +67,8 @@ class InteractionInstrumentation : Instrumentation() {
             if (archive) archiveInteraction()
             if (push) pushInteraction()
             if (fixes) screenAndFileRegressions()
-            result.putString("stream", "OK: reply gestures; archive follows finger, partial/cancelled pull, scroll hiding, navigation cleanup, inline undo; tab bar lens lifts, follows and lands\n")
+            result.putString("stream", "OK: reply gestures; archive follows finger, partial/cancelled pull, scroll hiding, navigation cleanup, inline undo; tab bar lens lifts, follows and lands" +
+                (if (push) "; FCM job and socket fallback" else "") + (if (profileServer.isNotEmpty()) "; verified email enrollment and native email form" else "") + "\n")
             finish(-1, result)
         } catch (e: Throwable) {
             result.putString("stream", "FAIL: ${e.message}\n")
@@ -76,11 +77,31 @@ class InteractionInstrumentation : Instrumentation() {
     }
 
     private fun pushInteraction() {
-        val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
+        val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (profileServer.isNotEmpty()) putExtra("test_server",profileServer)
+        }) as MainActivity
         waitForIdleSync()
         try {
             runOnMainSync {
                 check(com.google.firebase.FirebaseApp.getApps(activity).isNotEmpty()) { "Local Firebase configuration was not loaded" }
+                val prefs = Prefs.of(activity)
+                val oldRealtime = prefs.all["realtime"] as? Boolean
+                val oldPush = prefs.all["push_registered"] as? Boolean
+                try {
+                    prefs.edit().remove("realtime").remove("push_registered").commit()
+                    check(app.neochat.RealtimeService.enabled(activity)) { "Socket fallback was disabled before push registration" }
+                    app.neochat.RealtimeService.pushRegistered(activity)
+                    check(!app.neochat.RealtimeService.enabled(activity)) { "Confirmed push kept the default foreground service" }
+                    prefs.edit().putBoolean("realtime", true).commit()
+                    app.neochat.RealtimeService.pushRegistered(activity)
+                    check(app.neochat.RealtimeService.enabled(activity)) { "Push registration overwrote the explicit socket setting" }
+                } finally {
+                    prefs.edit().apply {
+                        if (oldRealtime == null) remove("realtime") else putBoolean("realtime", oldRealtime)
+                        if (oldPush == null) remove("push_registered") else putBoolean("push_registered", oldPush)
+                    }.commit()
+                }
                 val service = app.neochat.PushService()
                 android.content.ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", android.content.Context::class.java)
                     .apply { isAccessible = true }.invoke(service, activity)
@@ -101,7 +122,44 @@ class InteractionInstrumentation : Instrumentation() {
                 check(scheduler.allPendingJobs.count { it.id == app.neochat.SyncJob.PUSH_ID } == 1) { "Push burst created duplicate jobs" }
                 scheduler.cancel(app.neochat.SyncJob.PUSH_ID)
             }
+            if (profileServer.isNotEmpty()) {
+                lateinit var form: EmailVerification
+                fun field(host:Any,name:String):Any = host.javaClass.getDeclaredField(name).apply { isAccessible=true }.get(host)!!
+                runOnMainSync {
+                    val onboarding=field(activity,"current") as OnboardingScreen
+                    (field(onboarding,"switchMode") as View).performClick()
+                    form=field(onboarding,"email") as EmailVerification
+                    (field(form,"address") as FloatingField).setText("android_email_${System.currentTimeMillis()}@example.test")
+                    (field(form,"send") as View).performClick()
+                }
+                val deadline=SystemClock.uptimeMillis()+10_000
+                var completed=false
+                while (!completed && SystemClock.uptimeMillis()<deadline) {
+                    SystemClock.sleep(100); waitForIdleSync()
+                    runOnMainSync {
+                        val check=field(form,"check") as View
+                        if (check.visibility==View.VISIBLE && check.isEnabled) check.performClick()
+                        completed=form.verifiedTicket.isNotEmpty()
+                    }
+                }
+                check(completed) { "Native email form did not confirm its private registration ticket" }
+            }
         } finally { runOnMainSync { activity.finish() } }
+    }
+
+    private fun registrationParams(p:JSONObject):JSONObject {
+        val request=JSONObject().put("server",profileServer).put("email",p.getString("username")+"@example.test")
+        val (value,enrollError)=app.neochat.core.CoreClient.callBlocking("registration_email_start",request)
+        check(enrollError==null) { "Test mailbox enrollment failed" }
+        val ticket=(value as JSONObject).getString("ticket")
+        val deadline=SystemClock.uptimeMillis()+5000
+        while (SystemClock.uptimeMillis()<deadline) {
+            val (state,failure)=app.neochat.core.CoreClient.callBlocking("registration_email_status",JSONObject().put("server",profileServer).put("ticket",ticket))
+            check(failure==null) { "Test mailbox status failed" }
+            if ((state as JSONObject).getBoolean("verified")) return p.put("email_ticket",ticket)
+            SystemClock.sleep(30)
+        }
+        error("Test mailbox confirmation timed out")
     }
 
     private fun screenAndFileRegressions() {
@@ -375,7 +433,7 @@ class InteractionInstrumentation : Instrumentation() {
                 runOnMainSync { activity.overlay.findViewWithTag<View>("toast")?.let {activity.overlay.removeView(it)} }
                 check(profileServer == "http://127.0.0.1:8097")
                 fun core(method:String,p:JSONObject=JSONObject()):Any? {
-                    val (value,error)=app.neochat.core.CoreClient.callBlocking(method,p)
+                    val (value,error)=app.neochat.core.CoreClient.callBlocking(method,if(method=="register") registrationParams(p) else p)
                     check(error==null) { "$method failed: ${error?.code}" };return value
                 }
                 val suffix=java.util.UUID.randomUUID().toString().take(8)
@@ -384,7 +442,7 @@ class InteractionInstrumentation : Instrumentation() {
                 val peer=app.neochat.core.NativeCore.open(JSONObject().put("data_dir",peerDir.absolutePath).put("db_key","b".repeat(64)).put("foreground",false).toString()) {}
                 try {
                     fun remote(method:String,p:JSONObject):Any? {
-                        val result=JSONObject(app.neochat.core.NativeCore.call(peer,method,p.toString()))
+                        val result=JSONObject(app.neochat.core.NativeCore.call(peer,method,(if(method=="register") registrationParams(p) else p).toString()))
                         check(!result.has("error")) { "$method failed" };return result.opt("ok")
                     }
                     remote("register",JSONObject().put("server",profileServer).put("username","friend_$suffix").put("display_name","Дмитрий").put("password","local preview password").put("platform","ios").put("device_name","Preview peer"))

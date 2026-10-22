@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include "calls.h"
+#include "email.h"
 #include "chatlist.h"
 #include "composer.h"
 #include "core.h"
@@ -390,6 +391,9 @@ MainWindow::MainWindow()
     m_updateBar = new NoticeBar(central);
     m_stack = new QStackedWidget;
     centralLay->addWidget(m_updateBar);
+    m_emailBar = new NoticeBar(central);
+    centralLay->addWidget(m_emailBar);
+    connect(m_emailBar->action,&QAbstractButton::clicked,this,[this] { showEmailBinding(host(),[this] { refreshEmail(); }); });
     centralLay->addWidget(m_stack, 1);
     setCentralWidget(central);
     connect(m_updateBar->action, &QAbstractButton::clicked, this, [this] {
@@ -725,6 +729,8 @@ void MainWindow::start()
 
 void MainWindow::showOnboarding(const QJsonObject &status)
 {
+    m_emailBar->set({},{});
+    m_emailPrompted=false;
     Sheet::closeAll(m_stack);
     m_current = {};
     m_view->setConversation({}, false);
@@ -734,6 +740,7 @@ void MainWindow::showOnboarding(const QJsonObject &status)
 
 void MainWindow::showMain()
 {
+    refreshEmail();
     m_stack->setCurrentWidget(m_main);
     if (!m_contacts) {
         m_calls = dialogs::callsPage(host());
@@ -767,6 +774,24 @@ void MainWindow::showMain()
             }
         });
     }
+}
+
+void MainWindow::refreshEmail()
+{
+    Core::instance()->call("email_status",{},this,[this](const QJsonValue &value,const CoreError &error) {
+        if (!error.ok()) return;
+        const bool missing=!value.toObject().value("verified").toBool();
+        m_emailBar->set(missing ? QStringLiteral("Привяжите электронную почту к аккаунту") : QString(),QStringLiteral("Привязать"));
+        if (missing && !m_emailPrompted && m_stack->currentWidget()==m_main) {
+            if (Sheet::anyOpen(m_stack)) {
+                for (auto *sheet : m_stack->findChildren<Sheet *>())
+                    connect(sheet,&Sheet::closed,this,[this] { QTimer::singleShot(0,this,&MainWindow::refreshEmail); },Qt::SingleShotConnection);
+            } else {
+                m_emailPrompted=true;
+                showEmailBinding(host(),[this] { refreshEmail(); });
+            }
+        }
+    });
 }
 
 void MainWindow::onEvent(const QJsonObject &ev)

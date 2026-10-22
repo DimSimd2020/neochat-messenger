@@ -74,7 +74,10 @@ object PushRegistration {
             val key = status.optString("device_id") + ":" + installationId
             if (registered == key) return@call
             CoreClient.call("set_push_token", JSONObject().put("provider", "fcm").put("token", installationId)) { _, error ->
-                if (error == null) registered = key
+                if (error == null) {
+                    registered = key
+                    RealtimeService.pushRegistered(ctx)
+                }
             }
         }
     }

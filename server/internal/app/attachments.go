@@ -182,6 +182,7 @@ func (s *Server) cleanupOnce(ctx context.Context) {
 		}
 	}
 	for _, q := range []string{
+		`DELETE FROM email_links WHERE expires_at < now() - interval '1 day'`,
 		`DELETE FROM device_events WHERE created_at < now() - interval '30 days'`,
 		`DELETE FROM messages WHERE accepted_at < now() - interval '30 days'`,
 		`DELETE FROM device_links WHERE expires_at < now() - interval '1 hour'`,

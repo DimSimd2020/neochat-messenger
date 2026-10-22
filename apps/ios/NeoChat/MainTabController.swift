@@ -46,6 +46,8 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
     private let lens = LensTabBar(items: [("Чаты", "bubble.left.and.bubble.right"), ("Контакты", "person.2"), ("Профиль", "person.crop.circle")])
     private var tabHistory: [Int] = []
     private var activeTab = 0
+    private let emailReminder = UIButton(type:.system)
+    private var emailPrompted = false
 
     override var selectedIndex: Int {
         didSet { lens.setSelected(selectedIndex) }
@@ -57,6 +59,8 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        emailReminder.frame = CGRect(x:12,y:view.safeAreaInsets.top-additionalSafeAreaInsets.top+4,width:max(0,view.bounds.width-24),height:40)
+        view.bringSubviewToFront(emailReminder)
         if lens.superview == nil {
             lens.onSelect = { [weak self] i in self?.selectFromBar(i) }
             lens.onReselect = { [weak self] in
@@ -88,6 +92,14 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        emailReminder.setTitle("Привяжите электронную почту",for:.normal)
+        emailReminder.backgroundColor = Theme.accent.withAlphaComponent(0.18)
+        emailReminder.layer.cornerRadius = 14
+        emailReminder.isHidden = true
+        emailReminder.addTarget(self,action:#selector(openEmail),for:.touchUpInside)
+        view.addSubview(emailReminder)
+        NotificationCenter.default.addObserver(forName:.emailChanged,object:nil,queue:.main) { [weak self] _ in self?.refreshEmail() }
+        NotificationCenter.default.addObserver(forName:UIApplication.didBecomeActiveNotification,object:nil,queue:.main) { [weak self] _ in self?.refreshEmail() }
         view.backgroundColor = .clear
         let chats = nav(ChatsViewController(), "Чаты", "bubble.left.and.bubble.right")
         let contacts = nav(ContactsViewController(), "Контакты", "person.2")
@@ -113,6 +125,30 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
             guard let id = n.userInfo?["id"] as? String else { return }
             self?.open(id)
         }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        refreshEmail()
+    }
+
+    private func refreshEmail() {
+        Core.shared.call("email_status") { [weak self] result in
+            guard let self, case .success(let value) = result, let state = value as? JSON else { return }
+            let missing = !state.bool("verified")
+            self.emailReminder.isHidden = !missing
+            self.additionalSafeAreaInsets.top = missing ? 48 : 0
+            self.view.setNeedsLayout()
+            if missing && !self.emailPrompted && self.presentedViewController == nil && self.view.window != nil {
+                self.emailPrompted = true
+                self.openEmail()
+            }
+        }
+    }
+
+    @objc private func openEmail() {
+        guard presentedViewController == nil else { return }
+        present(EmailBindingViewController(),animated:!Theme.reducedMotion)
     }
 
     func open(_ conversationId: String) {

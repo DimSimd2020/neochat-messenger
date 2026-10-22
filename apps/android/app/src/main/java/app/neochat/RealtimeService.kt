@@ -66,7 +66,16 @@ class RealtimeService : Service() {
         const val CHANNEL = "connection"
         const val ID = 7
 
-        fun enabled(ctx: Context) = Prefs.of(ctx).getBoolean("realtime", true)
+        fun enabled(ctx: Context): Boolean {
+            val prefs = Prefs.of(ctx)
+            return prefs.getBoolean("realtime", !prefs.getBoolean("push_registered", false))
+        }
+
+        /** A confirmed push registration replaces the default socket; an explicit choice is kept. */
+        fun pushRegistered(ctx: Context) {
+            Prefs.of(ctx).edit().putBoolean("push_registered", true).apply()
+            if (!enabled(ctx)) stop(ctx)
+        }
 
         /** Starts or stops the service to match the setting and the sign-in state. */
         fun sync(ctx: Context, done: () -> Unit = {}) {

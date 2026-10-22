@@ -38,6 +38,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private val password = FloatingField(ctx, "Пароль", password = true)
     private val code = FloatingField(ctx, "Код восстановления")
     private val loginCode = FloatingField(ctx, "Код из чата «NeoChat уведомления»")
+    private val email = EmailVerification(act, registration = true)
     private val error = ctx.label("", 14f, 400, Theme.Role.WARNING)
     private val submit = PillButton(ctx, "Войти")
     private val switchMode = textLink("")
@@ -80,6 +81,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         form.addView(heading, lp().apply { topMargin = dp(22) })
         form.addView(hint, lp().apply { topMargin = dp(8) })
         for (f in listOf(name, username, password, code, loginCode)) form.addView(f, lp().apply { topMargin = dp(12) })
+        form.addView(email, lp().apply { topMargin = dp(12) })
         name.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
         loginCode.visibility = View.GONE
         loginCode.edit.inputType = InputType.TYPE_CLASS_NUMBER
@@ -156,6 +158,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         mode = m
         code.visibility = if (m == Mode.RECOVER) View.VISIBLE else View.GONE
         name.visibility = if (m == Mode.REGISTER) View.VISIBLE else View.GONE
+        email.visibility = if (m == Mode.REGISTER) View.VISIBLE else View.GONE
         if (m != Mode.LOGIN) loginCode.visibility = View.GONE
         password.setLabel(if (m == Mode.RECOVER) "Новый пароль" else "Пароль")
         when (m) {
@@ -204,6 +207,8 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
             }
             Mode.REGISTER -> {
                 if (name.text.isBlank()) return showError("Введите имя")
+                if (email.verifiedTicket.isEmpty()) return showError("Подтвердите электронную почту по ссылке из письма")
+                p.put("email_ticket",email.verifiedTicket)
                 p.put("password", pass).put("display_name", name.text.trim())
                 "register"
             }

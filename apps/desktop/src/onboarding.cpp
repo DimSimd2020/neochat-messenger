@@ -1,6 +1,8 @@
 #include "onboarding.h"
 
 #include "core.h"
+#include "email.h"
+#include "sheet.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -132,6 +134,19 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_code = new ui::TextField(QStringLiteral("Код восстановления"));
     m_loginCode = new ui::TextField(QStringLiteral("Код из чата «NeoChat уведомления»"));
     m_loginCode->hide();
+    m_email = new ui::Button(QStringLiteral("Подтвердить электронную почту"),ui::Button::Secondary);
+    fl->addWidget(m_email);
+    connect(m_email,&QAbstractButton::clicked,this,[this] {
+        auto *sheet = new Sheet(this,QStringLiteral("Подтвердите электронную почту"));
+        auto *form = new EmailVerification(true,m_serverUrl);
+        sheet->body()->addWidget(form);
+        connect(form,&EmailVerification::verified,sheet,[this,sheet,form] {
+            m_emailTicket=form->verifiedTicket();
+            m_email->setText(QStringLiteral("Почта подтверждена"));
+            sheet->close();
+        });
+        sheet->open();
+    });
     for (auto *f : {m_username, m_password, m_code, m_loginCode}) {
         fl->addWidget(f);
         connect(f->edit(), &QLineEdit::returnPressed, this, &Onboarding::submit);
@@ -284,6 +299,7 @@ void Onboarding::setMode(int mode)
     m_switch->setAccessibleName(m_switch->text());
     m_recover->setVisible(mode == Login);
     m_password->setLabel(mode == Recover ? QStringLiteral("Новый пароль") : QStringLiteral("Пароль"));
+    m_email->setVisible(mode == Register);
     if (mode != Login)
         m_loginCode->hide();
     updateQr();
@@ -333,6 +349,8 @@ void Onboarding::submit()
     case Register:
         if (m_name->text().trimmed().isEmpty())
             return showError(QStringLiteral("Введите имя"));
+        if (m_emailTicket.isEmpty()) return showError(QStringLiteral("Подтвердите электронную почту по ссылке из письма"));
+        p["email_ticket"]=m_emailTicket;
         method = "register";
         p["password"] = password;
         p["display_name"] = m_name->text().trimmed();

@@ -261,6 +261,10 @@ impl Inner {
         match method {
             "status" => self.status(),
             "register" => self.register(p),
+            "registration_email_start" => Api::new(p["server"].as_str().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER)).call("POST", "/v1/accounts/email", None, Some(&json!({"email": s(p,"email")?}))),
+            "registration_email_status" => Api::new(p["server"].as_str().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER)).call("POST", "/v1/accounts/email/status", None, Some(&json!({"ticket": s(p,"ticket")?}))),
+            "email_status" => self.authed("GET", "/v1/accounts/current/email", None),
+            "email_start" => self.authed("POST", "/v1/accounts/current/email", Some(&json!({"email": s(p,"email")?}))),
             "login" => self.login(p),
             "recover" => self.recover(p),
             "logout" => self.logout(),
@@ -419,6 +423,7 @@ impl Inner {
         };
         let (blob, sig) = roster.sign(&account)?;
         let body = json!({
+            "email_ticket": p["email_ticket"].as_str().unwrap_or(""),
             "username": nickname,
             "display_name": display,
             "password": pw.auth,

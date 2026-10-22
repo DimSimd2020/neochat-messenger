@@ -70,7 +70,15 @@ public:
     }
     QJsonValue call(const QString &method, const QJsonObject &params = {}, QString *errorCode = nullptr)
     {
-        char *out = nc_call(m_core, method.toUtf8().constData(), QJsonDocument(params).toJson().constData());
+        QJsonObject request=params;
+        if (method=="register") {
+            const QJsonObject sent=call("registration_email_start",{{"server",params.value("server")},{"email",params.value("username").toString()+"@example.test"}}).toObject();
+            const QString ticket=sent.value("ticket").toString();
+            QElapsedTimer wait; wait.start();
+            while (wait.elapsed()<5000 && !call("registration_email_status",{{"server",params.value("server")},{"ticket",ticket}}).toObject().value("verified").toBool()) QTest::qWait(30);
+            request["email_ticket"]=ticket;
+        }
+        char *out = nc_call(m_core, method.toUtf8().constData(), QJsonDocument(request).toJson().constData());
         const QJsonObject res = QJsonDocument::fromJson(out).object();
         nc_free(out);
         if (res.contains("error")) {
@@ -317,6 +325,15 @@ void UiTest::registerAccount()
     field("Имя")->setText(QStringLiteral("Боб"));
     field("Никнейм")->setText(m_bobName);
     QTest::keyClicks(field("Пароль")->edit(), "correct horse battery");
+    button("Подтвердить электронную почту")->click();
+    QTRY_VERIFY(field("Электронная почта"));
+    field("Электронная почта")->setText(m_bobName+"@example.test");
+    button("Отправить ссылку")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(button("Я подтвердил почту"),10000);
+    QTRY_VERIFY_WITH_TIMEOUT([&] {
+        if (auto *check=button("Я подтвердил почту"); check && check->isEnabled()) check->click();
+        return button("Почта подтверждена")!=nullptr;
+    }(),10000);
     button("Создать аккаунт")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<ui::Toggle>([](ui::Toggle *tg) { return tg->text().startsWith("Я сохранил"); }), 15000);
     QAbstractButton *cont = button("Продолжить");

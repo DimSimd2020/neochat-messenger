@@ -85,6 +85,14 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pe) && pe.Code == "23505"
 }
 
+func constraintName(err error) string {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		return pe.ConstraintName
+	}
+	return ""
+}
+
 func (s *Server) incarnation(ctx context.Context) (string, error) {
 	var v string
 	err := s.db.QueryRow(ctx, `SELECT value FROM meta WHERE key='incarnation'`).Scan(&v)

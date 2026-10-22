@@ -156,6 +156,8 @@ class HomeScreen(private val act: MainActivity) : Screen {
     override val view: View = root
     private val column = LinearLayout(ctx)
     private val status = ctx.label("", 13.5f, 400, Theme.Role.WARNING)
+    private val emailReminder = PillButton(ctx, "Привяжите электронную почту", primary = false)
+    private var emailPrompted = false
     private val sections = FrameLayout(ctx)
     private val nav = BottomNav(ctx, listOf(R.drawable.ic_chat to "Чаты", R.drawable.ic_people to "Контакты", R.drawable.ic_profile to "Профиль"))
     private var tab = 0
@@ -202,6 +204,9 @@ class HomeScreen(private val act: MainActivity) : Screen {
         root.addView(BackgroundView(ctx), FrameLayout.LayoutParams(MATCH, MATCH))
         root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
         column.addView(header(), lp())
+        emailReminder.visibility = View.GONE
+        emailReminder.setOnClickListener { showEmailBinding(act) }
+        column.addView(emailReminder,lp().apply { setMargins(dp(20),0,dp(20),dp(8)) })
         status.visibility = View.GONE
         status.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         column.addView(status, lp().apply { setMargins(dp(20), dp(2), dp(20), dp(6)) })
@@ -616,13 +621,27 @@ class HomeScreen(private val act: MainActivity) : Screen {
         return false
     }
 
+    private fun refreshEmail() {
+        CoreClient.call("email_status") { value,error ->
+            if (error != null || value !is JSONObject) return@call
+            val missing = !value.optBoolean("verified")
+            emailReminder.visibility = if (missing) View.VISIBLE else View.GONE
+            if (missing && !emailPrompted && view.isShown) {
+                emailPrompted = true
+                showEmailBinding(act)
+            }
+        }
+    }
+
     override fun onShown() {
+        refreshEmail()
         showArchiveEntry(false)
         root.removeCallbacks(refresh)
         root.post(refresh)
     }
 
     override fun onEvent(ev: JSONObject) {
+        if (ev.str("type") == "email_changed") refreshEmail()
         when (ev.str("type")) {
             "connection" -> setConnection(ev.str("state"))
             "conversations_changed", "contacts_changed", "identity_changed", "sync_reset", "messages_changed" -> {
