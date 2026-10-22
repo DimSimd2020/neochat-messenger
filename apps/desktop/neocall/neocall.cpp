@@ -10,7 +10,9 @@
 #include <string>
 #include <vector>
 
+#include "api/audio/audio_processing.h"
 #include "api/audio/builtin_audio_processing_builder.h"
+#include "api/audio_options.h"
 #include "api/audio/create_audio_device_module.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
@@ -114,8 +116,20 @@ struct Engine {
         deps.adm = adm;
         deps.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
         deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-        // Echo cancellation, noise suppression and gain control.
-        deps.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+        // Analog gain control drives the Windows mic volume. After about two
+        // seconds it decides the level is wrong and turns the mic down to silence.
+        webrtc::AudioProcessing::Config apm;
+        apm.pipeline.multi_channel_render = false;
+        apm.pipeline.multi_channel_capture = false;
+        apm.high_pass_filter.enabled = true;
+        apm.echo_canceller.enabled = true;
+        apm.noise_suppression.enabled = true;
+        apm.noise_suppression.level = webrtc::AudioProcessing::Config::NoiseSuppression::kModerate;
+        apm.gain_controller1.enabled = false;
+        apm.gain_controller2.enabled = true;
+        apm.gain_controller2.input_volume_controller.enabled = false;
+        apm.gain_controller2.adaptive_digital.enabled = true;
+        deps.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>(apm);
         deps.video_encoder_factory = std::make_unique<webrtc::VideoEncoderFactoryTemplate<
             webrtc::LibvpxVp8EncoderTemplateAdapter, webrtc::LibvpxVp9EncoderTemplateAdapter>>();
         deps.video_decoder_factory = std::make_unique<webrtc::VideoDecoderFactoryTemplate<
@@ -154,14 +168,17 @@ struct Engine {
         int in = findDevice(true, input), out = findDevice(false, output);
         worker->BlockingCall([&] {
             if (!adm) return;
-            if (!adm->Recording() && !adm->RecordingIsInitialized()) {
-                if (in >= 0) adm->SetRecordingDevice(uint16_t(in));
-                else adm->SetRecordingDevice(webrtc::AudioDeviceModule::kDefaultDevice);
-            }
-            if (!adm->Playing() && !adm->PlayoutIsInitialized()) {
-                if (out >= 0) adm->SetPlayoutDevice(uint16_t(out));
-                else adm->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice);
-            }
+            // A previous call can leave playout initialized in stereo. Voice is
+            // mono; the stereo session plays a burst of noise and then stops.
+            if (adm->Playing()) adm->StopPlayout();
+            if (adm->Recording()) adm->StopRecording();
+            adm->EnableBuiltInAEC(false);
+            adm->SetStereoPlayout(false);
+            adm->SetStereoRecording(false);
+            if (in >= 0) adm->SetRecordingDevice(uint16_t(in));
+            else adm->SetRecordingDevice(webrtc::AudioDeviceModule::kDefaultDevice);
+            if (out >= 0) adm->SetPlayoutDevice(uint16_t(out));
+            else adm->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice);
             bool muted = false;
             if (adm->SpeakerMute(&muted) == 0 && muted)
                 adm->SetSpeakerMute(false);
@@ -426,8 +443,20 @@ struct neocall : public webrtc::PeerConnectionObserver {
     }
     void OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> t) override {
         auto track = t->receiver()->track();
-        if (track && track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind)
+        if (!track) return;
+        if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind)
             static_cast<webrtc::VideoTrackInterface *>(track.get())->AddOrUpdateSink(&remote, webrtc::VideoSinkWants());
+        if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
+            track->set_enabled(true);
+            auto adm = Engine::get().adm;
+            Engine::get().worker->BlockingCall([adm] {
+                if (!adm) return;
+                if (!adm->PlayoutIsInitialized()) adm->InitPlayout();
+                if (!adm->Playing()) adm->StartPlayout();
+                bool muted = false;
+                if (adm->SpeakerMute(&muted) == 0 && muted) adm->SetSpeakerMute(false);
+            });
+        }
     }
 };
 
@@ -496,6 +525,12 @@ NEOCALL_API neocall *neocall_create(const neocall_config *cfg, neocall_event_fn 
     }
     c->pc = pc.MoveValue();
     webrtc::AudioOptions ao;
+    // Keep echo cancellation. Do not let the engine turn analog mic-gain back on:
+    // that is the control which silences the Windows microphone after a moment.
+    ao.echo_cancellation = true;
+    ao.auto_gain_control = false;
+    ao.noise_suppression = true;
+    ao.highpass_filter = true;
     c->audio = e.factory->CreateAudioTrack("audio", e.factory->CreateAudioSource(ao).get());
     if (cfg->video) c->startCamera();
     return c;
