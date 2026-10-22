@@ -63,6 +63,9 @@ func TestNativeEmailFlow(t *testing.T) {
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Run(); err != nil {
+		var prepared, sent int
+		_ = s.db.QueryRow(context.Background(), `SELECT count(*),count(sent_at) FROM email_links`).Scan(&prepared, &sent)
+		t.Logf("test mailbox proofs prepared: %d, delivered: %d", prepared, sent)
 		t.Fatal("native email integration failed")
 	}
 }

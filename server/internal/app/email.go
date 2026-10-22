@@ -2,6 +2,8 @@ package app
 
 import (
 	"crypto/sha256"
+	_ "embed"
+	"encoding/base64"
 	"errors"
 	"html/template"
 	"net/http"
@@ -151,12 +153,25 @@ func (s *Server) handleEmailStatus(w http.ResponseWriter, r *http.Request, a *au
 	writeJSON(w, 200, map[string]any{"email": value, "verified": email != nil})
 }
 
-var emailPage = template.Must(template.New("email").Parse(`<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Подтверждение почты — NeoChat</title><body><main><h1>NeoChat</h1><h2>{{.Title}}</h2><p>{{.Message}}</p>{{if .Token}}<form method="post" action="/v1/accounts/email/confirm"><input type="hidden" name="t" value="{{.Token}}"><button type="submit">Подтвердить привязку почты</button></form>{{end}}</main></body></html>`))
+//go:embed email_page.html
+var emailPageHTML string
+
+//go:embed email_logo.png
+var emailLogo []byte
+
+var emailPage = template.Must(template.New("email").Parse(emailPageHTML))
+
+type emailPageData struct {
+	Title, Message, Token, Address, Nonce string
+	Logo                                  template.URL
+	Success                               bool
+}
 
 func (s *Server) handleEmailConfirm(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	nonce := randomToken()
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'nonce-"+nonce+"'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	token := r.URL.Query().Get("t")
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 2<<10)
@@ -166,7 +181,7 @@ func (s *Server) handleEmailConfirm(w http.ResponseWriter, r *http.Request) {
 		}
 		token = r.PostForm.Get("t")
 	}
-	data := struct{ Title, Message, Token string }{Title: "Ссылка недействительна", Message: "Срок ссылки истёк или она уже использована. Вернитесь в NeoChat и отправьте новое письмо."}
+	data := emailPageData{Title: "Ссылка больше не действует", Message: "Возможно, вы уже подтвердили почту или срок ссылки истёк. Вернитесь в NeoChat, проверьте подтверждение или запросите новое письмо.", Nonce: nonce, Logo: template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(emailLogo))}
 	if len(token) != 43 {
 		w.WriteHeader(400)
 		_ = emailPage.Execute(w, data)
@@ -180,10 +195,11 @@ func (s *Server) handleEmailConfirm(w http.ResponseWriter, r *http.Request) {
 		_ = emailPage.Execute(w, data)
 		return
 	}
-	data.Title = "Подтвердите электронную почту"
-	data.Message = "Почта будет использована для нового аккаунта NeoChat. После подтверждения вернитесь в приложение и продолжите регистрацию."
+	data.Title = "Подтвердите почту"
+	data.Message = "После подтверждения вернитесь в NeoChat, чтобы продолжить создание аккаунта."
+	data.Address = email
 	if owner != nil {
-		data.Message = "Почта будет привязана к аккаунту @" + nickname + ". Если вы этого не запрашивали, закройте страницу."
+		data.Message = "Привяжем этот адрес к вашему аккаунту @" + nickname + "."
 	}
 	data.Token = token
 	if r.Method == http.MethodPost {
@@ -220,8 +236,9 @@ func (s *Server) handleEmailConfirm(w http.ResponseWriter, r *http.Request) {
 			data.Message = "Ссылка истекла, устройство отозвано или адрес уже используется. Вернитесь в NeoChat и повторите действие."
 			w.WriteHeader(409)
 		} else {
+			data.Success = true
 			data.Title = "Почта подтверждена"
-			data.Message = "Вернитесь в NeoChat. Адрес подтверждён; пароль и ключи шифрования не изменились."
+			data.Message = "Вернитесь в приложение и нажмите «Я подтвердил почту», чтобы продолжить."
 		}
 	}
 	_ = emailPage.Execute(w, data)

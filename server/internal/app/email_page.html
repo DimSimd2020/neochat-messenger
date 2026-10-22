@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>{{.Title}} — NeoChat</title>
+  <style nonce="{{.Nonce}}">
+    :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#eef1f7;background:#101b30;color-scheme:dark;--muted:#b3c2d9;--line:#ffffff16;--card:#192943e6;--accent:#98b9ff;--button:#4169cf;--icon:#263f68}
+    *{box-sizing:border-box}body{margin:0;min-height:100svh;display:grid;place-items:center;padding:40px 20px;background:radial-gradient(ellipse at 85% 0%,#234d744d,transparent 65%),radial-gradient(ellipse at 0% 100%,#184c5e44,transparent 60%)}
+    main{width:100%;max-width:480px}header{display:flex;align-items:center;gap:12px;margin:0 8px 28px;font-size:24px;font-weight:650;letter-spacing:-.6px}header img{width:40px;height:40px;object-fit:contain}
+    article{padding:36px;border:1px solid var(--line);border-radius:28px;background:var(--card);box-shadow:0 24px 80px #050d1c30;overflow-wrap:anywhere}
+    .symbol{width:64px;height:64px;display:grid;place-items:center;background:var(--icon);border-radius:21px;color:var(--accent);margin-bottom:28px}.symbol svg{width:32px;height:32px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+    h1{font-size:32px;line-height:1.16;letter-spacing:-.8px;font-weight:650;margin:0 0 16px}p{font-size:16px;line-height:1.6;margin:0;color:var(--muted)}.address{margin:22px 0 0;padding:14px 16px;border:1px solid var(--line);border-radius:12px;color:inherit;font-weight:500;font-size:15px}
+    form{margin-top:28px}button{font:inherit;font-weight:600;line-height:1.35;color:#fff;background:var(--button);border:0;border-radius:14px;padding:16px 20px;min-height:54px;width:100%;cursor:pointer;transition:background .16s,transform .14s}button:hover{background:#527ce3}button:active{transform:scale(.985)}button:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
+    .hint{font-size:13px;line-height:1.55;margin-top:20px}.done{margin-top:28px;border-top:1px solid var(--line);padding-top:20px;display:flex;align-items:center;gap:10px;font-size:14px;color:var(--muted)}.done svg{flex:none;width:18px;height:18px;stroke:var(--accent);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}footer{margin:24px 8px 0;font-size:12px;line-height:1.5;color:var(--muted)}
+    @media(max-width:400px){body{padding:28px 16px}article{padding:28px 24px;border-radius:24px}h1{font-size:29px}header{margin-bottom:24px}}
+    @media(prefers-color-scheme:light){:root{color:#1c2638;background:#e9eff9;color-scheme:light;--muted:#53617a;--line:#1a36551a;--card:#ffffffed;--accent:#2456b8;--button:#315dcf;--icon:#e8efff}body{background:radial-gradient(ellipse at 100% 0%,#bcd6ff66,transparent 70%)}article{box-shadow:0 24px 80px #2746790d}}
+    @media(prefers-reduced-motion:reduce){button{transition:none}button:active{transform:none}}
+  </style>
+</head>
+<body>
+<main>
+  <header><img src="{{.Logo}}" alt="" width="40" height="40">NeoChat</header>
+  <article aria-labelledby="title">
+    <div class="symbol" aria-hidden="true">
+      <svg viewBox="0 0 32 32">{{if .Success}}<path d="m8 16 5 5 11-11"/>{{else if .Token}}<rect x="4" y="7" width="24" height="18" rx="4"/><path d="m5 9 9 7a3 3 0 0 0 4 0l9-7"/>{{else}}<circle cx="16" cy="16" r="12"/><path d="M16 9v8m0 5h.01"/>{{end}}</svg>
+    </div>
+    <h1 id="title">{{.Title}}</h1>
+    <p>{{.Message}}</p>
+    {{if .Address}}<p class="address">{{.Address}}</p>{{end}}
+    {{if .Token}}
+    <form method="post" action="/v1/accounts/email/confirm">
+      <input type="hidden" name="t" value="{{.Token}}">
+      <button type="submit">Подтвердить почту</button>
+    </form>
+    <p class="hint">Если вы не запрашивали подтверждение, просто закройте эту страницу.</p>
+    {{else if .Success}}
+    <div class="done"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5h4v14h-4M5 12h10m-6-4-4 4 4 4"/></svg>Эту страницу можно закрыть</div>
+    {{end}}
+  </article>
+  <footer>Подтверждение электронной почты · NeoChat</footer>
+</main>
+</body>
+</html>

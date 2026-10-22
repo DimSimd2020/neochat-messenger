@@ -107,6 +107,13 @@ func TestEmailRegistrationProof(t *testing.T) {
 	if st := confirmTestEmail(t, link, true); st != 200 {
 		t.Fatal("confirmation failed")
 	}
+	// A failed registration must leave the proof usable for a corrected nickname.
+	register(t, s, ts, "mail_taken")
+	req.Username = "mail_taken"
+	if st, _ := c.do("POST", "/v1/accounts", req, nil); st != 409 {
+		t.Fatal("duplicate nickname did not reject registration")
+	}
+	req.Username = "mail_alice"
 	var out tokensOut
 	if st, _ := c.do("POST", "/v1/accounts", req, &out); st != 201 {
 		t.Fatal("verified registration failed")

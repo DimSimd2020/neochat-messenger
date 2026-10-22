@@ -34,7 +34,10 @@ final class OnboardingUITests: XCTestCase {
         email.typeText(username+"@example.test")
         app.buttons["Отправить ссылку"].tap()
         let checked = app.buttons["Я подтвердил почту"]
-        XCTAssertTrue(checked.waitForExistence(timeout:10))
+        guard checked.waitForExistence(timeout:10) else {
+            shot("02-email-send-failed")
+            return XCTFail("Email confirmation action did not appear")
+        }
         checked.tap()
         XCTAssertTrue(app.staticTexts["Почта подтверждена"].waitForExistence(timeout:10))
         shot("02-register")

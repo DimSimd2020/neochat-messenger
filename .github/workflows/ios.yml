@@ -107,7 +107,7 @@ jobs:
           path: apps/ios/NeoChat-unsigned.ipa
           retention-days: 30
 
-  # Runs the app on an iOS Simulator and registers a fresh account on the production server.
+  # Runs the app with a local API and a test-only mailbox on an iOS Simulator.
   # Manual and opt-in: it needs a second macOS runner.
   simulator:
     if: github.event_name == 'workflow_dispatch' && inputs.run_tests

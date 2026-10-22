@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -63,11 +64,18 @@ func main() {
 		if err != nil {
 			fatal(log, "email configuration", err)
 		}
+		emailBaseURL := os.Getenv("NEOCHAT_EMAIL_BASE_URL")
+		if email != nil {
+			origin, err := url.Parse(emailBaseURL)
+			if err != nil || origin.Scheme != "https" || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
+				fatal(log, "email configuration", fmt.Errorf("NEOCHAT_EMAIL_BASE_URL must be an HTTPS origin"))
+			}
+		}
 		srv := app.New(db, app.Config{
 			DataDir: dataDir, ArgonMemoryKiB: uint32(mem), ArgonParallel: par,
 			TurnSecret: os.Getenv("NEOCHAT_TURN_SECRET"), TurnURIs: strings.Fields(os.Getenv("NEOCHAT_TURN_URIS")),
 			FCM:   fcm,
-			Email: email, EmailBaseURL: os.Getenv("NEOCHAT_EMAIL_BASE_URL"),
+			Email: email, EmailBaseURL: emailBaseURL,
 		}, log)
 		go srv.RunCleanup(ctx)
 		go srv.RunPush(ctx)
