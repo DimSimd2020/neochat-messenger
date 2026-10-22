@@ -31,7 +31,7 @@ protected:
     void paintEvent(QPaintEvent *) override;
 
 private:
-    enum Mode { Login, Register, Recover };
+    enum Mode { Login, Register, Recover, ResetRequest, ResetComplete };
     void setMode(int mode);
     void submit();
     void showError(const QString &text);
@@ -49,12 +49,14 @@ private:
     ui::TextField *m_username;
     ui::TextField *m_password;
     ui::TextField *m_code;
+    ui::TextField *m_resetToken;
     ui::TextField *m_loginCode;
     ui::Button *m_email;
     QString m_emailTicket;
     ui::Label *m_error;
     ui::Button *m_submit;
     ui::Button *m_switch;
+    ui::Button *m_forgot;
     ui::Button *m_recover;
     // recovery code page
     ui::Label *m_recoveryCode;

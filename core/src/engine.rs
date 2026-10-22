@@ -266,6 +266,8 @@ impl Inner {
             "email_status" => self.authed("GET", "/v1/accounts/current/email", None),
             "email_start" => self.authed("POST", "/v1/accounts/current/email", Some(&json!({"email": s(p,"email")?}))),
             "login" => self.login(p),
+            "password_reset_request" => self.password_reset_request(p),
+            "password_reset_complete" => self.password_reset_complete(p),
             "recover" => self.recover(p),
             "logout" => self.logout(),
             "qr_login_start" => self.qr_login_start(p),
@@ -485,19 +487,25 @@ impl Inner {
         self.wake();
     }
 
+    /// Resolves nickname or verified email to KDF salt and canonical username.
+    fn password_salt(server: &str, login: &str) -> Result<(String, String)> {
+        match Api::new(server).call("POST", "/v1/accounts/password-salt", None, Some(&json!({"login": login, "username": login}))) {
+            Ok(v) => Ok((s(&v, "salt")?.to_string(), v["username"].as_str().unwrap_or(login).to_string())),
+            Err(Error::Api { status: 404, .. }) => Ok((login.to_string(), login.to_string())),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Signs in with the password. A device that already has keys for this account
     /// proves itself with its auth key; a new device restores the account identity
     /// from the password-protected backup, adds itself to the roster and imports the
     /// history. With two-factor sign-in the server first asks for a code that it sends
     /// to the account's other devices ("code_required").
+    /// `username` may be a nickname or the account's verified email.
     fn login(&self, p: &Value) -> Result<Value> {
         let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
-        let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
-        let salt = match Api::new(&server).call("POST", "/v1/accounts/password-salt", None, Some(&json!({"username": username}))) {
-            Ok(v) => s(&v, "salt")?.to_string(),
-            Err(Error::Api { status: 404, .. }) => username.clone(),
-            Err(e) => return Err(e),
-        };
+        let login = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
+        let (salt, username) = Self::password_salt(&server, &login)?;
         let pw = backup::derive(&salt, s(p, "password")?)?;
         let (device_id, stored_user, has_identity) = {
             let db = self.db();
@@ -505,7 +513,7 @@ impl Inner {
         };
         let device_id = match (device_id, stored_user, has_identity) {
             (Some(d), Some(u), true) if u.to_lowercase() == username => d,
-            _ => return self.login_new_device(&server, &username, &pw, p),
+            _ => return self.login_new_device(&server, &login, &username, &pw, p),
         };
         let ts = (now_ms() / 1000).to_string();
         let sig = keys::login_signature(&self.db().conn, &username, &device_id, &ts)?;
@@ -513,11 +521,11 @@ impl Inner {
             "POST",
             "/v1/sessions",
             None,
-            Some(&json!({"username": username, "password": pw.auth, "device_id": device_id, "timestamp": ts, "signature": b64(&sig)})),
+            Some(&json!({"username": login, "password": pw.auth, "device_id": device_id, "timestamp": ts, "signature": b64(&sig)})),
         ) {
             // The server no longer knows this device (revoked, or the account was recreated):
             // sign in as a new device; a wrong password fails there with the same error.
-            Err(e) if e.is_api("invalid_credentials") => return self.login_new_device(&server, &username, &pw, p),
+            Err(e) if e.is_api("invalid_credentials") => return self.login_new_device(&server, &login, &username, &pw, p),
             r => r?,
         };
         {
@@ -526,19 +534,77 @@ impl Inner {
             kv_set(&db.conn, "backup_key", &pw.backup[..])?;
             self.store_tokens(&db.conn, &out)?;
         }
+        // After a password reset the server-side key_backup may still be sealed with the
+        // old password; re-upload from this already-unlocked device.
+        let _ = self.upload_key_backup(&pw);
         self.after_login();
         Ok(Value::Null)
     }
 
-    fn login_new_device(&self, server: &str, username: &str, pw: &backup::PasswordKeys, p: &Value) -> Result<Value> {
+    fn upload_key_backup(&self, pw: &backup::PasswordKeys) -> Result<()> {
+        let Some(account) = keys::account_keypair(&self.db().conn)? else {
+            return Ok(());
+        };
+        self.authed(
+            "PUT",
+            "/v1/accounts/current/key-backup",
+            Some(&json!({"key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?)})),
+        )?;
+        Ok(())
+    }
+
+    fn password_reset_request(&self, p: &Value) -> Result<Value> {
+        let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
+        let login = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
+        Api::new(&server).call("POST", "/v1/accounts/password-reset/request", None, Some(&json!({"login": login})))
+    }
+
+    /// Completes email password reset: only the login password changes.
+    fn password_reset_complete(&self, p: &Value) -> Result<Value> {
+        let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
+        let token = s(p, "token")?.trim().to_string();
+        if token.len() != 43 {
+            return Err(Error::Invalid("Введите код из письма".into()));
+        }
+        let prep = Api::new(&server).call("POST", "/v1/accounts/password-reset/prepare", None, Some(&json!({"token": token})))?;
+        let salt = s(&prep, "salt")?.to_string();
+        let username = s(&prep, "username")?.to_string();
+        let pw = backup::derive(&salt, s(p, "new_password")?)?;
+        Api::new(&server).call(
+            "POST",
+            "/v1/accounts/password-reset/complete",
+            None,
+            Some(&json!({"token": token, "new_password": pw.auth})),
+        )?;
+        // If this installation already holds the account keys, refresh the sealed backup now.
+        let same = kv_get_str(&self.db().conn, "username")?.map(|u| u.eq_ignore_ascii_case(&username)).unwrap_or(false);
+        if same && kv_get(&self.db().conn, "account_identity")?.is_some() {
+            kv_set(&self.db().conn, "backup_key", &pw.backup[..])?;
+            let _ = self.upload_key_backup(&pw);
+            let _ = self.upload_history(&pw.backup);
+        }
+        Ok(json!({"status": "ok", "username": username}))
+    }
+
+    fn login_new_device(&self, server: &str, login: &str, username: &str, pw: &backup::PasswordKeys, p: &Value) -> Result<Value> {
         let api = Api::new(server);
-        let mut start = json!({"username": username, "password": pw.auth});
+        let mut start = json!({"username": login, "password": pw.auth});
         if let Some(code) = p["code"].as_str().map(str::trim).filter(|c| !c.is_empty()) {
             start["code"] = code.into();
         }
         let st = api.call("POST", "/v1/devices/new/start", None, Some(&start))?;
         let account_key = unb64(s(&st, "account_identity_key")?)?;
-        let account = IdentityKeyPair::try_from(backup::open_keys(&pw.backup, &unb64(s(&st, "key_backup")?)?)?.as_slice())?;
+        let opened = match backup::open_keys(&pw.backup, &unb64(s(&st, "key_backup")?)?) {
+            Ok(v) => v,
+            // Password was accepted but backup is still sealed with an older password
+            // (after email reset before another device re-uploaded). Use QR or an existing device.
+            Err(_) => {
+                return Err(Error::Invalid(
+                    "Пароль принят, но копия ключей ещё со старым паролем. Войдите с устройства, где вы уже в аккаунте, или по QR-коду.".into(),
+                ))
+            }
+        };
+        let account = IdentityKeyPair::try_from(opened.as_slice())?;
         if account.identity_key().serialize()[..] != account_key[..] {
             return Err(Error::Crypto("Копия ключей не подходит к аккаунту".into()));
         }

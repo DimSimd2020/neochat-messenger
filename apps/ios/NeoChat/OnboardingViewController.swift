@@ -3,7 +3,7 @@ import UIKit
 /// Sign in, registration and recovery. On a new phone the password restores the account
 /// keys and the history from the password-protected copy on the server.
 final class OnboardingViewController: UIViewController, UITextFieldDelegate {
-    private enum Mode { case login, register, recover }
+    private enum Mode { case login, register, recover, resetRequest, resetComplete }
 
     private let done: () -> Void
     private var mode = Mode.login
@@ -14,14 +14,16 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private let heading = label("", 28, .bold)
     private let hint = label("", 15, color: Theme.muted)
     private let name = Field("Имя")
-    private let username = Field("Никнейм")
+    private let username = Field("Никнейм или почта")
     private let password = Field("Пароль", secure: true)
     private let code = Field("Код восстановления")
+    private let resetToken = Field("Код из письма")
     private let loginCode = Field("Код из чата «NeoChat уведомления»")
     private let email = EmailVerificationView(registration:true)
     private let error = label("", 14, color: Theme.warning)
     private let submit = PillButton("Войти")
     private let switchMode = LinkButton("Создать аккаунт")
+    private let forgotLink = LinkButton("Забыли пароль?")
     private let recoverLink = LinkButton("Восстановить доступ", color: Theme.muted)
     private var secureCover: UIView?
 
@@ -74,9 +76,9 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func showForm() {
         reset()
         setSecure(false)
-        for v in [heading, hint, name, username, password, code, loginCode, email, error, submit, switchMode, recoverLink] { stack.addArrangedSubview(v) }
+        for v in [heading, hint, name, username, password, code, resetToken, loginCode, email, error, submit, switchMode, forgotLink, recoverLink] { stack.addArrangedSubview(v) }
         stack.setCustomSpacing(18, after: error)
-        for f in [name, username, password, code, loginCode] { f.delegate = self }
+        for f in [name, username, password, code, resetToken, loginCode] { f.delegate = self }
         name.autocapitalizationType = .words
         name.textContentType = .givenName
         loginCode.keyboardType = .numberPad
@@ -85,6 +87,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         username.textContentType = .username
         submit.addTarget(self, action: #selector(onSubmit), for: .touchUpInside)
         switchMode.addTarget(self, action: #selector(onSwitch), for: .touchUpInside)
+        forgotLink.addTarget(self, action: #selector(onForgot), for: .touchUpInside)
         recoverLink.addTarget(self, action: #selector(onRecover), for: .touchUpInside)
         setMode(mode)
     }
@@ -92,18 +95,31 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func setMode(_ m: Mode) {
         mode = m
         code.isHidden = m != .recover
+        resetToken.isHidden = m != .resetComplete
         name.isHidden = m != .register
         email.isHidden = m != .register
+        password.isHidden = m == .resetRequest
         if m != .login { loginCode.isHidden = true }
-        password.placeholder = m == .recover ? "Новый пароль" : "Пароль"
+        let nickOrMail = m == .login || m == .resetRequest || m == .resetComplete
+        username.placeholder = nickOrMail ? "Никнейм или почта" : "Никнейм"
+        username.accessibilityLabel = username.placeholder
+        password.placeholder = (m == .recover || m == .resetComplete) ? "Новый пароль" : "Пароль"
         password.accessibilityLabel = password.placeholder
         password.textContentType = m == .login ? .password : .newPassword
         switch m {
         case .login: set("Вход", "", "Войти")
         case .register: set("Регистрация", "Пароль — не меньше 8 символов.", "Создать аккаунт")
         case .recover: set("Восстановление доступа", "Остальные устройства будут отключены, переписка не перенесётся.", "Восстановить")
+        case .resetRequest: set("Сброс пароля", "Ссылка уйдёт на привязанную почту. Пароль входа сменится; ключи и история на ваших устройствах сохранятся.", "Отправить ссылку")
+        case .resetComplete: set("Новый пароль", "Введите код со страницы из письма и новый пароль. Это не восстановление аккаунта.", "Сменить пароль")
         }
-        switchMode.setTitle(m == .login ? "Создать аккаунт" : "Уже есть аккаунт? Войти", for: .normal)
+        switch m {
+        case .resetRequest, .resetComplete: switchMode.setTitle("Назад ко входу", for: .normal)
+        case .login: switchMode.setTitle("Создать аккаунт", for: .normal)
+        default: switchMode.setTitle("Уже есть аккаунт? Войти", for: .normal)
+        }
+        switchMode.isHidden = false
+        forgotLink.isHidden = m != .login
         recoverLink.isHidden = m != .login
         showError("")
     }
@@ -121,11 +137,19 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         if !t.isEmpty { UIAccessibility.post(notification: .announcement, argument: t) }
     }
 
-    @objc private func onSwitch() { if !busy { setMode(mode == .login ? .register : .login) } }
+    @objc private func onSwitch() {
+        guard !busy else { return }
+        switch mode {
+        case .resetRequest, .resetComplete: setMode(.login)
+        case .login: setMode(.register)
+        default: setMode(.login)
+        }
+    }
+    @objc private func onForgot() { if !busy { setMode(.resetRequest) } }
     @objc private func onRecover() { if !busy { setMode(.recover) } }
 
     func textFieldShouldReturn(_ f: UITextField) -> Bool {
-        let order = [name, username, password, code, loginCode].filter { !$0.isHidden }
+        let order = [name, username, password, code, resetToken, loginCode].filter { !$0.isHidden }
         if let i = order.firstIndex(where: { $0 === f }), i + 1 < order.count { order[i + 1].becomeFirstResponder() } else { onSubmit() }
         return true
     }
@@ -141,9 +165,11 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         var user = (username.text ?? "").trimmingCharacters(in: .whitespaces)
         if user.hasPrefix("@") { user.removeFirst() }
         let pass = password.text ?? ""
-        if user.isEmpty { return showError("Введите никнейм") }
-        if pass.isEmpty { return showError("Введите пароль") }
-        if mode != .login && pass.count < 8 { return showError("Пароль — не меньше 8 символов") }
+        if user.isEmpty {
+            return showError(mode == .login || mode == .resetRequest || mode == .resetComplete ? "Введите никнейм или почту" : "Введите никнейм")
+        }
+        if mode != .resetRequest && pass.isEmpty { return showError("Введите пароль") }
+        if mode != .login && mode != .resetRequest && pass.count < 8 { return showError("Пароль — не меньше 8 символов") }
         var p: JSON = registrationServerParams(["username": user, "device_name": UIDevice.current.name, "platform": "ios"])
         let method: String
         switch mode {
@@ -165,6 +191,14 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
             method = "recover"
             p["new_password"] = pass
             p["recovery_code"] = c
+        case .resetRequest:
+            method = "password_reset_request"
+        case .resetComplete:
+            let token = (resetToken.text ?? "").trimmingCharacters(in: .whitespaces)
+            if token.count != 43 { return showError("Введите код из письма") }
+            method = "password_reset_complete"
+            p["token"] = token
+            p["new_password"] = pass
         }
         showError("")
         view.endEditing(true)
@@ -182,12 +216,30 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
                 }
                 self.showError(e.message)
             case .success(let v):
-                self.password.text = ""
-                self.code.text = ""
-                self.loginCode.text = ""
-                self.loginCode.isHidden = true
-                let res = v as? JSON ?? [:]
-                if m == .register || m == .recover { self.showRecovery(res.str("recovery_code")) } else { self.done() }
+                switch m {
+                case .resetRequest:
+                    self.resetToken.text = ""
+                    self.setMode(.resetComplete)
+                    self.showError("Если почта привязана, ссылка отправлена. Откройте письмо и введите код ниже.")
+                case .resetComplete:
+                    self.password.text = ""
+                    self.resetToken.text = ""
+                    self.setMode(.login)
+                    self.showError("Пароль изменён. Войдите с новым паролем.")
+                case .register, .recover:
+                    self.password.text = ""
+                    self.code.text = ""
+                    self.loginCode.text = ""
+                    self.loginCode.isHidden = true
+                    let res = v as? JSON ?? [:]
+                    self.showRecovery(res.str("recovery_code"))
+                case .login:
+                    self.password.text = ""
+                    self.code.text = ""
+                    self.loginCode.text = ""
+                    self.loginCode.isHidden = true
+                    self.done()
+                }
             }
         }
     }

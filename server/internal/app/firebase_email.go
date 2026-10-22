@@ -15,8 +15,9 @@ import (
 	"google.golang.org/api/option"
 )
 
-// EmailSender delivers a private continuation token only to the addressed mailbox.
-// The app receives a separate polling ticket, never this URL or a Firebase token.
+// EmailSender delivers a private continueUrl only to the addressed mailbox via Firebase
+// Authentication OOB (VERIFY_EMAIL). Used for registration/link confirmation and for
+// password-reset continueUrl. No SMTP. The app never receives this URL or a Firebase token.
 type EmailSender interface {
 	SendVerification(context.Context, string, string) error
 }
@@ -77,7 +78,15 @@ func (f *FirebaseEmailSender) SendVerification(ctx context.Context, email, conti
 	if err != nil {
 		return errors.New("cannot prepare Firebase email verification")
 	}
-	// A Firebase session exists only here, to send the verification email.
+	// Password-reset and re-link reuse this same VERIFY_EMAIL delivery. Firebase
+	// skips OOB for already-verified addresses, so clear the flag before send.
+	// NeoChat ownership is proven by our own link_hash, not by Firebase emailVerified.
+	if user.EmailVerified {
+		if _, err := f.auth.UpdateUser(ctx, user.UID, (&auth.UserToUpdate{}).EmailVerified(false)); err != nil {
+			return errors.New("cannot prepare Firebase email delivery")
+		}
+	}
+	// A Firebase session exists only here, to deliver the continueUrl.
 	// NeoChat passwords, recovery keys and sessions never go to Firebase.
 	token, err := f.auth.CustomToken(ctx, user.UID)
 	if err != nil {

@@ -66,23 +66,27 @@ func (s *Server) handleNewDeviceStart(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
-	if !s.limits.allow("login-ip:"+clientIP(r), 30, 15*time.Minute) || !s.limits.allow("login-user:"+req.Username, 10, 15*time.Minute) {
+	login := normalizeLogin(req.Username)
+	if !s.limits.allow("login-ip:"+clientIP(r), 30, 15*time.Minute) || !s.limits.allow("login-user:"+login, 10, 15*time.Minute) {
 		s.fail(w, r, errRateLimited(time.Minute))
 		return
 	}
 	invalid := errf(401, "invalid_credentials", "Неверное имя пользователя или пароль")
-	var userID, pwHash string
-	var twoFactor bool
-	var backup, accountKey, blob, sig []byte
-	var rosterRev int64
-	err := s.db.QueryRow(r.Context(), `SELECT id, password_hash, two_factor, key_backup, account_identity_key, roster_revision, roster_blob, roster_sig FROM users WHERE username=$1`,
-		req.Username).Scan(&userID, &pwHash, &twoFactor, &backup, &accountKey, &rosterRev, &blob, &sig)
-	if errors.Is(err, pgx.ErrNoRows) {
+	userID, _, pwHash, found, err := s.lookupVerifiedLogin(r, login)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if !found {
 		s.checkPassword(r.Context(), dummyHash, req.Password)
 		s.fail(w, r, invalid)
 		return
 	}
+	var twoFactor bool
+	var backup, accountKey, blob, sig []byte
+	var rosterRev int64
+	err = s.db.QueryRow(r.Context(), `SELECT two_factor, key_backup, account_identity_key, roster_revision, roster_blob, roster_sig FROM users WHERE id=$1`,
+		userID).Scan(&twoFactor, &backup, &accountKey, &rosterRev, &blob, &sig)
 	if err != nil {
 		s.fail(w, r, err)
 		return
