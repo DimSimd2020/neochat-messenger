@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include "calls.h"
+#include "email.h"
 #include "chatlist.h"
 #include "composer.h"
 #include "core.h"
@@ -309,6 +310,58 @@ protected:
     }
 };
 
+class CallBanner : public QAbstractButton {
+public:
+    explicit CallBanner(QWidget *parent) : QAbstractButton(parent)
+    {
+        setObjectName("active-call-banner");
+        setAccessibleName(QStringLiteral("Показать текущий звонок"));
+        setFocusPolicy(Qt::StrongFocus);
+        setCursor(Qt::PointingHandCursor);
+        setFixedHeight(46);
+        auto *timer = new QTimer(this);
+        timer->setInterval(1000);
+        auto refresh = [this] {
+            auto *calls = CallController::instance();
+            const qint64 seconds = calls->phase() == CallController::Active ? qMax<qint64>(0, (QDateTime::currentMSecsSinceEpoch() - calls->activeSince()) / 1000) : 0;
+            QString status = QStringLiteral("Идёт звонок");
+            if (calls->phase() == CallController::Incoming) status = QStringLiteral("Входящий звонок");
+            else if (calls->phase() == CallController::Starting || calls->phase() == CallController::Outgoing) status = QStringLiteral("Вызов…");
+            else if (calls->phase() == CallController::Connecting) status = QStringLiteral("Подключение…");
+            setText(status + QStringLiteral("     %1:%2").arg(seconds / 60, 2, 10, QChar('0')).arg(seconds % 60, 2, 10, QChar('0')));
+            update();
+        };
+        connect(timer, &QTimer::timeout, this, refresh);
+        auto sync = [this, timer, refresh] {
+            const auto phase = CallController::instance()->phase();
+            const bool live = phase != CallController::Idle && phase != CallController::Ended;
+            setVisible(live);
+            if (live) { refresh(); timer->start(); } else timer->stop();
+        };
+        connect(CallController::instance(), &CallController::changed, this, sync);
+        connect(this, &QAbstractButton::clicked, CallController::instance(), &CallController::showCurrentCall);
+        connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
+        sync();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        QColor tint = Theme::p().action;
+        tint.setAlphaF(isDown() ? .32 : underMouse() ? .26 : .20);
+        Theme::paintBackdrop(p, this, tint);
+        p.setFont(Theme::instance()->font(14, QFont::DemiBold));
+        const int textWidth = p.fontMetrics().horizontalAdvance(text());
+        const int start = (width() - textWidth - 32) / 2;
+        ui::paintIcon(&p, QRectF(start, 14, 18, 18), "phone", Theme::p().accent);
+        p.setPen(Theme::p().text);
+        p.drawText(QRect(start + 32, 0, textWidth, height()), Qt::AlignCenter, text());
+        if (hasFocus()) ui::paintFocusRing(&p, rect().adjusted(4, 4, -4, -4), 8);
+    }
+};
+
 // Warning strip under the header; height and opacity change over 180 ms.
 class NoticeBar : public QWidget {
 public:
@@ -390,6 +443,9 @@ MainWindow::MainWindow()
     m_updateBar = new NoticeBar(central);
     m_stack = new QStackedWidget;
     centralLay->addWidget(m_updateBar);
+    m_emailBar = new NoticeBar(central);
+    centralLay->addWidget(m_emailBar);
+    connect(m_emailBar->action,&QAbstractButton::clicked,this,[this] { showEmailBinding(host(),[this] { refreshEmail(); }); });
     centralLay->addWidget(m_stack, 1);
     setCentralWidget(central);
     connect(m_updateBar->action, &QAbstractButton::clicked, this, [this] {
@@ -445,6 +501,7 @@ MainWindow::MainWindow()
     conv->setSpacing(0);
     m_header = new ConversationHeader(m_conversation);
     conv->addWidget(m_header);
+    conv->addWidget(new CallBanner(m_conversation));
     m_notice = new NoticeBar(m_conversation);
     conv->addWidget(m_notice);
     m_searchWrap = new QWidget;
@@ -681,7 +738,10 @@ void MainWindow::checkUpdate(bool manual)
             toast(QStringLiteral("Обновление уже скачано: нажмите «Перезапустить» вверху окна"));
         return;
     }
-    const QJsonObject p{{"platform", "windows"}, {"version", QStringLiteral(NEOCHAT_VERSION)}};
+    const QString channel = QSettings().value(QStringLiteral("updates/channel")).toString() == QLatin1String("beta")
+                                 ? QStringLiteral("beta")
+                                 : QStringLiteral("stable");
+    const QJsonObject p{{"platform", "windows"}, {"version", QStringLiteral(NEOCHAT_VERSION)}, {"channel", channel}};
     Core::instance()->call("check_update", p, this, [this, p, manual](const QJsonValue &v, const CoreError &e) {
         if (!e.ok()) {
             if (manual)
@@ -722,6 +782,8 @@ void MainWindow::start()
 
 void MainWindow::showOnboarding(const QJsonObject &status)
 {
+    m_emailBar->set({},{});
+    m_emailPrompted=false;
     Sheet::closeAll(m_stack);
     m_current = {};
     m_view->setConversation({}, false);
@@ -731,6 +793,7 @@ void MainWindow::showOnboarding(const QJsonObject &status)
 
 void MainWindow::showMain()
 {
+    refreshEmail();
     m_stack->setCurrentWidget(m_main);
     if (!m_contacts) {
         m_calls = dialogs::callsPage(host());
@@ -764,6 +827,24 @@ void MainWindow::showMain()
             }
         });
     }
+}
+
+void MainWindow::refreshEmail()
+{
+    Core::instance()->call("email_status",{},this,[this](const QJsonValue &value,const CoreError &error) {
+        if (!error.ok()) return;
+        const bool missing=!value.toObject().value("verified").toBool();
+        m_emailBar->set(missing ? QStringLiteral("Привяжите электронную почту к аккаунту") : QString(),QStringLiteral("Привязать"));
+        if (missing && !m_emailPrompted && m_stack->currentWidget()==m_main) {
+            if (Sheet::anyOpen(m_stack)) {
+                for (auto *sheet : m_stack->findChildren<Sheet *>())
+                    connect(sheet,&Sheet::closed,this,[this] { QTimer::singleShot(0,this,&MainWindow::refreshEmail); },Qt::SingleShotConnection);
+            } else {
+                m_emailPrompted=true;
+                showEmailBinding(host(),[this] { refreshEmail(); });
+            }
+        }
+    });
 }
 
 void MainWindow::onEvent(const QJsonObject &ev)

@@ -4,9 +4,11 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.drawable.ColorDrawable
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
@@ -18,8 +20,9 @@ import android.widget.TextView
 import app.neochat.R
 
 /**
- * Modal surface over the screen: scrim fades over 220 ms, the panel fades over 180 ms
- * and rises 28 dp over 220 ms without scaling. Back and a tap outside close it.
+ * Modal surface over the screen: the scrim fades over 220 ms and the panel rises on a
+ * spring while it fades in. Back, a tap outside and a downward drag from the top of the
+ * content close it; a thrown sheet leaves at the speed of the throw.
  */
 open class Sheet(protected val host: Host, title: String) {
     /** Where overlays live and how the activity reports back presses. */
@@ -36,7 +39,15 @@ open class Sheet(protected val host: Host, title: String) {
 
     val ctx: Context = host.overlay.context
     private val scrim = View(ctx)
-    val panel = LinearLayout(ctx)
+    private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
+    private var dragFrom = Float.NaN
+    private var dragging = false
+    private var tracker: android.view.VelocityTracker? = null
+    val panel: LinearLayout = object : LinearLayout(ctx) {
+        override fun onInterceptTouchEvent(e: MotionEvent) = drag(e, false) || super.onInterceptTouchEvent(e)
+        @SuppressLint("ClickableViewAccessibility")
+        override fun onTouchEvent(e: MotionEvent) = drag(e, true) || super.onTouchEvent(e)
+    }
     val body = LinearLayout(ctx)
     val titleView = ctx.label(title, 18f, 600)
     private val scroll = ScrollView(ctx)
@@ -93,7 +104,7 @@ open class Sheet(protected val host: Host, title: String) {
         host.pushBack(back)
         scrim.alpha = 0f
         panel.alpha = 0f
-        panel.translationY = ctx.dpf(28)
+        panel.translationY = ctx.dpf(96)
         run(true)
         titleView.post { titleView.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_FOCUSED) }
         return this
@@ -113,7 +124,9 @@ open class Sheet(protected val host: Host, title: String) {
         panel.findFocus()?.let { f -> panel.post { f.requestRectangleOnScreen(android.graphics.Rect(0, 0, f.width, f.height)) } }
     }
 
-    fun dismiss() {
+    fun dismiss() = close(0f)
+
+    private fun close(velocity: Float) {
         if (closing) return
         closing = true
         host.removeInsetListener(insets)
@@ -122,11 +135,75 @@ open class Sheet(protected val host: Host, title: String) {
         // The overlay stops taking input at once; only the fade is animated.
         scrim.isClickable = false
         panel.isEnabled = false
-        run(false)
+        run(false, velocity)
         onDismiss?.invoke()
     }
 
-    private fun run(open: Boolean) {
+    /**
+     * A drag that starts while the content is at its top moves the whole sheet. Pulling up
+     * meets growing resistance; letting go past a third of the height or with a downward
+     * throw closes it, otherwise it springs back.
+     */
+    private fun drag(e: MotionEvent, own: Boolean): Boolean {
+        if (closing) return false
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                dragFrom = e.rawY
+                dragging = false
+                tracker?.recycle()
+                tracker = android.view.VelocityTracker.obtain()
+                track(e)
+                return own
+            }
+            MotionEvent.ACTION_MOVE -> {
+                track(e)
+                if (dragFrom.isNaN()) return false
+                if (!dragging) {
+                    val dy = e.rawY - dragFrom
+                    if (dy > slop && !scroll.canScrollVertically(-1)) {
+                        dragging = true
+                        dragFrom = e.rawY - panel.translationY
+                        panel.stopSprings(Prop.Y)
+                        parentDisallow()
+                    } else return false
+                }
+                val d = e.rawY - dragFrom
+                panel.translationY = if (d >= 0f) d else -ctx.dpf(24) * (1f - 1f / (1f - d / ctx.dpf(120)))
+                scrim.alpha = 1f - (panel.translationY / panel.height.coerceAtLeast(1)).coerceIn(0f, 1f) * 0.7f
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                track(e)
+                val was = dragging
+                dragging = false
+                dragFrom = Float.NaN
+                val t = tracker
+                tracker = null
+                t?.computeCurrentVelocity(1000)
+                val v = t?.yVelocity ?: 0f
+                t?.recycle()
+                if (!was) return false
+                if (e.actionMasked == MotionEvent.ACTION_UP && (panel.translationY > panel.height / 3f || v > ctx.dpf(900))) close(v.coerceAtLeast(ctx.dpf(600)))
+                else {
+                    panel.springTo(Prop.Y, 0f, 0.42f, 0.78f, v)
+                    scrim.animate().alpha(1f).setDuration(Theme.ms(180)).start()
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun track(e: MotionEvent) {
+        val copy = MotionEvent.obtain(e)
+        copy.setLocation(e.rawX, e.rawY)
+        tracker?.addMovement(copy)
+        copy.recycle()
+    }
+
+    private fun parentDisallow() = panel.parent?.requestDisallowInterceptTouchEvent(true)
+
+    private fun run(open: Boolean, velocity: Float = 0f) {
         anim?.cancel()
         val finish = {
             if (!open) {
@@ -141,13 +218,32 @@ open class Sheet(protected val host: Host, title: String) {
             finish()
             return
         }
+        if (open) {
+            panel.springTo(Prop.Y, 0f, 0.5f, 0.8f)
+            anim = AnimatorSet().apply {
+                playTogether(
+                    ObjectAnimator.ofFloat(scrim, View.ALPHA, 1f).setDuration(220),
+                    ObjectAnimator.ofFloat(panel, View.ALPHA, 1f).setDuration(140),
+                )
+                interpolator = Theme.surfaceCurve
+                start()
+            }
+            return
+        }
+        panel.stopSprings(Prop.Y)
+        // A throw keeps its speed: the panel slides fully out; a plain close drops and fades.
+        val thrown = velocity > 0f
+        val away = if (thrown) (panel.height + ctx.dp(8) + host.bottomInset).toFloat() else panel.translationY + ctx.dpf(40)
+        val travel = (away - panel.translationY).coerceAtLeast(1f)
+        val slide = ObjectAnimator.ofFloat(panel, View.TRANSLATION_Y, away)
+        slide.duration = if (thrown) (2000f * travel / velocity).toLong().coerceIn(140, 320) else 200
+        slide.interpolator = if (thrown) android.view.animation.DecelerateInterpolator() else Theme.surfaceCurve
         anim = AnimatorSet().apply {
             playTogether(
-                ObjectAnimator.ofFloat(scrim, View.ALPHA, if (open) 1f else 0f).setDuration(220),
-                ObjectAnimator.ofFloat(panel, View.ALPHA, if (open) 1f else 0f).setDuration(180),
-                ObjectAnimator.ofFloat(panel, View.TRANSLATION_Y, if (open) 0f else ctx.dpf(28)).setDuration(220),
+                ObjectAnimator.ofFloat(scrim, View.ALPHA, 0f).setDuration(220),
+                ObjectAnimator.ofFloat(panel, View.ALPHA, 0f).setDuration(if (thrown) 260 else 180),
+                slide,
             )
-            interpolator = Theme.surfaceCurve
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(a: Animator) = finish()
             })
@@ -158,7 +254,8 @@ open class Sheet(protected val host: Host, title: String) {
 
 /**
  * Compact glass menu anchored to a view. The checked item is marked; the menu closes
- * on choice, back and a tap outside. Opens with 180 ms fade and a 0.975 -> 1 scale.
+ * on choice, back and a tap outside. It grows out of the anchor's corner on a spring
+ * while fading in; a header row of reactions pops in one after another.
  * Placement stays in the visible area above the IME / navigation bar: a composer
  * menu never opens into the keyboard.
  */
@@ -226,10 +323,17 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
         place()
         if (!Theme.reducedMotion) {
             box.alpha = 0f
-            box.scaleX = 0.975f
-            box.scaleY = 0.975f
-            box.animate().alpha(1f).setDuration(180).start()
-            box.animate().scaleX(1f).scaleY(1f).setDuration(220).setInterpolator(Theme.surfaceCurve).start()
+            box.animate().alpha(1f).setDuration(120).start()
+            box.spring(Prop.SCALE).snap(0.72f)
+            box.springTo(Prop.SCALE, 1f, 0.36f, 0.74f)
+            (header as? ViewGroup)?.let { row ->
+                for (i in 0 until row.childCount) {
+                    val c = row.getChildAt(i)
+                    c.scaleX = 0.2f
+                    c.scaleY = 0.2f
+                    c.postDelayed({ c.springTo(Prop.SCALE, 1f, 0.4f, 0.5f) }, 40L + i * 22L)
+                }
+            }
         }
         box.post { box.getChildAt(0)?.requestFocus() }
     }
@@ -282,8 +386,12 @@ class PopupMenu(private val host: Sheet.Host, private val anchor: View) {
         host.popBack(back)
         val ov = host.overlay
         ov.removeView(catcher)
+        box.isEnabled = false
         if (Theme.reducedMotion) ov.removeView(box)
-        else box.animate().alpha(0f).setDuration(180).withEndAction { ov.removeView(box) }.start()
+        else {
+            box.springTo(Prop.SCALE, 0.9f, 0.24f, 1f)
+            box.animate().alpha(0f).setDuration(140).withEndAction { ov.removeView(box) }.start()
+        }
     }
 }
 
@@ -309,6 +417,8 @@ object Toast {
         box.addView(tv)
         val hide = Runnable {
             box.isEnabled = false
+            box.springTo(Prop.Y, ctx.dpf(16), 0.3f, 1f)
+            box.springTo(Prop.SCALE, 0.94f, 0.3f, 1f)
             box.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { host.overlay.removeView(box) }.start()
         }
         if (actionTitle != null && action != null) {
@@ -337,7 +447,13 @@ object Toast {
             setMargins(ctx.dp(24), 0, ctx.dp(24), ctx.dp(96) + host.bottomInset)
         })
         box.alpha = 0f
-        box.animate().alpha(1f).setDuration(Theme.ms(180)).start()
+        box.animate().alpha(1f).setDuration(Theme.ms(160)).start()
+        if (!Theme.reducedMotion) {
+            box.spring(Prop.Y).snap(ctx.dpf(28))
+            box.spring(Prop.SCALE).snap(0.86f)
+            box.springTo(Prop.Y, 0f, 0.44f, 0.72f)
+            box.springTo(Prop.SCALE, 1f, 0.4f, 0.62f)
+        }
         box.postDelayed(hide, if (action != null) 5000 else 3200)
     }
 }

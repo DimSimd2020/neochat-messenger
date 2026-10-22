@@ -40,6 +40,11 @@ func appendEvent(ctx context.Context, tx pgx.Tx, deviceID, kind string, messageI
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO device_events(device_id, seq, event_id, kind, message_id, payload) VALUES ($1,$2,$3,$4,$5,$6)`,
 		deviceID, seq, newUUID(), kind, messageID, p)
+	if err == nil && kind == "message" {
+		_, err = tx.Exec(ctx, `INSERT INTO push_jobs(device_id, event_seq)
+			SELECT device_id, $2 FROM push_tokens WHERE device_id=$1 AND provider='fcm'
+			ON CONFLICT (device_id) DO UPDATE SET event_seq=EXCLUDED.event_seq, attempts=0, next_attempt_at=now()`, deviceID, seq)
+	}
 	return err == nil, err
 }
 

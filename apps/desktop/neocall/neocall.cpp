@@ -10,7 +10,9 @@
 #include <string>
 #include <vector>
 
+#include "api/audio/audio_processing.h"
 #include "api/audio/builtin_audio_processing_builder.h"
+#include "api/audio_options.h"
 #include "api/audio/create_audio_device_module.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
@@ -39,6 +41,10 @@
 #include "third_party/libyuv/include/libyuv/convert_argb.h"
 
 #include <winsock2.h>
+#include <mmdeviceapi.h>
+#include <propidl.h>
+
+#include <objbase.h>
 
 namespace {
 
@@ -110,8 +116,20 @@ struct Engine {
         deps.adm = adm;
         deps.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
         deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-        // Echo cancellation, noise suppression and gain control.
-        deps.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+        // Analog gain control drives the Windows mic volume. After about two
+        // seconds it decides the level is wrong and turns the mic down to silence.
+        webrtc::AudioProcessing::Config apm;
+        apm.pipeline.multi_channel_render = false;
+        apm.pipeline.multi_channel_capture = false;
+        apm.high_pass_filter.enabled = true;
+        apm.echo_canceller.enabled = true;
+        apm.noise_suppression.enabled = true;
+        apm.noise_suppression.level = webrtc::AudioProcessing::Config::NoiseSuppression::kModerate;
+        apm.gain_controller1.enabled = false;
+        apm.gain_controller2.enabled = true;
+        apm.gain_controller2.input_volume_controller.enabled = false;
+        apm.gain_controller2.adaptive_digital.enabled = true;
+        deps.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>(apm);
         deps.video_encoder_factory = std::make_unique<webrtc::VideoEncoderFactoryTemplate<
             webrtc::LibvpxVp8EncoderTemplateAdapter, webrtc::LibvpxVp9EncoderTemplateAdapter>>();
         deps.video_decoder_factory = std::make_unique<webrtc::VideoDecoderFactoryTemplate<
@@ -143,21 +161,89 @@ struct Engine {
     }
 
     // Selects the devices for the next call; only possible while the device is idle.
+    // The Windows default (console) device is what the volume mixer plays. The
+    // communications default is often a leftover headset, so the mic works and
+    // the other person is silent.
     void useDevices(const std::string &input, const std::string &output) {
         int in = findDevice(true, input), out = findDevice(false, output);
         worker->BlockingCall([&] {
             if (!adm) return;
-            if (!adm->Recording() && !adm->RecordingIsInitialized()) {
-                if (in >= 0) adm->SetRecordingDevice(uint16_t(in));
-                else adm->SetRecordingDevice(webrtc::AudioDeviceModule::kDefaultCommunicationDevice);
-            }
-            if (!adm->Playing() && !adm->PlayoutIsInitialized()) {
-                if (out >= 0) adm->SetPlayoutDevice(uint16_t(out));
-                else adm->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultCommunicationDevice);
-            }
+            // A previous call can leave playout initialized in stereo. Voice is
+            // mono; the stereo session plays a burst of noise and then stops.
+            if (adm->Playing()) adm->StopPlayout();
+            if (adm->Recording()) adm->StopRecording();
+            adm->EnableBuiltInAEC(false);
+            adm->SetStereoPlayout(false);
+            adm->SetStereoRecording(false);
+            if (in >= 0) adm->SetRecordingDevice(uint16_t(in));
+            else adm->SetRecordingDevice(webrtc::AudioDeviceModule::kDefaultDevice);
+            if (out >= 0) adm->SetPlayoutDevice(uint16_t(out));
+            else adm->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice);
+            bool muted = false;
+            if (adm->SpeakerMute(&muted) == 0 && muted)
+                adm->SetSpeakerMute(false);
         });
     }
 };
+
+// PKEY_Device_FriendlyName. Listed here so the device menu does not go through
+// the call's audio module: that enumeration comes back empty while a call holds it.
+static const PROPERTYKEY kFriendlyName = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+
+std::string wideToUtf8(LPCWSTR w) {
+    if (!w || !*w) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string s(size_t(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+struct AudioEndpoint {
+    std::string id, name;
+};
+
+std::vector<AudioEndpoint> endpoints(EDataFlow flow) {
+    std::vector<AudioEndpoint> out;
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool uninit = hr == S_OK;
+    IMMDeviceEnumerator *en = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), reinterpret_cast<void **>(&en))) || !en) {
+        if (uninit) CoUninitialize();
+        return out;
+    }
+    IMMDeviceCollection *col = nullptr;
+    if (SUCCEEDED(en->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &col)) && col) {
+        UINT n = 0;
+        col->GetCount(&n);
+        for (UINT i = 0; i < n; ++i) {
+            IMMDevice *dev = nullptr;
+            if (FAILED(col->Item(i, &dev)) || !dev) continue;
+            LPWSTR wid = nullptr;
+            dev->GetId(&wid);
+            std::string id = wideToUtf8(wid);
+            if (wid) CoTaskMemFree(wid);
+            IPropertyStore *ps = nullptr;
+            std::string name;
+            if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &ps)) && ps) {
+                PROPVARIANT v;
+                PropVariantInit(&v);
+                if (SUCCEEDED(ps->GetValue(kFriendlyName, &v)) && v.vt == VT_LPWSTR)
+                    name = wideToUtf8(v.pwszVal);
+                PropVariantClear(&v);
+                ps->Release();
+            }
+            dev->Release();
+            if (name.empty()) continue;
+            if (id.empty()) id = name;
+            out.push_back({std::move(id), std::move(name)});
+        }
+        col->Release();
+    }
+    en->Release();
+    if (uninit) CoUninitialize();
+    return out;
+}
 
 // Converts frames to upright BGRA for the UI.
 class FrameSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
@@ -357,31 +443,45 @@ struct neocall : public webrtc::PeerConnectionObserver {
     }
     void OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> t) override {
         auto track = t->receiver()->track();
-        if (track && track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind)
+        if (!track) return;
+        if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind)
             static_cast<webrtc::VideoTrackInterface *>(track.get())->AddOrUpdateSink(&remote, webrtc::VideoSinkWants());
+        if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
+            track->set_enabled(true);
+            auto adm = Engine::get().adm;
+            Engine::get().worker->BlockingCall([adm] {
+                if (!adm) return;
+                if (!adm->PlayoutIsInitialized()) adm->InitPlayout();
+                if (!adm->Playing()) adm->StartPlayout();
+                bool muted = false;
+                if (adm->SpeakerMute(&muted) == 0 && muted) adm->SetSpeakerMute(false);
+            });
+        }
     }
 };
 
 NEOCALL_API char *neocall_devices(void) {
-    Engine &e = Engine::get();
+    // A failed refresh must not wipe a list Windows still has: the in-call audio
+    // module sometimes reports zero devices until the call ends.
+    static std::mutex cacheMu;
+    static std::vector<AudioEndpoint> cacheIn, cacheOut;
+    auto list = [&](EDataFlow flow, std::vector<AudioEndpoint> &cache) {
+        auto fresh = endpoints(flow);
+        std::lock_guard<std::mutex> g(cacheMu);
+        if (!fresh.empty()) cache = std::move(fresh);
+        return cache;
+    };
+    const auto inputs = list(eCapture, cacheIn);
+    const auto outputs = list(eRender, cacheOut);
     std::ostringstream o;
-    auto audio = [&](bool input) {
-        e.worker->BlockingCall([&] {
-            int n = e.adm ? (input ? e.adm->RecordingDevices() : e.adm->PlayoutDevices()) : 0;
-            bool first = true;
-            for (int i = 0; i < n; ++i) {
-                char name[webrtc::kAdmMaxDeviceNameSize] = {}, guid[webrtc::kAdmMaxGuidSize] = {};
-                if ((input ? e.adm->RecordingDeviceName(i, name, guid) : e.adm->PlayoutDeviceName(i, name, guid)) != 0) continue;
-                std::string id = guid[0] ? guid : name;
-                o << (first ? "" : ",") << "{\"id\":\"" << esc(id) << "\",\"name\":\"" << esc(name) << "\"}";
-                first = false;
-            }
-        });
+    auto write = [&](const std::vector<AudioEndpoint> &devs) {
+        for (size_t i = 0; i < devs.size(); ++i)
+            o << (i ? "," : "") << "{\"id\":\"" << esc(devs[i].id) << "\",\"name\":\"" << esc(devs[i].name) << "\"}";
     };
     o << "{\"inputs\":[";
-    audio(true);
+    write(inputs);
     o << "],\"outputs\":[";
-    audio(false);
+    write(outputs);
     o << "],\"cameras\":[";
     trace("cameras");
     std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(webrtc::VideoCaptureFactory::CreateDeviceInfo());
@@ -425,6 +525,12 @@ NEOCALL_API neocall *neocall_create(const neocall_config *cfg, neocall_event_fn 
     }
     c->pc = pc.MoveValue();
     webrtc::AudioOptions ao;
+    // Keep echo cancellation. Do not let the engine turn analog mic-gain back on:
+    // that is the control which silences the Windows microphone after a moment.
+    ao.echo_cancellation = true;
+    ao.auto_gain_control = false;
+    ao.noise_suppression = true;
+    ao.highpass_filter = true;
     c->audio = e.factory->CreateAudioTrack("audio", e.factory->CreateAudioSource(ao).get());
     if (cfg->video) c->startCamera();
     return c;

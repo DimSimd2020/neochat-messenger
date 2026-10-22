@@ -302,6 +302,21 @@ private:
 
 } // namespace
 
+bool showPhotoFile(QWidget *host, const QString &path)
+{
+    if (!host)
+        return false;
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    if (reader.size().isValid())
+        reader.setScaledSize(reader.size().scaled(4096, 4096, Qt::KeepAspectRatio));
+    const QImage img = reader.read();
+    if (img.isNull())
+        return false;
+    new PhotoViewer(host->window() ? host->window() : host, img);
+    return true;
+}
+
 // ---- images ----
 
 ImageCache *ImageCache::instance()
@@ -375,6 +390,11 @@ QVariant MessageModel::data(const QModelIndex &index, int role) const
         const QString st = statusText(m);
         if (m.value("outgoing").toBool() && !st.isEmpty())
             s += ". " + st;
+        if (group && m.value("outgoing").toBool()) {
+            const int readers = m.value("read_count").toInt();
+            if (readers > 0)
+                s += QStringLiteral(". Прочитали: %1").arg(readers);
+        }
         return s;
     }
     return {};
@@ -583,8 +603,8 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     const QString time = QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm");
     const QString stamp = (m.value("edited").toBool() ? QStringLiteral("изменено ") : QString()) + time;
     qreal metaW = mf.horizontalAdvance(stamp) + (out ? 24 : 0);
-    if (out && group && m.value("delivered_count").toInt() > 0)
-        metaW += mf.horizontalAdvance(QString::number(m.value("delivered_count").toInt())) + 4;
+    if (out && group && m.value("read_count").toInt() > 0)
+        metaW += mf.horizontalAdvance(QString::number(m.value("read_count").toInt())) + 4;
     L.meta = QRectF(0, h, metaW, 16);
     w = qMax(w, metaW);
     h += 16 + kPadBottom;
@@ -920,7 +940,7 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
             ui::paintIcon(p, ir, "check", c.onOutgoing, 2.6);
         else if (st == "failed")
             ui::paintIcon(p, ir, "alert", c.warning, 2.0);
-        const int n = m.value("delivered_count").toInt();
+        const int n = m.value("read_count").toInt();
         if (model->group && n > 0) {
             p->setPen(meta);
             p->drawText(QRectF(ir.right() + 3, L.meta.top(), 30, L.meta.height()), Qt::AlignLeft | Qt::AlignVCenter, QString::number(n));

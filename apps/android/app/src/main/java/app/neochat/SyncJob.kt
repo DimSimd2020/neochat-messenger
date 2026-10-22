@@ -9,7 +9,7 @@ import kotlin.concurrent.thread
 class SyncJob : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         val app = application as App
-        if (app.inForeground) return false
+        if (app.inForeground && params.jobId != PUSH_ID) return false
         app.openCore()
         thread(name = "neochat-sync") {
             val (_, err) = CoreClient.callBlocking("sync_now")
@@ -22,5 +22,6 @@ class SyncJob : JobService() {
 
     companion object {
         const val ID = 1
+        const val PUSH_ID = 2
     }
 }

@@ -9,7 +9,7 @@ on:
       tag:
         description: "Existing GitHub release tag to upload to"
         required: true
-        default: "v0.6.7.1"
+        default: "v0.6.8"
 
 permissions:
   contents: write
@@ -90,6 +90,13 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           OPENSSL_NO_ASM: "1"
         run: cargo ndk -t arm64-v8a --platform 26 -o ../apps/android/app/src/main/jniLibs build --release --lib
+
+      - name: Firebase configuration
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          test -n "$GOOGLE_SERVICES_JSON"
+          printf '%s' "$GOOGLE_SERVICES_JSON" > apps/android/app/google-services.json
 
       - name: APK
         working-directory: apps/android

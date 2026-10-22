@@ -18,6 +18,8 @@ enum Prefs {
     static var bigEmoji: Bool { bool("big_emoji", true) }
     static var autoload: Bool { bool("autoload", true) }
     static var chatSort: String { d.string(forKey: "chat_sort") ?? "activity" }
+    /// stable receives only stable builds. Anything else, including a missing value, stays stable.
+    static var updateChannel: String { d.string(forKey: "update_channel") == "beta" ? "beta" : "stable" }
     static var archiveSort: String { d.string(forKey: "archive_sort") ?? "activity" }
 }
 
@@ -891,8 +893,9 @@ func bindChatCell(_ cell: RowCell, _ c: JSON) {
     cell.avatar.set(c.str("title"), seed: c.str("peer_user_id").isEmpty ? c.str("id") : c.str("peer_user_id"), avatar: c.str("avatar_path"))
     cell.avatar.online = kind == "direct" && (c.obj("presence")?.bool("online") ?? false)
     cell.title.text = c.str("title")
+    cell.groupIcon.isHidden = kind != "group"
     cell.time.text = formatListTime(c.int64("last_activity"))
-    cell.badge.set(c.int("unread"),mentions:c.int("mention_count"))
+    cell.badge.set(c.int("unread"),mentions:c.int("mention_count"),chat:c.str("id"))
     cell.pin.isHidden = !(c.bool("pinned") && c.int("unread") == 0)
     var preview = c.str("last_preview").replacingOccurrences(of: "\n", with: " ")
     var color = Theme.muted

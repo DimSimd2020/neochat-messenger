@@ -25,7 +25,8 @@ public:
         setAttribute(Qt::WA_TransparentForMouseEvents);
         m_anim.setStartValue(0.0);
         m_anim.setEndValue(1.0);
-        m_anim.setDuration(Theme::ms(motion == Motion::Fade || motion == Motion::Dissolve ? 200 : 320));
+        const bool shift = motion == Motion::ShiftLeft || motion == Motion::ShiftRight;
+        m_anim.setDuration(Theme::ms(motion == Motion::Fade || motion == Motion::Dissolve || shift ? 220 : 320));
         m_anim.setEasingCurve(Theme::surfaceEasing());
         connect(&m_anim, &QVariantAnimation::valueChanged, this, qOverload<>(&QWidget::update));
         connect(&m_anim, &QVariantAnimation::finished, this, &QObject::deleteLater);
@@ -62,6 +63,12 @@ protected:
             edge(p, x);
             break;
         }
+        case Motion::ShiftLeft:
+            cross(p, t, -1);
+            break;
+        case Motion::ShiftRight:
+            cross(p, t, 1);
+            break;
         case Motion::Forward: {
             p.drawPixmap(int(-t * w * 0.3), 0, m_before);
             p.fillRect(rect(), QColor(0, 0, 0, int(46 * t)));
@@ -82,6 +89,15 @@ protected:
     }
 
 private:
+    // Old picture leaves by `dir` (-1 left), the new one arrives from the other side. Both stay fully in frame.
+    void cross(QPainter &p, qreal t, int dir) const
+    {
+        const int dx = int(t * 16);
+        p.drawPixmap(-dir * (16 - dx), 0, m_after);
+        p.setOpacity(1 - t);
+        p.drawPixmap(dir * dx, 0, m_before);
+    }
+
     // A soft shadow beside the edge `x` of the picture that slides over the other: on its left, or on its right.
     void edge(QPainter &p, int x, bool left = true) const
     {
@@ -109,7 +125,7 @@ void transition(QWidget *host, const QRect &area, Motion motion, const std::func
     const QPixmap before = host->grab(area);
     change();
     QPixmap after;
-    if (motion == Motion::Fade || motion == Motion::Forward || motion == Motion::Back) {
+    if (motion == Motion::Fade || motion == Motion::Forward || motion == Motion::Back || motion == Motion::ShiftLeft || motion == Motion::ShiftRight) {
         if (auto *l = host->layout())
             l->activate();
         QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);

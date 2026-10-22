@@ -1,6 +1,8 @@
 # Local credentials and signing material
 .env
 .env.*
+apps/android/app/google-services.json
+*firebase-adminsdk*.json
 !.env.example
 *.key
 *.pem

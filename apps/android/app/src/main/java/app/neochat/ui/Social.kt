@@ -95,6 +95,9 @@ object QuickReaction {
 object Prefs {
     fun of(ctx: Context): SharedPreferences = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    /** stable is the default. Only the exact value beta asks the core for prerelease builds. */
+    fun updateChannel(ctx: Context): String = if (of(ctx).getString("update_channel", "stable") == "beta") "beta" else "stable"
+
     /** Message text size in sp: small, normal, large, huge. */
     val TEXT_SIZES = floatArrayOf(14f, 15.5f, 17.5f, 19.5f)
     fun textSize(ctx: Context) = TEXT_SIZES[of(ctx).getInt("text_size", 1).coerceIn(0, 3)]

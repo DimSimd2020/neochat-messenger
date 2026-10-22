@@ -9,14 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
 // Public salt material, like the original username-based salt. Never returns a
-// password verifier or a backup key. Unknown names have the same response shape.
+// password verifier or a backup key. Unknown logins have the same response shape.
+// login may be a nickname or a verified email; response includes canonical username.
 func (s *Server) handlePasswordSalt(w http.ResponseWriter, r *http.Request) {
 	if !s.limits.allow("salt:"+clientIP(r), 60, 15*time.Minute) {
 		s.fail(w, r, errRateLimited(time.Minute))
@@ -24,23 +24,43 @@ func (s *Server) handlePasswordSalt(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Username string `json:"username"`
+		Login    string `json:"login"`
 	}
 	if err := readJSON(w, r, 1024, &req); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(req.Username), "@"))
-	if !usernameRe.MatchString(name) {
+	raw := req.Login
+	if raw == "" {
+		raw = req.Username
+	}
+	login := normalizeLogin(raw)
+	if login == "" {
 		s.fail(w, r, errBadRequest)
 		return
 	}
-	salt := name
-	err := s.db.QueryRow(r.Context(), `SELECT COALESCE(NULLIF(password_salt,''),username) FROM users WHERE username=$1`, name).Scan(&salt)
+	salt, username := login, login
+	var err error
+	if looksLikeEmail(login) {
+		if _, e := normalizeEmail(login); e != nil {
+			s.fail(w, r, e)
+			return
+		}
+		err = s.db.QueryRow(r.Context(), `SELECT COALESCE(NULLIF(password_salt,''),username), username FROM users
+			WHERE email=$1 AND email_verified_at IS NOT NULL`, login).Scan(&salt, &username)
+	} else {
+		if !usernameRe.MatchString(login) {
+			s.fail(w, r, errBadRequest)
+			return
+		}
+		err = s.db.QueryRow(r.Context(), `SELECT COALESCE(NULLIF(password_salt,''),username), username FROM users WHERE username=$1`, login).
+			Scan(&salt, &username)
+	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"salt": salt})
+	writeJSON(w, 200, map[string]string{"salt": salt, "username": username})
 }
 
 const maxPhotoSize = 8 << 20

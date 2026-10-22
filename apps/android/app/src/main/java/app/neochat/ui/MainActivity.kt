@@ -13,6 +13,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsAnimation
 import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import app.neochat.FilesProvider
@@ -57,6 +58,7 @@ class MainActivity : Activity(), Sheet.Host {
     private var openChatGeneration = 0
     private val listener: (JSONObject) -> Unit = { onEvent(it) }
     private var updateBanner: View? = null
+    private var dismissedUpdate = ""
     private var lastUpdateCheck = 0L
     private var slideAnim: android.animation.ValueAnimator? = null
     var readinessPrompted = false
@@ -102,30 +104,56 @@ class MainActivity : Activity(), Sheet.Host {
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
         else root.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        // The window stays the same size when the keyboard moves. adjustResize composites the
+        // previous frame over the new one for an instant, so the chat looks mirrored on itself.
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+        // A back swipe that hides the keyboard reports the final (hidden) inset at the
+        // first frame. Applying it jumps the chat while the old frame is still on screen.
+        var deferIme = false
+        var imeAtStart = 0
+        fun publish() {
+            current?.applyInsets(top, bottom, ime)
+            insetListeners.toList().forEach { it() }
+        }
         root.setOnApplyWindowInsetsListener { _, ins ->
             if (Build.VERSION.SDK_INT >= 30) {
                 val sys = ins.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
                 top = sys.top
                 bottom = sys.bottom
-                ime = ins.getInsets(WindowInsets.Type.ime()).bottom
+                if (!deferIme) ime = ins.getInsets(WindowInsets.Type.ime()).bottom
             } else {
                 top = ins.systemWindowInsetTop
                 // Before API 30 the bottom inset already includes the keyboard.
                 val b = ins.systemWindowInsetBottom
                 bottom = minOf(b, ins.stableInsetBottom)
-                ime = if (b > ins.stableInsetBottom) b else 0
+                if (!deferIme) ime = if (b > ins.stableInsetBottom) b else 0
             }
-            current?.applyInsets(top, bottom, ime)
-            insetListeners.toList().forEach { it() }
+            if (!deferIme) publish()
             ins
         }
         if (Build.VERSION.SDK_INT >= 30) {
-            root.setWindowInsetsAnimationCallback(object : WindowInsetsAnimation.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+            root.setWindowInsetsAnimationCallback(object : WindowInsetsAnimation.Callback(DISPATCH_MODE_STOP) {
+                override fun onPrepare(animation: WindowInsetsAnimation) {
+                    if (animation.typeMask and WindowInsets.Type.ime() != 0) {
+                        deferIme = true
+                        imeAtStart = ime
+                    }
+                }
+
                 override fun onProgress(insets: WindowInsets, running: MutableList<WindowInsetsAnimation>): WindowInsets {
-                    ime = insets.getInsets(WindowInsets.Type.ime()).bottom
-                    current?.applyInsets(top, bottom, ime)
-                    insetListeners.toList().forEach { it() }
+                    val reported = insets.getInsets(WindowInsets.Type.ime()).bottom
+                    val anim = running.firstOrNull { it.typeMask and WindowInsets.Type.ime() != 0 }
+                    val fraction = anim?.interpolatedFraction ?: 1f
+                    // Hidden inset from the first frame of a back-swipe: follow the finger instead.
+                    ime = if (deferIme && imeAtStart > 0 && reported == 0 && fraction < 1f) (imeAtStart * (1f - fraction)).toInt() else reported
+                    publish()
                     return insets
+                }
+
+                override fun onEnd(animation: WindowInsetsAnimation) {
+                    if (animation.typeMask and WindowInsets.Type.ime() == 0) return
+                    deferIme = false
+                    root.requestApplyInsets()
                 }
             })
         }
@@ -160,6 +188,7 @@ class MainActivity : Activity(), Sheet.Host {
         chat = null
         Notifier.visibleConversation = null
         RealtimeService.stop(this)
+        app.neochat.PushRegistration.sync(this)
         show(OnboardingScreen(this, status) { showMain() }, 0f)
     }
 
@@ -173,6 +202,7 @@ class MainActivity : Activity(), Sheet.Host {
         chat = null
         show(h, 0f)
         RealtimeService.sync(this)
+        app.neochat.PushRegistration.sync(this)
         AppLock.migrate(this)
         AppLock.maybeLock(this)
         QuickReaction.load(this)
@@ -448,7 +478,7 @@ class MainActivity : Activity(), Sheet.Host {
     fun checkUpdate(manual: Boolean = false) {
         if (updateBanner != null) return
         val version = packageManager.getPackageInfo(packageName, 0).versionName ?: return
-        val p = JSONObject().put("platform", "android").put("version", version)
+        val p = JSONObject().put("platform", "android").put("version", version).put("channel", Prefs.updateChannel(this))
         CoreClient.call("check_update", p) { v, e ->
             if (e != null) return@call run { if (manual) toast(e.message) }
             val o = v as? JSONObject
@@ -457,29 +487,52 @@ class MainActivity : Activity(), Sheet.Host {
             CoreClient.call("download_update", p) { r, err ->
                 val d = r as? JSONObject
                 if (err != null && manual) toast(err.message)
-                if (err == null && d != null && updateBanner == null) showUpdateBanner(d.str("version"), File(d.str("path")))
+                val next = d?.str("version").orEmpty()
+                // A banner closed by hand stays closed for that version until the app restarts.
+                if (err == null && d != null && updateBanner == null && (manual || next != dismissedUpdate)) showUpdateBanner(next, File(d.str("path")))
             }
         }
     }
 
+    /** Drops in from above on a spring; the cross sends it back up. */
     private fun showUpdateBanner(version: String, apk: File) {
         val bar = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             background = GlassDrawable(this@MainActivity, GlassDrawable.Kind.STRONG, dpf(20))
-            setPadding(dp(18), dp(8), dp(8), dp(8))
+            setPadding(dp(18), dp(8), dp(4), dp(8))
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         bar.addView(label("Обновление $version готово", 14.5f, 600), lp(0, WRAP, 1f))
         val install = PillButton(this, "Установить")
         install.setOnClickListener { installUpdate(apk) }
         bar.addView(install, lp(WRAP, WRAP))
+        val close = IconButton(this, app.neochat.R.drawable.ic_close, "Скрыть обновление")
+        close.setOnClickListener {
+            dismissedUpdate = version
+            Haptics.tick(close)
+            hideUpdateBanner()
+        }
+        bar.addView(close, lp(dp(48), dp(48)).apply { marginStart = dp(2) })
         overlay.addView(bar, flp(MATCH, WRAP, Gravity.TOP).apply { setMargins(dp(12), top + dp(8), dp(12), 0) })
         updateBanner = bar
         if (!Theme.reducedMotion) {
             bar.alpha = 0f
-            bar.translationY = -dpf(12)
-            bar.animate().alpha(1f).translationY(0f).setDuration(220).setInterpolator(Theme.surfaceCurve).start()
+            bar.animate().alpha(1f).setDuration(160).start()
+            bar.spring(Prop.Y).snap(-dpf(96))
+            bar.spring(Prop.SCALE).snap(0.92f)
+            bar.springTo(Prop.Y, 0f, 0.5f, 0.7f)
+            bar.springTo(Prop.SCALE, 1f, 0.46f, 0.66f)
         }
+    }
+
+    private fun hideUpdateBanner() {
+        val bar = updateBanner ?: return
+        updateBanner = null
+        bar.isEnabled = false
+        if (Theme.reducedMotion) return overlay.removeView(bar)
+        bar.springTo(Prop.Y, -(bar.bottom + dpf(24)), 0.34f, 1f) { overlay.removeView(bar) }
+        bar.springTo(Prop.SCALE, 0.94f, 0.3f, 1f)
+        bar.animate().alpha(0f).setDuration(200).start()
     }
 
     private fun installUpdate(apk: File) {

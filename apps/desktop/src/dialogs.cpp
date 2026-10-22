@@ -988,6 +988,25 @@ void settings(const DialogHost &h)
         menu->popup(quick->mapToGlobal(QPoint(0, quick->height())));
     });
     sheet->body()->addWidget(quick);
+    auto channelOf = [] {
+        return QSettings().value(QStringLiteral("updates/channel")).toString() == QLatin1String("beta") ? QStringLiteral("beta")
+                                                                                                        : QStringLiteral("stable");
+    };
+    auto *channel = new ui::Button(QStringLiteral("Сообщать об обновлениях: ") + channelOf(), ui::Button::Secondary);
+    QObject::connect(channel, &QAbstractButton::clicked, sheet, [=] {
+        auto *menu = new PopupMenu(channel);
+        const QString choices[] = {QStringLiteral("stable"), QStringLiteral("beta")};
+        for (const QString &label : choices) {
+            menu->addAction((label == channelOf() ? QStringLiteral("✓ ") : QString()) + label, sheet, [=] {
+                QSettings().setValue(QStringLiteral("updates/channel"), label);
+                channel->setText(QStringLiteral("Сообщать об обновлениях: ") + label);
+                if (h.checkUpdate)
+                    h.checkUpdate();
+            });
+        }
+        menu->popup(channel->mapToGlobal(QPoint(0, channel->height())));
+    });
+    sheet->body()->addWidget(channel);
     auto *update = new ui::Button(QStringLiteral("Проверить обновления · версия ") + QStringLiteral(NEOCHAT_VERSION), ui::Button::Secondary);
     QObject::connect(update, &QAbstractButton::clicked, sheet, [=] {
         if (h.checkUpdate)

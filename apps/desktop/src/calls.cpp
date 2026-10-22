@@ -235,7 +235,7 @@ public:
         const bool shown = isVisible();
         if (!shown && Theme::ms(180) > 0)
             setWindowOpacity(0);
-        show();
+        if (isMinimized()) showNormal(); else show();
         raise();
         activateWindow();
         if (!shown && Theme::ms(180) > 0) {
@@ -453,6 +453,12 @@ void CallController::showWindow()
         m_window = new CallWindow;
     m_window->sync();
     m_window->appear();
+}
+
+void CallController::showCurrentCall()
+{
+    if (m_phase != Idle && m_phase != Ended)
+        showWindow();
 }
 
 void CallController::closeWindow()

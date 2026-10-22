@@ -32,6 +32,7 @@ class App : Application() {
             when (ev.optString("type")) {
                 "notify" -> Notifier.onNotify(this, ev)
                 "call", "call_media" -> CallManager.onCoreEvent(ev)
+                "connection" -> if (ev.optString("state") == "online") PushRegistration.sync(this)
             }
         }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
@@ -40,6 +41,7 @@ class App : Application() {
                     CoreClient.call("set_foreground", JSONObject().put("active", true))
                     // Android only lets a foreground app start the service; retry on every return.
                     RealtimeService.sync(this@App)
+                    PushRegistration.sync(this@App)
                 }
             }
 
@@ -62,8 +64,7 @@ class App : Application() {
         CoreClient.open(dir.absolutePath, DbKey.loadOrCreate(this))
     }
 
-    /** Push needs FCM credentials that this build does not have: RealtimeService keeps a socket open,
-     *  and this periodic job is the fallback when the setting is off or the system stopped the service. */
+    /** Periodic fallback when neither a push nor the background socket has delivered a sync hint. */
     private fun scheduleSync() {
         val js = getSystemService(JobScheduler::class.java)
         if (js.getPendingJob(SyncJob.ID) != null) return

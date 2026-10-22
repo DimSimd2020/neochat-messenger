@@ -6,16 +6,20 @@ final class OnboardingUITests: XCTestCase {
 
     override func setUp() {
         continueAfterFailure = false
+        guard let server = ProcessInfo.processInfo.environment["NEOCHAT_TEST_SERVER"], !server.isEmpty else { return }
+        app.launchEnvironment["NEOCHAT_TEST_SERVER"] = server
         app.launch()
     }
 
     func testRegisterAndReachChats() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["NEOCHAT_TEST_SERVER"] == nil,"Requires the local API with the test mailbox")
         shot("01-login")
         // Fill the fields in sign-in mode: in registration mode the simulator covers the
         // password field with its own strong password, which typed text cannot replace.
         let user = app.textFields["Никнейм"]
         user.tap()
-        user.typeText("ios_ci_\(Int.random(in: 100000...999999))")
+        let username = "ios_ci_\(Int.random(in: 100000...999999))"
+        user.typeText(username)
         let pass = app.secureTextFields["Пароль"]
         pass.tap()
         pass.typeText("correct horse battery")
@@ -24,6 +28,18 @@ final class OnboardingUITests: XCTestCase {
         let name = app.textFields["Имя"]
         name.tap()
         name.typeText("Тест")
+        let email = app.textFields["Электронная почта"]
+        app.scrollViews.firstMatch.swipeUp()
+        email.tap()
+        email.typeText(username+"@example.test")
+        app.buttons["Отправить ссылку"].tap()
+        let checked = app.buttons["Я подтвердил почту"]
+        guard checked.waitForExistence(timeout:30) else {
+            shot("02-email-send-failed")
+            return XCTFail("Email confirmation action did not appear")
+        }
+        checked.tap()
+        XCTAssertTrue(app.staticTexts["Почта подтверждена"].waitForExistence(timeout:10))
         shot("02-register")
         app.buttons["Создать аккаунт"].tap()
         if !app.staticTexts["Сохраните код восстановления"].waitForExistence(timeout: 30) {
@@ -38,8 +54,16 @@ final class OnboardingUITests: XCTestCase {
             XCTFail("chat list did not appear")
         }
         shot("04-chats")
+        for filter in ["Группы", "Личные", "Все"] {
+            app.buttons[filter].tap()
+            XCTAssertTrue(app.buttons[filter].isSelected)
+        }
         app.tabBars.buttons["Профиль"].tap()
-        XCTAssertTrue(app.staticTexts["Устройства"].waitForExistence(timeout: 10) || app.buttons["Устройства"].waitForExistence(timeout: 1))
+        XCTAssertTrue(app.buttons["Медиа"].waitForExistence(timeout: 10))
+        app.buttons["Файлы"].tap()
+        XCTAssertTrue(app.buttons["Файлы"].isSelected)
+        app.buttons["Медиа"].tap()
+        XCTAssertTrue(app.buttons["Медиа"].isSelected)
         shot("05-profile")
         app.tabBars.buttons["Чаты"].tap()
         app.buttons["Новый чат"].tap()
@@ -80,12 +104,17 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Новый чат"].waitForExistence(timeout: 5))
         let archive = app.buttons["Архив"]
         XCTAssertFalse(archive.isHittable)
+        let table = app.tables.firstMatch
+        let shortStart = table.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+        shortStart.press(forDuration: 0.05, thenDragTo: shortStart.withOffset(CGVector(dx: 0, dy: 45)))
+        XCTAssertFalse(app.buttons["Скрыть архив"].exists, "A short pull must settle closed")
         revealArchive()
         XCTAssertTrue(archive.isHittable)
         shot("07-archive-revealed")
         app.buttons["Скрыть архив"].tap()
         XCTAssertFalse(archive.isHittable)
         revealArchive()
+        XCTAssertTrue(archive.isHittable, "Archive must stay tappable after releasing the pull")
         archive.tap()
         XCTAssertTrue(app.buttons["Сортировка архива"].waitForExistence(timeout: 5))
         app.tables.cells.firstMatch.tap()
@@ -98,14 +127,10 @@ final class OnboardingUITests: XCTestCase {
 
         // Touch a populated cell: the old swipe-back check only covered an empty chat.
         // Repeat after the reply composer changes the layout and opens the keyboard.
-        for i in 0..<2 {
-            // A swipe to the left replies: on the bubble, then on the empty part of the row.
-            if i == 0 {
-                message.swipeLeft()
-            } else {
-                let empty = message.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5))
-                empty.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
-            }
+        // First both directions on the bubble, then both on empty row space.
+        for (startX, endX) in [(0.65, 0.25), (0.65, 0.95), (0.25, 0.05), (0.25, 0.65)] {
+            let start = message.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
             XCTAssertEqual(app.state, .runningForeground)
             XCTAssertTrue(app.buttons["Отменить ответ"].waitForExistence(timeout: 5))
             app.buttons["Отменить ответ"].tap()
@@ -121,8 +146,19 @@ final class OnboardingUITests: XCTestCase {
         }
         shot("08-message-interactions")
 
-        // The quick reaction on a double tap needs a sent message; this test has no
-        // server and the message stays unsent, so it is checked on a device.
+        // A rightward gesture starting at the row's screen edge still goes back.
+        let edge = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 2, dy: message.frame.midY))
+        edge.press(forDuration: 0.05, thenDragTo: edge.withOffset(CGVector(dx: app.frame.width * 0.85, dy: 0)))
+        guard app.buttons["Сортировка архива"].waitForExistence(timeout: 5) else {
+            shot("08-edge-back-failed")
+            print(app.debugDescription)
+            return XCTFail("Edge back did not return to the archive")
+        }
+        app.tables.cells.firstMatch.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+
+        // The channel has no other recipients, so this message stays unsent.
+        // Quick reactions need a sent message and are checked with a peer on a device.
 
         // Cancellation keeps history, confirmation clears it while the chat stays open.
         app.buttons["Действия чата"].tap()

@@ -1,6 +1,8 @@
 #include "onboarding.h"
 
 #include "core.h"
+#include "email.h"
+#include "sheet.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -126,13 +128,27 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_name = new ui::TextField(QStringLiteral("Имя"));
     fl->addWidget(m_name);
     connect(m_name->edit(), &QLineEdit::returnPressed, this, &Onboarding::submit);
-    m_username = new ui::TextField(QStringLiteral("Никнейм"));
+    m_username = new ui::TextField(QStringLiteral("Никнейм или почта"));
     m_password = new ui::TextField(QStringLiteral("Пароль"));
     m_password->setPassword(true);
     m_code = new ui::TextField(QStringLiteral("Код восстановления"));
+    m_resetToken = new ui::TextField(QStringLiteral("Код из письма"));
     m_loginCode = new ui::TextField(QStringLiteral("Код из чата «NeoChat уведомления»"));
     m_loginCode->hide();
-    for (auto *f : {m_username, m_password, m_code, m_loginCode}) {
+    m_email = new ui::Button(QStringLiteral("Подтвердить электронную почту"),ui::Button::Secondary);
+    fl->addWidget(m_email);
+    connect(m_email,&QAbstractButton::clicked,this,[this] {
+        auto *sheet = new Sheet(this,QStringLiteral("Подтвердите электронную почту"));
+        auto *form = new EmailVerification(true,m_serverUrl);
+        sheet->body()->addWidget(form);
+        connect(form,&EmailVerification::verified,sheet,[this,sheet,form] {
+            m_emailTicket=form->verifiedTicket();
+            m_email->setText(QStringLiteral("Почта подтверждена"));
+            sheet->close();
+        });
+        sheet->open();
+    });
+    for (auto *f : {m_username, m_password, m_code, m_resetToken, m_loginCode}) {
         fl->addWidget(f);
         connect(f->edit(), &QLineEdit::returnPressed, this, &Onboarding::submit);
     }
@@ -146,7 +162,15 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     connect(m_submit, &QAbstractButton::clicked, this, &Onboarding::submit);
     m_switch = new ui::Button({}, ui::Button::Flat);
     fl->addWidget(m_switch);
-    connect(m_switch, &QAbstractButton::clicked, this, [this] { setMode(m_mode == Login ? Register : Login); });
+    connect(m_switch, &QAbstractButton::clicked, this, [this] {
+        if (m_mode == ResetRequest || m_mode == ResetComplete)
+            setMode(Login);
+        else
+            setMode(m_mode == Login ? Register : Login);
+    });
+    m_forgot = new ui::Button(QStringLiteral("Забыли пароль?"), ui::Button::Flat);
+    fl->addWidget(m_forgot);
+    connect(m_forgot, &QAbstractButton::clicked, this, [this] { setMode(ResetRequest); });
     m_recover = new ui::Button(QStringLiteral("Восстановить доступ"), ui::Button::Flat);
     fl->addWidget(m_recover);
     connect(m_recover, &QAbstractButton::clicked, this, [this] { setMode(Recover); });
@@ -260,30 +284,54 @@ void Onboarding::setMode(int mode)
     m_mode = mode;
     m_error->hide();
     m_code->setVisible(mode == Recover);
+    m_resetToken->setVisible(mode == ResetComplete);
     m_name->setVisible(mode == Register);
-    m_password->edit()->clear();
+    m_password->setVisible(mode != ResetRequest);
+    if (mode != ResetComplete)
+        m_password->edit()->clear();
     switch (mode) {
     case Login:
         m_heading->setText(QStringLiteral("Вход"));
         m_hint->clear();
         m_submit->setText(QStringLiteral("Войти"));
+        m_username->setLabel(QStringLiteral("Никнейм или почта"));
         break;
     case Register:
         m_heading->setText(QStringLiteral("Регистрация"));
         m_hint->setText(QStringLiteral("Пароль — не меньше 8 символов."));
         m_submit->setText(QStringLiteral("Создать аккаунт"));
+        m_username->setLabel(QStringLiteral("Никнейм"));
         break;
     case Recover:
         m_heading->setText(QStringLiteral("Восстановление доступа"));
         m_hint->setText(QStringLiteral("Остальные устройства будут отключены, переписка не перенесётся."));
         m_submit->setText(QStringLiteral("Восстановить"));
+        m_username->setLabel(QStringLiteral("Никнейм"));
+        break;
+    case ResetRequest:
+        m_heading->setText(QStringLiteral("Сброс пароля"));
+        m_hint->setText(QStringLiteral("Ссылка уйдёт на привязанную почту. Пароль входа сменится; ключи и история на ваших устройствах сохранятся."));
+        m_submit->setText(QStringLiteral("Отправить ссылку"));
+        m_username->setLabel(QStringLiteral("Никнейм или почта"));
+        break;
+    case ResetComplete:
+        m_heading->setText(QStringLiteral("Новый пароль"));
+        m_hint->setText(QStringLiteral("Введите код со страницы из письма и новый пароль. Это не восстановление аккаунта."));
+        m_submit->setText(QStringLiteral("Сменить пароль"));
+        m_username->setLabel(QStringLiteral("Никнейм или почта"));
         break;
     }
     m_hint->setVisible(!m_hint->text().isEmpty());
-    m_switch->setText(mode == Login ? QStringLiteral("Создать аккаунт") : QStringLiteral("Уже есть аккаунт? Войти"));
+    if (mode == ResetRequest || mode == ResetComplete)
+        m_switch->setText(QStringLiteral("Назад ко входу"));
+    else
+        m_switch->setText(mode == Login ? QStringLiteral("Создать аккаунт") : QStringLiteral("Уже есть аккаунт? Войти"));
     m_switch->setAccessibleName(m_switch->text());
+    m_switch->setVisible(true);
+    m_forgot->setVisible(mode == Login);
     m_recover->setVisible(mode == Login);
-    m_password->setLabel(mode == Recover ? QStringLiteral("Новый пароль") : QStringLiteral("Пароль"));
+    m_password->setLabel(mode == Recover || mode == ResetComplete ? QStringLiteral("Новый пароль") : QStringLiteral("Пароль"));
+    m_email->setVisible(mode == Register);
     if (mode != Login)
         m_loginCode->hide();
     updateQr();
@@ -300,6 +348,7 @@ void Onboarding::setBusy(bool busy)
     m_busy = busy;
     m_submit->setEnabled(!busy);
     m_switch->setEnabled(!busy);
+    m_forgot->setEnabled(!busy);
     m_recover->setEnabled(!busy);
     if (busy)
         m_submit->setText(QStringLiteral("Подождите…"));
@@ -314,10 +363,12 @@ void Onboarding::submit()
     const QString username = m_username->text().trimmed().remove(QRegularExpression("^@"));
     const QString password = m_password->text();
     if (username.isEmpty())
-        return showError(QStringLiteral("Введите никнейм"));
-    if (password.isEmpty())
+        return showError(m_mode == Login || m_mode == ResetRequest || m_mode == ResetComplete
+                             ? QStringLiteral("Введите никнейм или почту")
+                             : QStringLiteral("Введите никнейм"));
+    if (m_mode != ResetRequest && password.isEmpty())
         return showError(QStringLiteral("Введите пароль"));
-    if (m_mode != Login && password.size() < 8)
+    if (m_mode != Login && m_mode != ResetRequest && password.size() < 8)
         return showError(QStringLiteral("Пароль — не меньше 8 символов"));
     QJsonObject p{{"username", username}, {"device_name", deviceName()}, {"platform", "windows"}};
     if (!m_serverUrl.isEmpty())
@@ -333,6 +384,8 @@ void Onboarding::submit()
     case Register:
         if (m_name->text().trimmed().isEmpty())
             return showError(QStringLiteral("Введите имя"));
+        if (m_emailTicket.isEmpty()) return showError(QStringLiteral("Подтвердите электронную почту по ссылке из письма"));
+        p["email_ticket"]=m_emailTicket;
         method = "register";
         p["password"] = password;
         p["display_name"] = m_name->text().trimmed();
@@ -344,13 +397,25 @@ void Onboarding::submit()
         p["new_password"] = password;
         p["recovery_code"] = m_code->text().trimmed();
         break;
+    case ResetRequest:
+        method = "password_reset_request";
+        break;
+    case ResetComplete: {
+        const QString token = m_resetToken->text().trimmed();
+        if (token.size() != 43)
+            return showError(QStringLiteral("Введите код из письма"));
+        method = "password_reset_complete";
+        p["token"] = token;
+        p["new_password"] = password;
+        break;
+    }
     }
     showError({});
     setBusy(true);
     const int mode = m_mode;
     Core::instance()->call(method, p, this, [this, mode, password](const QJsonValue &v, const CoreError &e) {
         // After success this computer has keys: no new QR code may replace them.
-        if (e.ok())
+        if (e.ok() && mode != ResetRequest && mode != ResetComplete)
             m_hasKeys = true;
         if (e.code == "code_required") {
             setBusy(false);
@@ -362,6 +427,17 @@ void Onboarding::submit()
         setBusy(false);
         if (!e.ok())
             return showError(e.message);
+        if (mode == ResetRequest) {
+            m_resetToken->edit()->clear();
+            setMode(ResetComplete);
+            return showError(QStringLiteral("Если почта привязана, ссылка отправлена. Откройте письмо и введите код ниже."));
+        }
+        if (mode == ResetComplete) {
+            m_password->edit()->clear();
+            m_resetToken->edit()->clear();
+            setMode(Login);
+            return showError(QStringLiteral("Пароль изменён. Войдите с новым паролем."));
+        }
         m_password->edit()->clear();
         m_code->edit()->clear();
         m_loginCode->edit()->clear();

@@ -7,17 +7,17 @@
 
 class QHBoxLayout;
 class QVBoxLayout;
-class QGraphicsOpacityEffect;
 
 namespace ui {
 class Label;
 class IconButton;
 }
 
-// Modal surface over the main window: dimmed backdrop (220 ms), card fades in
-// (180 ms) and moves 10 px (220 ms). Escape, the close button and a real click
-// outside close it; a press that started inside the card never does. Focus
-// returns to the control that opened it.
+// Modal surface over the main window. The card is opaque at once and rises 10 px
+// while the backdrop dims, both over 220 ms; closing fades it out. A sheet opened
+// while another closes replaces it under the same dim. Escape, the close button and
+// a real click outside close it; a press that started inside the card never does.
+// Focus returns to the control that opened it.
 class Sheet : public QWidget {
     Q_OBJECT
 public:
@@ -47,17 +47,19 @@ protected:
 private:
     void layoutCard();
     void step(qreal t);
+    void finish();
 
     QWidget *m_card;
     QVBoxLayout *m_body;
     ui::Label *m_title;
     ui::IconButton *m_back = nullptr;
     QHBoxLayout *m_head = nullptr;
-    QGraphicsOpacityEffect *m_fade;
     QPointer<QWidget> m_opener;
     QVariantAnimation m_anim;
     int m_width;
     qreal m_t = 0;
+    // Dim taken over from the sheet this one replaced.
+    qreal m_dimFloor = 0;
     bool m_closing = false;
     bool m_pressOutside = false;
     bool m_busy = false;

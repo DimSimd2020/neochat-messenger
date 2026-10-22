@@ -22,6 +22,7 @@
 #include <QBuffer>
 #include <QPainter>
 #include <QDir>
+#include <QFontDatabase>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QContextMenuEvent>
@@ -70,7 +71,15 @@ public:
     }
     QJsonValue call(const QString &method, const QJsonObject &params = {}, QString *errorCode = nullptr)
     {
-        char *out = nc_call(m_core, method.toUtf8().constData(), QJsonDocument(params).toJson().constData());
+        QJsonObject request=params;
+        if (method=="register") {
+            const QJsonObject sent=call("registration_email_start",{{"server",params.value("server")},{"email",params.value("username").toString()+"@example.test"}}).toObject();
+            const QString ticket=sent.value("ticket").toString();
+            QElapsedTimer wait; wait.start();
+            while (wait.elapsed()<5000 && !call("registration_email_status",{{"server",params.value("server")},{"ticket",ticket}}).toObject().value("verified").toBool()) QTest::qWait(30);
+            request["email_ticket"]=ticket;
+        }
+        char *out = nc_call(m_core, method.toUtf8().constData(), QJsonDocument(request).toJson().constData());
         const QJsonObject res = QJsonDocument::fromJson(out).object();
         nc_free(out);
         if (res.contains("error")) {
@@ -317,6 +326,15 @@ void UiTest::registerAccount()
     field("Имя")->setText(QStringLiteral("Боб"));
     field("Никнейм")->setText(m_bobName);
     QTest::keyClicks(field("Пароль")->edit(), "correct horse battery");
+    button("Подтвердить электронную почту")->click();
+    QTRY_VERIFY(field("Электронная почта"));
+    field("Электронная почта")->setText(m_bobName+"@example.test");
+    button("Отправить ссылку")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(button("Я подтвердил почту"),10000);
+    QTRY_VERIFY_WITH_TIMEOUT([&] {
+        if (auto *check=button("Я подтвердил почту"); check && check->isEnabled()) check->click();
+        return button("Почта подтверждена")!=nullptr;
+    }(),10000);
     button("Создать аккаунт")->click();
     QTRY_VERIFY_WITH_TIMEOUT(find<ui::Toggle>([](ui::Toggle *tg) { return tg->text().startsWith("Я сохранил"); }), 15000);
     QAbstractButton *cont = button("Продолжить");
@@ -767,14 +785,14 @@ void UiTest::socialFeatures()
     shot("11e2-inline-reply");
     composer->clearReply();
     find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().startsWith(QStringLiteral("Профиль")); })->click();
-    QTRY_VERIFY_WITH_TIMEOUT(button(QStringLiteral("Мой QR-код")), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(button(QStringLiteral("QR-код профиля")), 5000);
     shot("11e3-profile");
-    button(QStringLiteral("Мой QR-код"))->click();
-    QTRY_VERIFY_WITH_TIMEOUT(find<QWidget>([](QWidget *w) { return w->accessibleName() == QStringLiteral("QR-код профиля"); }), 5000);
+    button(QStringLiteral("QR-код профиля"))->click();
+    QTRY_VERIFY_WITH_TIMEOUT(find<Sheet>([](Sheet *w) { return w->accessibleName() == QStringLiteral("QR-код профиля"); }), 5000);
     QTest::qWait(1500);
     shot("11e4-my-qr");
-    QTest::keyClick(QApplication::focusWidget() ? QApplication::focusWidget() : m_window, Qt::Key_Escape);
-    QTest::qWait(600);
+    Sheet::closeAll(sheetHost());
+    QTRY_VERIFY2(!Sheet::anyOpen(sheetHost()), qPrintable(openSheets()));
 
     // Archive and pins from the list menu's core calls; the archive row appears on top.
     QString gid;
@@ -957,6 +975,8 @@ void UiTest::dialogsAndPickers()
 
     // Profile: the bio field shows all 100 characters on three lines.
     find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().startsWith("Профиль"); })->click();
+    QTRY_VERIFY(button("Изменить профиль"));
+    button("Изменить профиль")->click();
     QTRY_VERIFY(find<ui::TextArea>([](ui::TextArea *) { return true; }));
     auto *bio = find<ui::TextArea>([](ui::TextArea *) { return true; });
     bio->edit()->setPlainText(QString(100, QChar('я')));
@@ -1038,7 +1058,28 @@ void UiTest::calls()
         QTRY_VERIFY_WITH_TIMEOUT(media.isConnected(), 15000);
         m_alice->call("call_connected", {{"call_id", id}});
         QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Active, 15000);
+        auto *banner = m_window->findChild<QAbstractButton *>("active-call-banner");
+        QVERIFY(banner && banner->isVisible());
+        QVERIFY(banner->text().startsWith(QStringLiteral("Идёт звонок")));
+        QWidget *currentCall = callWindow();
+        QVERIFY(currentCall);
+        currentCall->hide();
+        QVERIFY(!callWindow());
+        shot("41b-call-banner");
+        banner->click();
+        QTRY_COMPARE(callWindow(), currentCall);
+        currentCall->showMinimized();
+        QTRY_VERIFY(currentCall->isMinimized());
+        banner->click();
+        QTRY_VERIFY(!currentCall->isMinimized());
+        QCOMPARE(callWindow(), currentCall);
+        currentCall->hide();
+        banner->setFocus();
+        QTest::keyClick(banner, Qt::Key_Space);
+        QTRY_COMPARE(callWindow(), currentCall);
+        const QString initialClock = banner->text();
         QTest::qWait(1600);
+        QVERIFY(banner->text() != initialClock);
         callShot("41-call-active");
         callButton("Выключить микрофон")->click();
         QVERIFY(!calls->micOn());
@@ -1049,6 +1090,7 @@ void UiTest::calls()
         QCOMPARE(ended.value("reason").toString(), QStringLiteral("hangup"));
     }
     QTRY_COMPARE_WITH_TIMEOUT(calls->phase(), CallController::Idle, 5000);
+    QVERIFY(!m_window->findChild<QAbstractButton *>("active-call-banner")->isVisible());
     auto *view = find<MessageView>([](MessageView *) { return true; });
     QTRY_VERIFY_WITH_TIMEOUT(lastMessage(view).value("kind").toString() == "call", 5000);
     QVERIFY(lastMessage(view).value("text").toString().startsWith(QStringLiteral("Входящий звонок · ")));
@@ -1191,6 +1233,8 @@ void UiTest::keyChangeBlocksSending()
     QVERIFY(!button("Отправить")->isEnabled());
     shot("16-key-changed");
     button("Сверить код")->click();
+    QTRY_VERIFY(button("Конфиденциальность"));
+    button("Конфиденциальность")->click();
     QTRY_VERIFY(button("Код сверен, принять новый ключ"));
     shot("17-safety-number");
 }
@@ -1279,6 +1323,10 @@ void UiTest::cleanupTestCase()
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
+#ifdef Q_OS_WIN
+    if (QGuiApplication::platformName() == QLatin1String("offscreen"))
+        QFontDatabase::addApplicationFont(qEnvironmentVariable("WINDIR") + "/Fonts/segoeui.ttf");
+#endif
     Q_INIT_RESOURCE(resources);
     QApplication::setOrganizationName("NeoChatTest");
     QApplication::setApplicationName("NeoChatUiTest");

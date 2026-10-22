@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -55,11 +56,29 @@ func main() {
 		}
 		mem, _ := strconv.Atoi(env("NEOCHAT_ARGON_MEMORY_KIB", "65536"))
 		par, _ := strconv.Atoi(env("NEOCHAT_ARGON_PARALLEL", "2"))
+		fcm, err := app.NewFCMClient(ctx, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+		if err != nil {
+			fatal(log, "FCM configuration", err)
+		}
+		email, err := app.NewFirebaseEmailSender(ctx, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), os.Getenv("NEOCHAT_FIREBASE_API_KEY"))
+		if err != nil {
+			fatal(log, "email configuration", err)
+		}
+		emailBaseURL := os.Getenv("NEOCHAT_EMAIL_BASE_URL")
+		if email != nil {
+			origin, err := url.Parse(emailBaseURL)
+			if err != nil || origin.Scheme != "https" || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
+				fatal(log, "email configuration", fmt.Errorf("NEOCHAT_EMAIL_BASE_URL must be an HTTPS origin"))
+			}
+		}
 		srv := app.New(db, app.Config{
 			DataDir: dataDir, ArgonMemoryKiB: uint32(mem), ArgonParallel: par,
 			TurnSecret: os.Getenv("NEOCHAT_TURN_SECRET"), TurnURIs: strings.Fields(os.Getenv("NEOCHAT_TURN_URIS")),
+			FCM:   fcm,
+			Email: email, EmailBaseURL: emailBaseURL,
 		}, log)
 		go srv.RunCleanup(ctx)
+		go srv.RunPush(ctx)
 		hs := &http.Server{
 			Addr:              env("NEOCHAT_LISTEN", "127.0.0.1:8090"),
 			Handler:           srv,

@@ -121,6 +121,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 final class RootViewController: UIViewController {
     private var current: UIViewController?
     private var updateBanner: UIView?
+    private var dismissedUpdate = ""
     private var lastUpdateCheck = Date.distantPast
 
     override func viewDidLoad() {
@@ -148,7 +149,7 @@ final class RootViewController: UIViewController {
         guard manual || (updateBanner == nil && Date().timeIntervalSince(lastUpdateCheck) > 3600),
               let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return }
         lastUpdateCheck = Date()
-        Core.shared.call("check_update", ["platform": "ios", "version": version]) { [weak self] r in
+        Core.shared.call("check_update", ["platform": "ios", "version": version, "channel": Prefs.updateChannel]) { [weak self] r in
             switch r {
             case .failure(let e): if manual { self?.topToast(e.message) }
             case .success(let v):
@@ -157,7 +158,8 @@ final class RootViewController: UIViewController {
                     return
                 }
                 if manual { self?.offerUpdate(o.str("version"), url) }
-                self?.showUpdateBanner(o.str("version"), url)
+                // A banner closed by hand stays closed for that version until the app restarts.
+                if manual || o.str("version") != self?.dismissedUpdate { self?.showUpdateBanner(o.str("version"), url) }
             }
         }
     }
@@ -177,6 +179,7 @@ final class RootViewController: UIViewController {
         top.toast(text)
     }
 
+    /// Drops in from above on a spring; the cross sends it back up.
     private func showUpdateBanner(_ version: String, _ url: URL) {
         guard updateBanner == nil else { return }
         let bar = UIView()
@@ -184,16 +187,29 @@ final class RootViewController: UIViewController {
         let text = label("Доступна версия \(version)", 15, .semibold)
         let open = PillButton("Скачать")
         open.addAction(UIAction { _ in UIApplication.shared.open(url) }, for: .touchUpInside)
-        let row = UIStackView(arrangedSubviews: [text, open])
+        let close = UIButton(type: .system)
+        close.setImage(UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)), for: .normal)
+        close.tintColor = Theme.muted
+        close.accessibilityLabel = "Скрыть обновление"
+        close.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        close.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        close.springPress()
+        close.addAction(UIAction { [weak self] _ in
+            self?.dismissedUpdate = version
+            Haptics.tick()
+            self?.hideUpdateBanner()
+        }, for: .touchUpInside)
+        let row = UIStackView(arrangedSubviews: [text, open, close])
         row.alignment = .center
-        row.spacing = 12
+        row.spacing = 8
+        row.setCustomSpacing(12, after: text)
         row.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(row)
         bar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bar)
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 18),
-            row.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            row.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -4),
             row.topAnchor.constraint(equalTo: bar.topAnchor, constant: 8),
             row.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -8),
             bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
@@ -203,7 +219,22 @@ final class RootViewController: UIViewController {
         updateBanner = bar
         UIAccessibility.post(notification: .announcement, argument: "Доступна версия \(version)")
         bar.alpha = 0
-        UIView.animate(withDuration: Theme.ms(0.22)) { bar.alpha = 1 }
+        UIView.animate(withDuration: Theme.ms(0.16)) { bar.alpha = 1 }
+        if !Theme.reducedMotion {
+            bar.transform = CGAffineTransform(translationX: 0, y: -96).scaledBy(x: 0.92, y: 0.92)
+            Motion.animate(0.5, 0.7) { bar.transform = .identity }
+        }
+    }
+
+    private func hideUpdateBanner() {
+        guard let bar = updateBanner else { return }
+        updateBanner = nil
+        bar.isUserInteractionEnabled = false
+        guard !Theme.reducedMotion else { return bar.removeFromSuperview() }
+        UIView.animate(withDuration: 0.2) { bar.alpha = 0 }
+        Motion.animate(0.34, 1, { bar.transform = CGAffineTransform(translationX: 0, y: -(bar.frame.maxY + 24)).scaledBy(x: 0.94, y: 0.94) }) {
+            bar.removeFromSuperview()
+        }
     }
 
     func start() {

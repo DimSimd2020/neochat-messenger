@@ -102,8 +102,8 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
         section("Уведомления").apply {
             addView(toggle("Уведомления о сообщениях", "notifications", true))
             addView(note("В уведомлении видно только название чата, текст не показывается."))
-            addView(toggle("Мгновенная доставка", "realtime", true) { app.neochat.RealtimeService.sync(ctx) })
-            addView(note("NeoChat держит соединение с сервером в фоне, поэтому сообщения и звонки приходят сразу. В шторке остаётся тихое уведомление «NeoChat на связи». Если выключить, новые сообщения проверяются примерно раз в 15 минут, а звонки в фоне не приходят."))
+            addView(toggle("Резервное соединение в фоне", "realtime", app.neochat.RealtimeService.enabled(ctx)) { app.neochat.RealtimeService.sync(ctx) })
+            addView(note("Сообщения и звонки приходят через push без постоянного уведомления. Резервное соединение нужно, если push недоступен: с ним в шторке появляется «NeoChat на связи». Без push и резервного соединения сообщения проверяются примерно раз в 15 минут."))
             addView(nav(R.drawable.ic_shield, "Работа в фоне", batteryValue) { requestUnrestricted() })
             if (Build.VERSION.SDK_INT >= 34) addView(nav(R.drawable.ic_phone, "Звонки на заблокированном экране", lockScreenValue) { openLockScreenCalls(act) })
             addView(nav(R.drawable.ic_bell, "Звук и вибрация") {
@@ -167,6 +167,13 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
         section("О приложении").apply {
             val version = runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: ""
             addView(nav(R.drawable.ic_info, "Версия", ctx.label(version, 14f, 400, Theme.Role.MUTED)) {})
+            val channelValue = ctx.label(Prefs.updateChannel(ctx), 14f, 400, Theme.Role.MUTED)
+            addView(nav(R.drawable.ic_info, "Сообщать об обновлениях:", channelValue) {
+                choose(channelValue, listOf("stable" to "stable", "beta" to "beta"), Prefs.updateChannel(ctx)) {
+                    prefs.edit().putString("update_channel", it).apply()
+                    act.checkUpdate(manual = true)
+                }
+            })
             addView(nav(R.drawable.ic_download, "Проверить обновления") { act.checkUpdate(manual = true) })
         }
 

@@ -6,7 +6,7 @@ import WebRTC
 /// Closes itself when the call is over; the call keeps running without it.
 final class CallViewController: UIViewController {
     private let remote = RTCMTLVideoView()
-    private let local = RTCMTLVideoView()
+    private let local = CameraPreviewView()
     private let pulse = PulseView()
     private let avatar = AvatarView(size: 120)
     private let name = label("", 28, .semibold, color: .white)
@@ -40,7 +40,7 @@ final class CallViewController: UIViewController {
         remote.isHidden = true
         remote.isAccessibilityElement = true
         remote.accessibilityLabel = "Видео собеседника"
-        local.videoContentMode = .scaleAspectFill
+        local.previewLayer.videoGravity = .resizeAspectFill
         local.layer.cornerRadius = 18
         local.layer.cornerCurve = .continuous
         local.clipsToBounds = true
@@ -140,7 +140,6 @@ final class CallViewController: UIViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         CallManager.shared.remoteRenderer.target = remote
-        CallManager.shared.localRenderer.target = local
         tick = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.sync() }
         sync()
     }
@@ -148,7 +147,7 @@ final class CallViewController: UIViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         CallManager.shared.remoteRenderer.target = nil
-        CallManager.shared.localRenderer.target = nil
+        local.previewLayer.session = nil
         tick?.invalidate()
         pulse.stop()
     }
@@ -159,9 +158,13 @@ final class CallViewController: UIViewController {
 
     private func toggleCamera() {
         let m = CallManager.shared
-        if m.cameraOn { return m.setCamera(false) }
+        if m.cameraOn || m.cameraStarting { return m.setCamera(false) }
+        let id = m.callId
         AVCaptureDevice.requestAccess(for: .video) { ok in
-            DispatchQueue.main.async { ok ? m.setCamera(true) : self.toast("Нет доступа к камере") }
+            DispatchQueue.main.async {
+                guard m.live, m.callId == id else { return }
+                ok ? m.setCamera(true) : self.toast("Нет доступа к камере")
+            }
         }
     }
 
@@ -204,15 +207,24 @@ final class CallViewController: UIViewController {
         topShade.isHidden = !video
         center.isHidden = video
         local.isHidden = !m.cameraOn
-        local.transform = m.frontCamera ? CGAffineTransform(scaleX: -1, y: 1) : .identity
+        if local.previewLayer.session !== m.cameraSession { local.previewLayer.session = m.cameraSession }
+        if let connection = local.previewLayer.connection {
+            if connection.isVideoOrientationSupported { connection.videoOrientation = .portrait }
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = m.frontCamera
+            }
+        }
         flip.isHidden = !m.cameraOn
+        flip.isEnabled = !m.cameraStarting
         let ringing = m.phase == .incoming
         for b in [mic, camera, speaker, end] { b.isHidden = !m.live }
         decline.isHidden = !ringing
         accept.isHidden = !ringing
         acceptVideo.isHidden = !(ringing && m.call.bool("video"))
         mic.set(m.micOn ? "mic.fill" : "mic.slash.fill", m.micOn ? "Микрофон" : "Без звука", m.micOn ? "Выключить микрофон" : "Включить микрофон", on: !m.micOn)
-        camera.set(m.cameraOn ? "video.fill" : "video.slash.fill", "Камера", m.cameraOn ? "Выключить камеру" : "Включить камеру", on: m.cameraOn)
+        let cameraEnabled = m.cameraOn || m.cameraStarting
+        camera.set(cameraEnabled ? "video.fill" : "video.slash.fill", m.cameraStarting ? "Включение…" : "Камера", cameraEnabled ? "Выключить камеру" : "Включить камеру", on: cameraEnabled)
         speaker.set("speaker.wave.2.fill", "Динамик", m.speakerOn ? "Выключить динамик" : "Включить динамик", on: m.speakerOn)
         if (ringing || m.phase == .outgoing) && !Theme.reducedMotion { pulse.start() } else { pulse.stop() }
         if UIAccessibility.isVoiceOverRunning, status.accessibilityLabel != st, m.phase != .active {
@@ -220,6 +232,12 @@ final class CallViewController: UIViewController {
             UIAccessibility.post(notification: .announcement, argument: st)
         }
     }
+}
+
+/// Preview comes straight from the capture session, including when the call screen reopens.
+private final class CameraPreviewView: UIView {
+    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
+    var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
 }
 
 /// Round call control with a caption; "on" toggles are drawn light.

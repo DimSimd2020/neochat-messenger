@@ -1,6 +1,7 @@
 #include "composer.h"
 #include "messages.h"
 #include "popupmenu.h"
+#include "sheet.h"
 #include "theme.h"
 
 #include <QApplication>
@@ -9,6 +10,8 @@
 #include <QDir>
 #include <QMimeData>
 #include <QLineEdit>
+#include <QPointer>
+#include <QScrollArea>
 #include <QVBoxLayout>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -112,6 +115,51 @@ private slots:
         QVERIFY(input.hasFocus());
         QTest::keyClicks(&input, "reply");
         QCOMPARE(input.text(), QString("reply"));
+    }
+
+    // Settings → section: the window behind stays equally dim and the old card is gone at once.
+    void switchingSheetsKeepsBackdrop() {
+        QWidget host;
+        host.resize(900, 640);
+        host.show();
+        QPointer<Sheet> first = new Sheet(&host, QStringLiteral("Настройки"));
+        first->open();
+        QTest::qWait(400);
+        const QPoint outside(8, 8);
+        const QRgb dimmed = host.grab().toImage().pixel(outside);
+        first->close();
+        auto *second = new Sheet(&host, QStringLiteral("Графика"));
+        second->open();
+        for (int i = 0; i < 8; ++i) {
+            QVERIFY(!first || !first->isVisible());
+            QCOMPARE(host.grab().toImage().pixel(outside), dimmed);
+            QTest::qWait(30);
+        }
+    }
+
+    // The tinted body has round corners and thins out into the card instead of ending in a hard edge.
+    void sheetBodyMeltsIntoCard() {
+        QWidget host;
+        host.resize(900, 640);
+        host.show();
+        auto *sheet = new Sheet(&host, QStringLiteral("Графика"));
+        auto *rows = new QWidget;
+        rows->setFixedHeight(200);
+        sheet->body()->addWidget(rows);
+        sheet->open();
+        QTest::qWait(400);
+        auto *scroll = sheet->findChild<QScrollArea *>();
+        QVERIFY(scroll);
+        const QImage card = scroll->parentWidget()->grab().toImage();
+        const QRect body = scroll->geometry();
+        const Palette &c = Theme::p();
+        QCOMPARE(card.pixel(body.center()), c.canvas.rgb());
+        const QRgb halfway = card.pixel(body.left() - 6, body.center().y());
+        QVERIFY(halfway != c.canvas.rgb() && halfway != c.surface.rgb());
+        QCOMPARE(card.pixel(body.left() - 16, body.center().y()), c.surface.rgb());
+        QVERIFY(card.pixel(body.topLeft()) != c.canvas.rgb());
+        const QString shots = qEnvironmentVariable("NEOCHAT_SHOTS");
+        if (!shots.isEmpty()) { QDir().mkpath(shots); host.grab().save(shots + "/0672-sheet.png"); }
     }
 };
 

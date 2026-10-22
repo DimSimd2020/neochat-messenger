@@ -27,7 +27,7 @@ fun View.replyHaptic() {
 }
 
 /** A native vector: the lid opens and the arrow drops into the box as the row is pulled out. */
-class ArchiveIcon : Drawable() {
+class ArchiveIcon(private val ring: Boolean = false) : Drawable() {
     var progress = 0f
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
@@ -40,6 +40,15 @@ class ArchiveIcon : Drawable() {
     override fun draw(canvas: Canvas) {
         val p = if (Theme.reducedMotion) 0f else progress.coerceIn(0f, 1f)
         val lift = sin(p * PI).toFloat()
+        if (ring && p > 0.02f && p < 1f) {
+            val savedWidth = paint.strokeWidth
+            paint.strokeWidth = bounds.width() / 26f * 1.3f
+            val radius = bounds.width() * 0.9f
+            canvas.drawArc(bounds.exactCenterX() - radius, bounds.exactCenterY() - radius,
+                bounds.exactCenterX() + radius, bounds.exactCenterY() + radius,
+                -90f, p * 360f, false, paint)
+            paint.strokeWidth = savedWidth
+        }
         canvas.save()
         canvas.translate(bounds.left.toFloat(), bounds.top.toFloat())
         canvas.scale(bounds.width() / 26f, bounds.height() / 26f)

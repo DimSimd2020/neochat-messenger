@@ -13,9 +13,35 @@
 
 namespace {
 
+// Fills `core` with `color`; around it the color thins out over `soft` px into what is below.
+void paintSoftPanel(QPainter &p, const QRect &core, const QColor &color)
+{
+    constexpr int soft = 12;
+    constexpr int radius = 12;
+    p.setPen(Qt::NoPen);
+    p.save();
+    // Inside the core every layer is covered by the opaque fill below; only the rim needs them.
+    p.setClipRegion(QRegion(core.adjusted(-soft - 1, -soft - 1, soft + 1, soft + 1))
+                        .subtracted(QRegion(core.adjusted(radius, radius, -radius, -radius))));
+    qreal reached = 0;
+    for (int i = soft; i > 0; --i) {
+        const qreal t = qreal(soft + 1 - i) / (soft + 1);
+        const qreal want = t * t * (3 - 2 * t);
+        QColor layer = color;
+        layer.setAlphaF((want - reached) / (1 - reached));
+        p.setBrush(layer);
+        p.drawRoundedRect(QRectF(core).adjusted(-i, -i, i, i), radius + i, radius + i);
+        reached = want;
+    }
+    p.restore();
+    p.setBrush(color);
+    p.drawRoundedRect(QRectF(core), radius, radius);
+}
+
 class Card : public QWidget {
 public:
     using QWidget::QWidget;
+    QWidget *body = nullptr;
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -26,6 +52,8 @@ protected:
         p.setPen(QPen(c.border, 1));
         p.setBrush(c.surface);
         p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 20, 20);
+        if (body)
+            paintSoftPanel(p, body->geometry(), c.canvas);
     }
 };
 
@@ -68,7 +96,8 @@ Sheet::Sheet(QWidget *host, const QString &title, int width) : QWidget(host), m_
     setObjectName("Sheet");
     m_opener = QApplication::focusWidget();
     setFocusPolicy(Qt::StrongFocus);
-    m_card = new Card(this);
+    auto *card = new Card(this);
+    m_card = card;
     auto *outer = new QVBoxLayout(m_card);
     outer->setContentsMargins(24, 18, 24, 24);
     outer->setSpacing(14);
@@ -83,28 +112,21 @@ Sheet::Sheet(QWidget *host, const QString &title, int width) : QWidget(host), m_
     outer->addLayout(head);
     auto *scroll = new BodyScroll(m_card);
     auto *content = new QWidget;
-    content->setAutoFillBackground(false);
     m_body = new QVBoxLayout(content);
     m_body->setContentsMargins(0, 0, 0, 0);
     m_body->setSpacing(10);
     scroll->setWidget(content);
+    // setWidget turns the fill back on; the card paints the body's backdrop.
+    content->setAutoFillBackground(false);
     content->installEventFilter(scroll);
     outer->addWidget(scroll, 1);
-    m_fade = new QGraphicsOpacityEffect(m_card);
-    m_fade->setOpacity(0);
-    m_card->setGraphicsEffect(m_fade);
+    card->body = scroll;
     m_anim.setStartValue(0.0);
+    m_anim.setEasingCurve(Theme::surfaceEasing());
     connect(&m_anim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) { step(v.toReal()); });
     connect(&m_anim, &QVariantAnimation::finished, this, [this] {
-        if (m_closing) {
-            hide();
-            emit closed();
-            deleteLater();
-        } else {
-            // Drop the effect when idle: it would otherwise re-render the card on every update.
-            m_card->setGraphicsEffect(nullptr);
-            m_fade = nullptr;
-        }
+        if (m_closing)
+            finish();
     });
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     host->installEventFilter(this);
@@ -145,10 +167,20 @@ void Sheet::open()
     if (first)
         first->setFocus(Qt::OtherFocusReason);
     qApp->installEventFilter(this);
+    // A sheet replacing a closing one keeps its dim and removes it at once, so the backdrop
+    // never brightens in between and the old card never shows around the new one.
+    for (auto *s : parentWidget()->findChildren<Sheet *>(QString(), Qt::FindDirectChildrenOnly)) {
+        if (s != this && s->m_closing) {
+            m_dimFloor = qMax(m_dimFloor, qMax(s->m_t, s->m_dimFloor));
+            s->finish();
+        }
+    }
+    // The card is opaque from the first frame. Only the dim and the 10 px rise animate,
+    // so the screen underneath never shows through the new window.
+    step(0);
     m_anim.setDuration(qMax(1, Theme::ms(220)));
     m_anim.setStartValue(0.0);
     m_anim.setEndValue(1.0);
-    m_anim.setEasingCurve(QEasingCurve::Linear);
     m_anim.start();
 }
 
@@ -162,23 +194,29 @@ void Sheet::close()
     setAttribute(Qt::WA_TransparentForMouseEvents);
     if (m_opener && m_opener->isVisible())
         m_opener->setFocus(Qt::OtherFocusReason);
-    if (!m_fade) {
-        m_fade = new QGraphicsOpacityEffect(m_card);
-        m_card->setGraphicsEffect(m_fade);
-    }
+    m_card->setGraphicsEffect(new QGraphicsOpacityEffect(m_card));
+    const qreal from = qMax(m_t, m_dimFloor);
+    m_dimFloor = 0;
     m_anim.stop();
-    m_anim.setStartValue(m_t);
+    m_anim.setStartValue(from);
     m_anim.setEndValue(0.0);
-    m_anim.setDuration(qMax(1, int(Theme::ms(220) * m_t)));
+    m_anim.setDuration(qMax(1, int(Theme::ms(220) * from)));
     m_anim.start();
+}
+
+void Sheet::finish()
+{
+    m_anim.stop();
+    hide();
+    emit closed();
+    deleteLater();
 }
 
 void Sheet::step(qreal t)
 {
     m_t = t;
-    // Opacity completes at 180 of 220 ms; movement uses the surface curve.
-    if (m_fade)
-        m_fade->setOpacity(qMin(1.0, t * 220.0 / 180.0));
+    if (auto *fade = qobject_cast<QGraphicsOpacityEffect *>(m_card->graphicsEffect()))
+        fade->setOpacity(t);
     layoutCard();
     update();
 }
@@ -192,14 +230,14 @@ void Sheet::layoutCard()
     // Wrapped labels need height-for-width, not the plain size hint.
     const int want = m_card->hasHeightForWidth() ? m_card->heightForWidth(w) : m_card->sizeHint().height();
     const int h = qMin(maxH, qMax(want, m_card->minimumSizeHint().height()));
-    const qreal shift = (1 - Theme::surfaceEasing().valueForProgress(m_t)) * 10;
+    const qreal shift = (1 - m_t) * 10;
     m_card->setGeometry((width() - w) / 2, (height() - h) / 2 + int(shift), w, h);
 }
 
 void Sheet::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
-    p.fillRect(rect(), QColor(0, 0, 0, int(110 * m_t)));
+    p.fillRect(rect(), QColor(0, 0, 0, int(110 * qMax(m_t, m_dimFloor))));
 }
 
 void Sheet::mousePressEvent(QMouseEvent *e)

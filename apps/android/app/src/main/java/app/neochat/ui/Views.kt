@@ -100,12 +100,24 @@ class GlassDrawable(
     var kind: Kind = Kind.GLASS,
     var radius: Float = ctx.dpf(25),
     var rim: Boolean = true,
+    private val selectionTint: Boolean = false,
 ) : Drawable() {
     enum class Kind { GLASS, STRONG, INCOMING, OUTGOING, ACTION, WARNING, NONE }
 
     /** Optional per-corner radii (tl, tr, br, bl); null = uniform. */
     var corners: FloatArray? = null
     var pressed = 0f
+    private var selected = false
+    override fun isStateful() = true
+    override fun onStateChange(state: IntArray): Boolean {
+        val on = android.R.attr.state_selected in state
+        if (on == selected) return false
+        selected = on
+        invalidateSelf()
+        return true
+    }
+    /** How much of the fill and rim is drawn, for surfaces that fade in and out. */
+    var level = 1f
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = ctx.dpf(1) }
     private val path = Path()
@@ -128,8 +140,9 @@ class GlassDrawable(
         val cr = corners
         if (cr == null) path.addRoundRect(rect, radius, radius, Path.Direction.CW)
         else path.addRoundRect(rect, floatArrayOf(cr[0], cr[0], cr[1], cr[1], cr[2], cr[2], cr[3], cr[3]), Path.Direction.CW)
-        if (color != 0) {
+        if (color != 0 && level > 0f) {
             fill.color = color
+            fill.alpha = (fill.alpha * level.coerceAtMost(1f)).toInt()
             c.drawPath(path, fill)
         }
         if (pressed > 0f) {
@@ -137,8 +150,14 @@ class GlassDrawable(
             fill.alpha = (fill.alpha * pressed).toInt()
             c.drawPath(path, fill)
         }
-        if (rim && kind != Kind.ACTION && kind != Kind.OUTGOING) {
+        if (selected && selectionTint) {
+            fill.color = p.accent
+            fill.alpha = 41
+            c.drawPath(path, fill)
+        }
+        if (rim && kind != Kind.ACTION && kind != Kind.OUTGOING && level > 0f) {
             stroke.color = p.rim
+            stroke.alpha = (stroke.alpha * level.coerceAtMost(1f)).toInt()
             c.drawPath(path, stroke)
         }
     }
@@ -149,32 +168,82 @@ class GlassDrawable(
     override fun getOpacity() = PixelFormat.TRANSLUCENT
 }
 
-/** Short press feedback (140 ms) for any view with a GlassDrawable background. */
+/**
+ * Press response for any tappable view: a GlassDrawable surface darkens and the view sinks
+ * about 5 dp on a stiff spring, then comes back on a soft one with a small bounce. Inside
+ * scrolling containers the press waits for the tap timeout, so a scroll does not flash
+ * every row it starts on; a quicker tap still shows a short press.
+ */
 @SuppressLint("ClickableViewAccessibility")
 fun View.pressFeedback() {
     var anim: ValueAnimator? = null
-    setOnTouchListener { v, e ->
-        val g = v.background as? GlassDrawable
-        val to = when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> 1f
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> 0f
-            else -> null
-        }
-        if (to != null && g != null) {
+    var pending: Runnable? = null
+    var down = false
+    var touches = 0
+    val slop = ViewConfiguration.get(context).scaledTouchSlop
+    fun press(on: Boolean) {
+        if (on == down) return
+        down = on
+        (background as? GlassDrawable)?.let { g ->
             anim?.cancel()
-            anim = ValueAnimator.ofFloat(g.pressed, to).apply {
-                duration = Theme.ms(140)
-                addUpdateListener { g.pressed = it.animatedValue as Float; v.invalidate() }
+            anim = ValueAnimator.ofFloat(g.pressed, if (on) 1f else 0f).apply {
+                duration = Theme.ms(if (on) 90 else 240)
+                addUpdateListener { g.pressed = it.animatedValue as Float; invalidate() }
                 start()
+            }
+        }
+        val sink = 1f - (dpf(5) / maxOf(width, height, 1)).coerceAtMost(0.1f)
+        if (on) springTo(Prop.SCALE, sink, 0.2f, 1f) else springTo(Prop.SCALE, 1f, 0.42f, 0.5f)
+    }
+    fun cancelPending() {
+        pending?.let { removeCallbacks(it) }
+        pending = null
+    }
+    setOnTouchListener { v, e ->
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> if (v.isEnabled) {
+                cancelPending()
+                touches++
+                if (v.inScrollingContainer()) {
+                    val r = Runnable { pending = null; press(true) }
+                    pending = r
+                    v.postDelayed(r, ViewConfiguration.getTapTimeout().toLong())
+                } else press(true)
+            }
+            MotionEvent.ACTION_MOVE -> if (e.x < -slop || e.y < -slop || e.x > v.width + slop || e.y > v.height + slop) {
+                cancelPending()
+                press(false)
+            }
+            MotionEvent.ACTION_UP -> if (pending != null) {
+                cancelPending()
+                press(true)
+                val touch = touches
+                v.postDelayed({ if (touch == touches) press(false) }, 90)
+            } else press(false)
+            MotionEvent.ACTION_CANCEL -> {
+                cancelPending()
+                press(false)
             }
         }
         false
     }
 }
 
+private fun View.inScrollingContainer(): Boolean {
+    var p = parent
+    while (p is ViewGroup) {
+        if (p.shouldDelayChildPressedState()) return true
+        p = p.parent
+    }
+    return false
+}
+
 /** Round icon button with a 48 dp touch target; the icon follows a palette role. */
 class IconButton(ctx: Context, icon: Int, label: String, sizeDp: Int = 48, glass: Boolean = false, private var iconRole: Theme.Role = Theme.Role.TEXT) :
     ImageView(ctx), Themed {
+    /** Played on every tap; chosen from the icon. */
+    var effect: IconEffect? = iconEffect(icon)
+
     init {
         setImageResource(icon)
         contentDescription = label
@@ -194,6 +263,12 @@ class IconButton(ctx: Context, icon: Int, label: String, sizeDp: Int = 48, glass
         setImageResource(icon)
         contentDescription = label
         tooltipText = label
+        effect = iconEffect(icon)
+    }
+
+    override fun performClick(): Boolean {
+        effect?.let { play(it) }
+        return super.performClick()
     }
 
     fun setRole(r: Theme.Role) {
@@ -252,8 +327,11 @@ class PillButton(ctx: Context, text: String, private var primary: Boolean = true
     }
 }
 
-/** Small selectable chip ("Все / Личные / Группы"). */
+/** Small selectable chip ("Все / Личные / Группы"); the glass fades in on a spring and the chip pops. */
 class Chip(ctx: Context, text: String) : TextView(ctx), Themed {
+    private val glass = GlassDrawable(ctx, GlassDrawable.Kind.GLASS, dpf(22)).apply { level = 0f }
+    private val shown = Spring(0.32f, 0.9f) { glass.level = it; applyTheme() }
+
     init {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -263,23 +341,36 @@ class Chip(ctx: Context, text: String) : TextView(ctx), Themed {
         setPadding(dp(16), 0, dp(16), 0)
         isClickable = true
         isFocusable = true
-        background = GlassDrawable(ctx, GlassDrawable.Kind.NONE, dpf(22))
+        background = glass
+        pressFeedback()
         applyTheme()
     }
 
     override fun setSelected(selected: Boolean) {
+        val changed = selected != isSelected
         super.setSelected(selected)
-        (background as? GlassDrawable)?.let {
-            it.kind = if (selected) GlassDrawable.Kind.GLASS else GlassDrawable.Kind.NONE
-            it.rim = selected
+        // Before the first layout the chip simply starts in its state.
+        if (!isLaidOut) shown.snap(if (selected) 1f else 0f)
+        else if (changed) {
+            shown.to(if (selected) 1f else 0f)
+            if (selected) pop(0.9f, 0.36f, 0.5f)
         }
-        applyTheme()
+    }
+
+    override fun performClick(): Boolean {
+        Haptics.select(this)
+        return super.performClick()
     }
 
     override fun applyTheme() {
-        setTextColor(if (isSelected) Theme.p.text else Theme.p.muted)
+        setTextColor(blendColor(Theme.p.muted, Theme.p.text, glass.level.coerceIn(0f, 1f)))
         invalidate()
     }
+}
+
+fun blendColor(a: Int, b: Int, t: Float): Int {
+    fun ch(s: Int) = (((a shr s) and 0xFF) + ((((b shr s) and 0xFF) - ((a shr s) and 0xFF)) * t)).toInt() shl s
+    return ch(24) or ch(16) or ch(8) or ch(0)
 }
 
 /** Edit field whose text and hint follow the palette. */
@@ -351,12 +442,12 @@ class SearchBox(ctx: Context, hint: String) : LinearLayout(ctx), Themed {
     }
 }
 
-/** Field with a floating label: inside when empty, above when focused or filled (180 ms). */
+/** Field with a floating label: inside when empty, above when focused or filled, on a spring. */
 class FloatingField(ctx: Context, labelText: String, password: Boolean = false) : FrameLayout(ctx), Themed {
     val edit = EditText(ctx)
     private val labelView = ctx.label(labelText, 15f, 400, Theme.Role.MUTED)
     private var up = 0f
-    private var anim: ValueAnimator? = null
+    private val lift = Spring(0.34f, 0.82f) { set(it) }
     val text get() = edit.text.toString()
 
     init {
@@ -394,21 +485,8 @@ class FloatingField(ctx: Context, labelText: String, password: Boolean = false) 
 
     private fun update(animated: Boolean) {
         val target = if (edit.hasFocus() || edit.text.isNotEmpty()) 1f else 0f
-        if (target == up && anim == null) return
-        anim?.cancel()
-        val from = up
-        val d = if (animated) Theme.ms(180) else 0
-        if (d == 0L) return set(target)
-        anim = ValueAnimator.ofFloat(from, target).apply {
-            duration = d
-            addUpdateListener { set(it.animatedValue as Float) }
-            addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(a: android.animation.Animator) {
-                    anim = null
-                }
-            })
-            start()
-        }
+        if (target == lift.target && (lift.running || target == up)) return
+        if (animated) lift.to(target) else lift.snap(target)
     }
 
     private fun set(t: Float) {
@@ -542,14 +620,23 @@ class BackgroundView(ctx: Context) : View(ctx), Themed {
     override fun applyTheme() = invalidate()
 }
 
-/** Settings slider: device -> day -> night. Drag, tap, D-pad, Home/End; 220 ms thumb. */
+/**
+ * Settings slider: device -> day -> night. Drag, tap, D-pad, Home/End. The thumb lands on a
+ * spring that keeps the speed of the throw, grows under the finger and ticks on every detent.
+ */
 class ThemeSlider(ctx: Context) : View(ctx), Themed {
     var value = 0
         private set
     var onChange: ((Int) -> Unit)? = null
     private var pos = 0f
     private var dragging = false
-    private var anim: ValueAnimator? = null
+    private val slide = Spring(0.4f, 0.74f, 0.001f) { pos = it; invalidate() }
+    private var grab = 0f
+    private val grabSpring = Spring(0.3f, 0.7f) { grab = it; invalidate() }
+    private var lastX = 0f
+    private var lastT = 0L
+    private var speed = 0f
+    private var detent = 0
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = ctx.dpf(13) }
     private val icons = intArrayOf(app.neochat.R.drawable.ic_theme_device, app.neochat.R.drawable.ic_sun, app.neochat.R.drawable.ic_moon)
@@ -564,25 +651,16 @@ class ThemeSlider(ctx: Context) : View(ctx), Themed {
         contentDescription = "Тема"
     }
 
-    fun setValue(v: Int, animated: Boolean) {
+    fun setValue(v: Int, animated: Boolean, velocity: Float = 0f) {
         val nv = v.coerceIn(0, 2)
         val changed = nv != value
         value = nv
         describeState(names[nv])
-        anim?.cancel()
-        val d = if (animated) Theme.ms(220) else 0L
-        if (d == 0L) {
-            pos = nv.toFloat()
-            invalidate()
-        } else {
-            anim = ValueAnimator.ofFloat(pos, nv.toFloat()).apply {
-                duration = d
-                interpolator = Theme.surfaceCurve
-                addUpdateListener { pos = it.animatedValue as Float; invalidate() }
-                start()
-            }
-        }
+        slide.sync(pos)
+        if (animated) slide.to(nv.toFloat(), velocity) else slide.snap(nv.toFloat())
         if (changed) {
+            if (animated && nv != detent) Haptics.select(this)
+            detent = nv
             sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED)
             onChange?.invoke(nv)
         }
@@ -603,7 +681,8 @@ class ThemeSlider(ctx: Context) : View(ctx), Themed {
         paint.color = p.rim
         c.drawRoundRect(0f, 0f, width.toFloat(), trackH, trackH / 2, trackH / 2, paint)
         paint.style = Paint.Style.FILL
-        val cx = xFor(pos)
+        // The ends of the track stop the bounce; the middle detent keeps it.
+        val cx = xFor(pos.coerceIn(0f, 2f))
         // The fill continues under the whole thumb so no gap shows between roundings.
         paint.color = 0xFF367FF4.toInt()
         c.drawRoundRect(0f, 0f, cx + trackH / 2, trackH, trackH / 2, trackH / 2, paint)
@@ -616,7 +695,7 @@ class ThemeSlider(ctx: Context) : View(ctx), Themed {
             d.draw(c)
         }
         paint.color = android.graphics.Color.WHITE
-        c.drawCircle(cx, cy, dpf(23), paint)
+        c.drawCircle(cx, cy, dpf(23) * (1f + 0.12f * grab), paint)
         val sel = drawables[pos.roundToInt().coerceIn(0, 2)]
         sel.setTint(0xFF367FF4.toInt())
         sel.setBounds((cx - isz / 2).toInt(), (cy - isz / 2).toInt(), (cx + isz / 2).toInt(), (cy + isz / 2).toInt())
@@ -646,19 +725,40 @@ class ThemeSlider(ctx: Context) : View(ctx), Themed {
             MotionEvent.ACTION_DOWN -> {
                 parent.requestDisallowInterceptTouchEvent(true)
                 dragging = abs(e.x - xFor(pos)) < trackH
-                if (dragging) anim?.cancel()
+                lastX = e.x
+                lastT = e.eventTime
+                speed = 0f
+                if (dragging) {
+                    slide.stop()
+                    grabSpring.to(1f)
+                }
             }
             MotionEvent.ACTION_MOVE -> if (dragging) {
-                pos = ((e.x - trackH / 2) / ((width - trackH) / 2)).coerceIn(0f, 2f)
+                val unit = (width - trackH) / 2
+                pos = ((e.x - trackH / 2) / unit).coerceIn(0f, 2f)
+                val dt = (e.eventTime - lastT).coerceAtLeast(1L) / 1000f
+                speed = 0.6f * speed + 0.4f * ((e.x - lastX) / unit / dt)
+                lastX = e.x
+                lastT = e.eventTime
+                val near = pos.roundToInt()
+                if (near != detent) {
+                    detent = near
+                    Haptics.select(this)
+                }
                 invalidate()
             }
             MotionEvent.ACTION_UP -> {
+                val thrown = dragging
                 dragging = false
-                setValue(valueAt(e.x), true)
+                grabSpring.to(0f)
+                // A throw carries the thumb on toward the next detent.
+                val landing = if (thrown) (pos + speed * 0.12f).roundToInt() else valueAt(e.x)
+                setValue(landing, true, if (thrown) speed else 0f)
                 performClick()
             }
             MotionEvent.ACTION_CANCEL -> {
                 dragging = false
+                grabSpring.to(0f)
                 setValue(value, true)
             }
         }
@@ -698,7 +798,10 @@ class ThemeSlider(ctx: Context) : View(ctx), Themed {
     override fun applyTheme() = invalidate()
 }
 
-/** Switch row: label and a 46x26 dp toggle animating over 220 ms. */
+/**
+ * Switch row: label and a 46x26 dp toggle. The knob travels on a spring with a little
+ * overshoot and stretches toward the middle while the row is held, as on iOS.
+ */
 class ToggleRow(ctx: Context, text: String) : LinearLayout(ctx), Themed {
     var checked = false
         private set
@@ -708,14 +811,20 @@ class ToggleRow(ctx: Context, text: String) : LinearLayout(ctx), Themed {
         override fun onDraw(c: Canvas) {
             val off = Theme.p.rim
             val on = 0xFF367FF4.toInt()
-            paint.color = if (t >= 1f) on else if (t <= 0f) off else blend(off, on, t)
+            val k = t.coerceIn(0f, 1f)
+            paint.color = blendColor(off, on, k)
             c.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), height / 2f, height / 2f, paint)
             paint.color = android.graphics.Color.WHITE
-            c.drawCircle(height / 2f + t * (width - height), height / 2f, height / 2f - dpf(3), paint)
+            val r = height / 2f - dpf(3)
+            val cx = height / 2f + t * (width - height)
+            val stretch = dpf(6) * held
+            c.drawRoundRect(cx - r - stretch * k, height / 2f - r, cx + r + stretch * (1 - k), height / 2f + r, r, r, paint)
         }
     }
     private var t = 0f
-    private var anim: ValueAnimator? = null
+    private val travel = Spring(0.36f, 0.68f, 0.001f) { t = it; knob.invalidate() }
+    private var held = 0f
+    private val hold = Spring(0.26f, 0.9f) { held = it; knob.invalidate() }
 
     init {
         orientation = HORIZONTAL
@@ -726,25 +835,22 @@ class ToggleRow(ctx: Context, text: String) : LinearLayout(ctx), Themed {
         contentDescription = text
         addView(ctx.label(text, 15.5f), LayoutParams(0, WRAP, 1f))
         addView(knob, LayoutParams(dp(46), dp(26)))
-        setOnClickListener { setChecked(!checked, true); onToggle?.invoke(checked) }
+        setOnClickListener {
+            setChecked(!checked, true)
+            Haptics.toggle(this, checked)
+            onToggle?.invoke(checked)
+        }
+    }
+
+    override fun setPressed(pressed: Boolean) {
+        super.setPressed(pressed)
+        hold.to(if (pressed) 1f else 0f)
     }
 
     fun setChecked(on: Boolean, animated: Boolean) {
         checked = on
         describeState(if (on) "включено" else "выключено")
-        anim?.cancel()
-        val d = if (animated) Theme.ms(220) else 0L
-        if (d == 0L) {
-            t = if (on) 1f else 0f
-            knob.invalidate()
-            return
-        }
-        anim = ValueAnimator.ofFloat(t, if (on) 1f else 0f).apply {
-            duration = d
-            interpolator = Theme.surfaceCurve
-            addUpdateListener { t = it.animatedValue as Float; knob.invalidate() }
-            start()
-        }
+        if (animated) travel.to(if (on) 1f else 0f) else travel.snap(if (on) 1f else 0f)
     }
 
     override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
@@ -755,11 +861,6 @@ class ToggleRow(ctx: Context, text: String) : LinearLayout(ctx), Themed {
     }
 
     override fun applyTheme() = knob.invalidate()
-
-    private fun blend(a: Int, b: Int, t: Float): Int {
-        fun ch(s: Int) = (((a shr s) and 0xFF) + ((((b shr s) and 0xFF) - ((a shr s) and 0xFF)) * t)).toInt() shl s
-        return ch(24) or ch(16) or ch(8) or ch(0)
-    }
 }
 
 /** QR code from the core's module rows ('1' = dark). */
@@ -820,7 +921,6 @@ class SwipeToReplyLayout(
     private var tracking = false
     private var dragging = false
     private var armed = false
-    private var iconOnStart = true
     private var anim: ValueAnimator? = null
 
     init {
@@ -846,6 +946,7 @@ class SwipeToReplyLayout(
         running?.cancel()
         icon.animate().cancel()
         content?.translationX = 0f
+        icon.translationX = 0f
         applyIcon(0f)
         dragging = false
         tracking = false
@@ -986,15 +1087,12 @@ class SwipeToReplyLayout(
         icon.alpha = p
         val mag = 0.6f + 0.4f * p
         // Arrow points toward the bubble on the side being revealed.
+        // translationX, not a gravity change: relayout of a row makes the whole list
+        // draw its previous positions on top of the new ones for one frame.
         icon.scaleX = if (tx >= 0f) -mag else mag
         icon.scaleY = mag
-        val start = tx >= 0f
-        if (start != iconOnStart && tx != 0f) {
-            iconOnStart = start
-            val lp = icon.layoutParams as LayoutParams
-            lp.gravity = Gravity.CENTER_VERTICAL or if (start) Gravity.START else Gravity.END
-            icon.layoutParams = lp
-        }
+        val travel = (width - dp(20) - icon.width).toFloat().coerceAtLeast(0f)
+        icon.translationX = if (tx < 0f) travel else 0f
         icon.visibility = if (p == 0f) INVISIBLE else VISIBLE
     }
 

@@ -20,6 +20,7 @@ final class CallManager {
     private(set) var call: JSON = [:]
     private(set) var micOn = true
     private(set) var cameraOn = false
+    private(set) var cameraStarting = false
     private(set) var frontCamera = true
     private(set) var speakerOn = false
     private(set) var peerCamera = false
@@ -77,6 +78,7 @@ final class CallManager {
     private var videoSource: RTCVideoSource?
     private var videoTrack: RTCVideoTrack?
     private var capturer: RTCCameraVideoCapturer?
+    var cameraSession: AVCaptureSession? { capturer?.captureSession }
     private var videoSender: RTCRtpSender?
     private var sentSdp = false
     private var gen = 0
@@ -103,7 +105,6 @@ final class CallManager {
         }
     }
 
-    let localRenderer = ProxyRenderer()
     let remoteRenderer = ProxyRenderer()
 
     /// The peer's camera is on and frames are arriving.
@@ -290,24 +291,35 @@ final class CallManager {
     // MARK: camera
 
     func setCamera(_ on: Bool) {
-        if on == cameraOn { return }
+        if on == cameraOn && !cameraStarting { return }
         if on {
+            guard !cameraStarting else { return }
             guard pc != nil else { return }
             guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return say("Нет доступа к камере") }
             let devices = RTCCameraVideoCapturer.captureDevices()
             guard let device = devices.first(where: { $0.position == .front }) ?? devices.first else { return say("Камера не найдена") }
             let src = factory.videoSource()
             let cap = RTCCameraVideoCapturer(delegate: src)
-            startCapture(cap, device)
             let track = factory.videoTrack(with: src, trackId: "video")
-            track.add(localRenderer)
             frontCamera = device.position != .back
             capturer = cap
             videoSource = src
             videoTrack = track
             videoSender?.track = track
-            cameraOn = true
-            if !speakerOn && !headsetConnected { setSpeaker(true) }
+            cameraStarting = true
+            startCapture(cap, device) { [weak self] error in
+                guard let self, self.capturer === cap else { return }
+                self.cameraStarting = false
+                if error != nil {
+                    self.stopCamera()
+                    self.say("Не удалось включить камеру. Попробуйте ещё раз")
+                } else {
+                    self.cameraOn = true
+                    if !self.speakerOn && !self.headsetConnected { self.setSpeaker(true) }
+                }
+                self.sendCameraState()
+                self.notify()
+            }
         } else {
             stopCamera()
         }
@@ -316,41 +328,54 @@ final class CallManager {
     }
 
     /// The format closest to 640x480 at up to 30 fps.
-    private func startCapture(_ cap: RTCCameraVideoCapturer, _ device: AVCaptureDevice) {
+    private func startCapture(_ cap: RTCCameraVideoCapturer, _ device: AVCaptureDevice, done: @escaping (Error?) -> Void) {
         let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
         let best = formats.min { a, b in
             let da = CMVideoFormatDescriptionGetDimensions(a.formatDescription)
             let db = CMVideoFormatDescriptionGetDimensions(b.formatDescription)
             return abs(Int(da.width) * Int(da.height) - 640 * 480) < abs(Int(db.width) * Int(db.height) - 640 * 480)
         }
-        guard let format = best ?? formats.first else { return }
+        guard let format = best ?? formats.first else {
+            done(NSError(domain: "NeoChatCamera", code: 1))
+            return
+        }
         let fps = min(30, Int(format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30))
-        cap.startCapture(with: device, format: format, fps: fps)
+        cap.startCapture(with: device, format: format, fps: fps) { error in
+            DispatchQueue.main.async { done(error) }
+        }
     }
 
     func switchCamera() {
-        guard let cap = capturer else { return }
+        guard cameraOn, !cameraStarting, let cap = capturer else { return }
         let want: AVCaptureDevice.Position = frontCamera ? .back : .front
         guard let device = RTCCameraVideoCapturer.captureDevices().first(where: { $0.position == want }) else { return }
+        cameraStarting = true
+        notify()
         cap.stopCapture { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.capturer === cap else { return }
-                self.startCapture(cap, device)
-                self.frontCamera = want == .front
-                self.notify()
+                self.startCapture(cap, device) { [weak self] error in
+                    guard let self, self.capturer === cap else { return }
+                    self.cameraStarting = false
+                    if error != nil {
+                        self.stopCamera()
+                        self.say("Не удалось переключить камеру. Попробуйте включить её снова")
+                        self.sendCameraState()
+                    } else { self.frontCamera = want == .front }
+                    self.notify()
+                }
             }
         }
     }
 
     private func stopCamera() {
         videoSender?.track = nil
-        videoTrack?.remove(localRenderer)
         capturer?.stopCapture()
         capturer = nil
         videoTrack = nil
         videoSource = nil
-        localRenderer.reset()
         cameraOn = false
+        cameraStarting = false
     }
 
     private func sendCameraState() {

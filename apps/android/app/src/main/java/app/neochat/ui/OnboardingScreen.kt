@@ -22,7 +22,7 @@ import org.json.JSONObject
  * keys and the history from the password-protected copy on the server.
  */
 class OnboardingScreen(private val act: MainActivity, status: JSONObject, private val done: () -> Unit) : Screen {
-    private enum class Mode { LOGIN, REGISTER, RECOVER }
+    private enum class Mode { LOGIN, REGISTER, RECOVER, RESET_REQUEST, RESET_COMPLETE }
 
     private val ctx: Context = act
     private val scroll = ScrollView(ctx)
@@ -34,13 +34,16 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private val heading = ctx.label("", 24f, 700)
     private val hint = ctx.label("", 14.5f, 400, Theme.Role.MUTED)
     private val name = FloatingField(ctx, "Имя")
-    private val username = FloatingField(ctx, "Никнейм")
+    private val username = FloatingField(ctx, "Никнейм или почта")
     private val password = FloatingField(ctx, "Пароль", password = true)
     private val code = FloatingField(ctx, "Код восстановления")
+    private val resetToken = FloatingField(ctx, "Код из письма")
     private val loginCode = FloatingField(ctx, "Код из чата «NeoChat уведомления»")
+    private val email = EmailVerification(act, registration = true)
     private val error = ctx.label("", 14f, 400, Theme.Role.WARNING)
     private val submit = PillButton(ctx, "Войти")
     private val switchMode = textLink("")
+    private val forgotLink = textLink("Забыли пароль?")
     private val recoverLink = textLink("Восстановить доступ")
 
     private val recoveryCode = ctx.label("", 19f, 600, Theme.Role.ACCENT)
@@ -79,19 +82,30 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         form.orientation = LinearLayout.VERTICAL
         form.addView(heading, lp().apply { topMargin = dp(22) })
         form.addView(hint, lp().apply { topMargin = dp(8) })
-        for (f in listOf(name, username, password, code, loginCode)) form.addView(f, lp().apply { topMargin = dp(12) })
+        for (f in listOf(name, username, password, code, resetToken, loginCode)) form.addView(f, lp().apply { topMargin = dp(12) })
+        form.addView(email, lp().apply { topMargin = dp(12) })
         name.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
         loginCode.visibility = View.GONE
         loginCode.edit.inputType = InputType.TYPE_CLASS_NUMBER
         username.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         code.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+        resetToken.edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         error.visibility = View.GONE
         error.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         form.addView(error, lp().apply { topMargin = dp(12) })
         submit.setOnClickListener { submit() }
         form.addView(submit, lp().apply { topMargin = dp(18) })
-        switchMode.setOnClickListener { if (!busy) setMode(if (mode == Mode.LOGIN) Mode.REGISTER else Mode.LOGIN) }
+        switchMode.setOnClickListener {
+            if (busy) return@setOnClickListener
+            setMode(when (mode) {
+                Mode.RESET_REQUEST, Mode.RESET_COMPLETE -> Mode.LOGIN
+                Mode.LOGIN -> Mode.REGISTER
+                else -> Mode.LOGIN
+            })
+        }
         form.addView(switchMode, lp().apply { topMargin = dp(10) })
+        forgotLink.setOnClickListener { if (!busy) setMode(Mode.RESET_REQUEST) }
+        form.addView(forgotLink, lp())
         recoverLink.setOnClickListener { if (!busy) setMode(Mode.RECOVER) }
         recoverLink.role(Theme.Role.MUTED)
         form.addView(recoverLink, lp())
@@ -155,15 +169,27 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private fun setMode(m: Mode) {
         mode = m
         code.visibility = if (m == Mode.RECOVER) View.VISIBLE else View.GONE
+        resetToken.visibility = if (m == Mode.RESET_COMPLETE) View.VISIBLE else View.GONE
         name.visibility = if (m == Mode.REGISTER) View.VISIBLE else View.GONE
+        email.visibility = if (m == Mode.REGISTER) View.VISIBLE else View.GONE
+        password.visibility = if (m == Mode.RESET_REQUEST) View.GONE else View.VISIBLE
         if (m != Mode.LOGIN) loginCode.visibility = View.GONE
-        password.setLabel(if (m == Mode.RECOVER) "Новый пароль" else "Пароль")
+        password.setLabel(if (m == Mode.RECOVER || m == Mode.RESET_COMPLETE) "Новый пароль" else "Пароль")
+        username.setLabel(if (m == Mode.LOGIN || m == Mode.RESET_REQUEST || m == Mode.RESET_COMPLETE) "Никнейм или почта" else "Никнейм")
         when (m) {
             Mode.LOGIN -> set("Вход", "", "Войти")
             Mode.REGISTER -> set("Регистрация", "Пароль — не меньше 8 символов.", "Создать аккаунт")
             Mode.RECOVER -> set("Восстановление доступа", "Остальные устройства будут отключены, переписка не перенесётся.", "Восстановить")
+            Mode.RESET_REQUEST -> set("Сброс пароля", "Ссылка уйдёт на привязанную почту. Пароль входа сменится; ключи и история на ваших устройствах сохранятся.", "Отправить ссылку")
+            Mode.RESET_COMPLETE -> set("Новый пароль", "Введите код со страницы из письма и новый пароль. Это не восстановление аккаунта.", "Сменить пароль")
         }
-        switchMode.text = if (m == Mode.LOGIN) "Создать аккаунт" else "Уже есть аккаунт? Войти"
+        switchMode.text = when (m) {
+            Mode.RESET_REQUEST, Mode.RESET_COMPLETE -> "Назад ко входу"
+            Mode.LOGIN -> "Создать аккаунт"
+            else -> "Уже есть аккаунт? Войти"
+        }
+        switchMode.visibility = View.VISIBLE
+        forgotLink.visibility = if (m == Mode.LOGIN) View.VISIBLE else View.GONE
         recoverLink.visibility = if (m == Mode.LOGIN) View.VISIBLE else View.GONE
         showError("")
     }
@@ -184,6 +210,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         busy = b
         submit.isEnabled = !b
         switchMode.isEnabled = !b
+        forgotLink.isEnabled = !b
         recoverLink.isEnabled = !b
         if (b) submit.setText("Подождите…") else setMode(mode)
     }
@@ -192,9 +219,11 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         if (busy) return
         val user = username.text.trim().removePrefix("@")
         val pass = password.text
-        if (user.isEmpty()) return showError("Введите никнейм")
-        if (pass.isEmpty()) return showError("Введите пароль")
-        if (mode != Mode.LOGIN && pass.length < 8) return showError("Пароль — не меньше 8 символов")
+        if (user.isEmpty()) return showError(
+            if (mode == Mode.LOGIN || mode == Mode.RESET_REQUEST || mode == Mode.RESET_COMPLETE) "Введите никнейм или почту" else "Введите никнейм"
+        )
+        if (mode != Mode.RESET_REQUEST && pass.isEmpty()) return showError("Введите пароль")
+        if (mode != Mode.LOGIN && mode != Mode.RESET_REQUEST && pass.length < 8) return showError("Пароль — не меньше 8 символов")
         val p = JSONObject().put("username", user).put("device_name", deviceName()).put("platform", "android")
         testServer(ctx)?.let { p.put("server", it) }
         val method = when (mode) {
@@ -204,6 +233,8 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
             }
             Mode.REGISTER -> {
                 if (name.text.isBlank()) return showError("Введите имя")
+                if (email.verifiedTicket.isEmpty()) return showError("Подтвердите электронную почту по ссылке из письма")
+                p.put("email_ticket",email.verifiedTicket)
                 p.put("password", pass).put("display_name", name.text.trim())
                 "register"
             }
@@ -211,6 +242,13 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
                 if (code.text.isBlank()) return showError("Введите код восстановления")
                 p.put("new_password", pass).put("recovery_code", code.text.trim())
                 "recover"
+            }
+            Mode.RESET_REQUEST -> "password_reset_request"
+            Mode.RESET_COMPLETE -> {
+                val token = resetToken.text.trim()
+                if (token.length != 43) return showError("Введите код из письма")
+                p.put("token", token).put("new_password", pass)
+                "password_reset_complete"
             }
         }
         showError("")
@@ -226,18 +264,35 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
                 }
                 return@call showError(e.message)
             }
-            password.setText("")
-            code.setText("")
-            loginCode.setText("")
-            loginCode.visibility = View.GONE
-            val res = v as? JSONObject ?: JSONObject()
-            when {
-                m == Mode.REGISTER || m == Mode.RECOVER -> {
+            when (m) {
+                Mode.RESET_REQUEST -> {
+                    resetToken.setText("")
+                    setMode(Mode.RESET_COMPLETE)
+                    showError("Если почта привязана, ссылка отправлена. Откройте письмо и введите код ниже.")
+                }
+                Mode.RESET_COMPLETE -> {
+                    password.setText("")
+                    resetToken.setText("")
+                    setMode(Mode.LOGIN)
+                    showError("Пароль изменён. Войдите с новым паролем.")
+                }
+                Mode.REGISTER, Mode.RECOVER -> {
+                    password.setText("")
+                    code.setText("")
+                    loginCode.setText("")
+                    loginCode.visibility = View.GONE
+                    val res = v as? JSONObject ?: JSONObject()
                     recoveryCode.text = res.str("recovery_code")
                     saved.isChecked = false
                     page(recovery)
                 }
-                else -> done()
+                else -> {
+                    password.setText("")
+                    code.setText("")
+                    loginCode.setText("")
+                    loginCode.visibility = View.GONE
+                    done()
+                }
             }
         }
     }

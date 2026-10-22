@@ -249,6 +249,7 @@ func insertPrekeys(ctx context.Context, tx pgx.Tx, deviceID string, ec, kyber []
 // ---- handlers ----
 
 type registerReq struct {
+	EmailTicket        string   `json:"email_ticket"`
 	Username           string   `json:"username"`
 	DisplayName        string   `json:"display_name"`
 	Password           string   `json:"password"`
@@ -305,10 +306,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	userID := newUUID()
 	var out tokensOut
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash, key_backup, nickname, display_name)
-			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7,$8,$9,$10)`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup,
-			nickname, displayName)
+		email, err := registrationEmail(tx, r, req.EmailTicket)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash, key_backup, nickname, display_name, email, email_verified_at)
+			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7,$8,$9,$10,$11,now())`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup,
+			nickname, displayName, email)
 		if isUniqueViolation(err) {
+			if constraintName(err) == "users_email" {
+				return errf(409, "email_taken", "Этот адрес уже привязан к аккаунту NeoChat")
+			}
 			return errf(409, "username_taken", "Это имя пользователя уже занято")
 		}
 		if err != nil {
@@ -346,24 +354,33 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
-	if !s.limits.allow("login-ip:"+clientIP(r), 30, 15*time.Minute) || !s.limits.allow("login-user:"+req.Username, 10, 15*time.Minute) {
+	login := normalizeLogin(req.Username)
+	if !s.limits.allow("login-ip:"+clientIP(r), 30, 15*time.Minute) || !s.limits.allow("login-user:"+login, 10, 15*time.Minute) {
 		s.fail(w, r, errRateLimited(time.Minute))
 		return
 	}
 	invalid := errf(401, "invalid_credentials", "Неверное имя пользователя, пароль или устройство")
-	var userID, pwHash string
-	var authKey []byte
-	err := s.db.QueryRow(r.Context(), `SELECT u.id, u.password_hash, d.auth_key FROM users u JOIN devices d ON d.user_id=u.id
-		WHERE u.username=$1 AND d.id=$2 AND d.revoked_at IS NULL`, req.Username, nullUUID(req.DeviceID)).Scan(&userID, &pwHash, &authKey)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Spend the same hashing time for unknown users and devices.
-		s.checkPassword(r.Context(), dummyHash, req.Password)
-		s.fail(w, r, invalid)
-		return
-	}
+	userID, username, pwHash, found, err := s.lookupVerifiedLogin(r, login)
 	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	var authKey []byte
+	if found {
+		err = s.db.QueryRow(r.Context(), `SELECT auth_key FROM devices WHERE user_id=$1 AND id=$2 AND revoked_at IS NULL`,
+			userID, nullUUID(req.DeviceID)).Scan(&authKey)
+		if errors.Is(err, pgx.ErrNoRows) {
+			found = false
+			err = nil
+		}
+	}
+	if !found || err != nil {
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		s.checkPassword(r.Context(), dummyHash, req.Password)
+		s.fail(w, r, invalid)
 		return
 	}
 	ok, err := s.checkPassword(r.Context(), pwHash, req.Password)
@@ -372,8 +389,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ts, tsErr := strconv.ParseInt(req.Timestamp, 10, 64)
+	// Challenge always uses the canonical username, even when the client typed an email.
 	if !ok || tsErr != nil || absDur(time.Since(time.Unix(ts, 0))) > loginSkew ||
-		!ed25519.Verify(authKey, LoginChallenge(req.Username, req.DeviceID, req.Timestamp), req.Signature) {
+		!ed25519.Verify(authKey, LoginChallenge(username, req.DeviceID, req.Timestamp), req.Signature) {
 		s.fail(w, r, invalid)
 		return
 	}
@@ -458,7 +476,13 @@ func (c *commitThen) Error() string { return c.err.Error() }
 func errCommitThen(err error) error { return &commitThen{err} }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, a *authCtx) {
-	_, err := s.db.Exec(r.Context(), `UPDATE sessions SET revoked_at=now() WHERE id=$1`, a.SessionID)
+	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(r.Context(), `UPDATE sessions SET revoked_at=now() WHERE id=$1`, a.SessionID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(r.Context(), `DELETE FROM push_tokens WHERE device_id=$1`, a.DeviceID)
+		return err
+	})
 	if err != nil {
 		s.fail(w, r, err)
 		return

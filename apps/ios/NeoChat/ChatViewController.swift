@@ -450,19 +450,18 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             jump.bottomAnchor.constraint(equalTo: table.bottomAnchor, constant: -10),
         ])
         jump.addAction(UIAction { [weak self] _ in self?.scrollToBottom(animated: true) }, for: .touchUpInside)
+        jump.springPress()
     }
 
     private func showJump(_ on: Bool) {
         guard on != jumpShown else { return }
         jumpShown = on
-        if on { jump.isHidden = false; jump.transform = CGAffineTransform(scaleX: 0.7, y: 0.7) }
-        Theme.animate(on ? 0.18 : 0.15, {
-            self.jump.alpha = on ? 1 : 0
-            self.jump.transform = on ? .identity : CGAffineTransform(scaleX: 0.7, y: 0.7)
-        }, done: { [weak self] in
+        if on && jump.isHidden { jump.isHidden = false; jump.transform = CGAffineTransform(scaleX: 0.5, y: 0.5) }
+        Theme.animate(on ? 0.14 : 0.15, { self.jump.alpha = on ? 1 : 0 }, done: { [weak self] in
             guard let self, !self.jumpShown else { return }
             self.jump.isHidden = true
         })
+        Motion.animate(on ? 0.4 : 0.26, on ? 0.55 : 1) { self.jump.transform = on ? .identity : CGAffineTransform(scaleX: 0.6, y: 0.6) }
     }
 
     private func key(_ it: Item) -> String {
@@ -487,7 +486,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         Notifier.visibleConversation = conversationId
-        navigationController?.interactivePopGestureRecognizer?.isEnabled = true
+        if let back = navigationController?.interactivePopGestureRecognizer {
+            back.isEnabled = true
+            table.panGestureRecognizer.require(toFail: back)
+        }
         markRead()
         presenceTimer?.invalidate()
         presenceTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refreshPresence() }
@@ -523,6 +525,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         attach.accessibilityLabel = "Прикрепить"
         // Ask what is attached first: photos open the photo picker and arrive as photos.
         attach.showsMenuAsPrimaryAction = true
+        attach.addAction(UIAction { [weak self] _ in self?.attach.imageView?.play(.wiggle) }, for: .menuActionTriggered)
         updateAttachMenu()
         input.backgroundColor = .clear
         input.font = Theme.font(17)
@@ -540,6 +543,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         send.accessibilityLabel = "Отправить"
         send.addAction(UIAction { [weak self] _ in self?.sendText() }, for: .touchUpInside)
         send.clipsToBounds = true
+        send.transform = Self.sendFolded
+        attach.springPress()
         for v in [attach, input, send, placeholder] {
             v.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(v)
@@ -616,7 +621,11 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         updateSend(animated: true)
     }
 
-    /// The send button slides in over 240 ms when there is text.
+    /// Small and turned away while there is nothing to send.
+    private static let sendFolded = CGAffineTransform(rotationAngle: -70 * .pi / 180).scaledBy(x: 0.4, y: 0.4)
+
+    /// With text the send button springs in: the slot opens without bouncing so the text does not
+    /// reflow twice, while the arrow grows and turns into place with a little overshoot.
     private func updateSend(animated: Bool) {
         // A caption may be emptied, so editing a file keeps the button.
         let show = !(input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editTarget?.str("kind") == "file"
@@ -626,7 +635,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         send.accessibilityHint = blocked ? "Отправка приостановлена: ключ собеседника изменился" : nil
         guard sendWidth.constant != target else { return }
         sendWidth.constant = target
-        if animated { Theme.animate(0.24) { self.composer.layoutIfNeeded() } }
+        guard animated else {
+            send.transform = show ? .identity : Self.sendFolded
+            return
+        }
+        Motion.animate(0.32, 1) { self.composer.layoutIfNeeded() }
+        Motion.animate(show ? 0.42 : 0.28, show ? 0.6 : 1) { self.send.transform = show ? .identity : Self.sendFolded }
     }
 
     private func setEdit(_ m: JSON) {
@@ -730,6 +744,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         guard !text.isEmpty, !blocked else { return }
         var p: JSON = ["conversation_id": conversationId, "text": text]
         if let r = replyTo { p["reply_to"] = r.str("id") }
+        Haptics.confirm()
+        // The arrow leaps up as the button folds away.
+        if !Theme.reducedMotion, let arrow = send.imageView {
+            arrow.transform = CGAffineTransform(translationX: 0, y: -9)
+            Motion.animate(0.32, 0.55) { arrow.transform = .identity }
+        }
         // Stored locally first: the field clears at once and the queue delivers it.
         input.text = ""
         textViewDidChange(input)
@@ -1150,6 +1170,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             return c
         case .msg(let m, let first, let last):
             let c = tableView.dequeueReusableCell(withIdentifier: "b", for: indexPath) as! BubbleCell
+            if let back = navigationController?.interactivePopGestureRecognizer { c.prioritizeBackGesture(back) }
             c.bind(m, group: group, first: first, last: last)
             c.onRetry = { [weak self] in self?.retry(m) }
             c.onPhoto = { [weak self] in self?.openPhoto(m) }
@@ -1171,9 +1192,15 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             c.onSwipeReply = m.str("kind") != "undecryptable" && !composer.isHidden ? { [weak self] in self?.setReply(m) } : nil
             c.onDoubleTap = canReact(m) ? { [weak self] in self?.react(m, QuickReaction.current) } : nil
             if animateIds.remove(m.str("id")) != nil, !Theme.reducedMotion {
+                // A new bubble grows out of its own bottom corner and rises into place.
+                c.layoutIfNeeded()
+                let size = c.contentView.bounds.size
+                let corner = CGPoint(x: m.bool("outgoing") ? size.width / 2 : -size.width / 2, y: size.height / 2)
                 c.contentView.alpha = 0
-                c.contentView.transform = CGAffineTransform(translationX: 0, y: 12)
-                Theme.animate(0.22) { c.contentView.alpha = 1; c.contentView.transform = .identity }
+                c.contentView.transform = CGAffineTransform(translationX: corner.x, y: corner.y + 22)
+                    .scaledBy(x: 0.82, y: 0.82).translatedBy(x: -corner.x, y: -corner.y)
+                UIView.animate(withDuration: 0.12) { c.contentView.alpha = 1 }
+                Motion.animate(0.44, 0.7) { c.contentView.transform = .identity }
             } else {
                 c.contentView.alpha = 1
                 c.contentView.transform = .identity
@@ -1384,6 +1411,8 @@ final class BubbleCell: UITableViewCell {
     private var trail: NSLayoutConstraint!
     private var topGap: NSLayoutConstraint!
     private var boundId = ""
+    private var statusId = ""
+    private var statusSig = ""
     private var lastReactsId = ""
     private var lastReactsSig: String?
     var onRetry: (() -> Void)?
@@ -1396,13 +1425,11 @@ final class BubbleCell: UITableViewCell {
     private var replyArmed = false
     private var replyIconTrailing: NSLayoutConstraint!
     private var replyIconLeading: NSLayoutConstraint!
-    /// Own messages are answered with a swipe to the right, the others' with a swipe to the left.
-    private(set) var swipesRight = false
     var onTap: (() -> Void)?
     var onMention: ((String) -> Void)?
     var onProfile: (() -> Void)?
     var onReact: ((String) -> Void)?
-    /// Swipe anywhere on the row, the empty part included: to the left for others' messages, to the right for own.
+    /// Reply with a swipe in either direction anywhere on the row, including empty space.
     var onSwipeReply: (() -> Void)?
     /// Double tap anywhere on the row: the quick reaction.
     var onDoubleTap: (() -> Void)? { didSet { doubleTap.isEnabled = onDoubleTap != nil } }
@@ -1546,13 +1573,23 @@ final class BubbleCell: UITableViewCell {
         onDoubleTap?()
     }
 
-    /// The row follows the finger toward the reply side; past the threshold a release replies.
+    func prioritizeBackGesture(_ back: UIGestureRecognizer) { replyPan.require(toFail: back) }
+
+    /// The row follows the finger in either direction; past the threshold a release replies.
     @objc private func panned(_ g: UIPanGestureRecognizer) {
         let threshold: CGFloat = 56
         switch g.state {
         case .changed:
-            let sign: CGFloat = swipesRight ? 1 : -1
-            let raw = max(0, sign * g.translation(in: contentView).x)
+            let translation = g.translation(in: contentView).x
+            let sign: CGFloat = translation >= 0 ? 1 : -1
+            let raw = abs(translation)
+            if sign > 0 {
+                replyIconTrailing.isActive = false
+                replyIconLeading.isActive = true
+            } else {
+                replyIconLeading.isActive = false
+                replyIconTrailing.isActive = true
+            }
             let dx = raw < threshold ? raw : threshold + (raw - threshold) * 0.3
             contentView.transform = CGAffineTransform(translationX: sign * min(dx, 88), y: 0)
             let p = min(1, raw / threshold)
@@ -1602,9 +1639,6 @@ final class BubbleCell: UITableViewCell {
     func bind(_ m: JSON, group: Bool, first: Bool, last: Bool) {
         boundId = m.str("id")
         let out = m.bool("outgoing")
-        swipesRight = out
-        replyIconTrailing.isActive = !out
-        replyIconLeading.isActive = out
         let kind = m.str("kind")
         let col = bubble.superview as! UIStackView
         col.alignment = out ? .trailing : .leading
@@ -1670,6 +1704,13 @@ final class BubbleCell: UITableViewCell {
             photoH.isActive = false
             photo.image = nil
         }
+        // Explicit wrap widths: the automatic one is the label's previous frame, so a reused
+        // cell would wrap this message at the width of the message it showed before.
+        let room = min(bounds.width * 0.78, bounds.width - (out ? 52 : group ? 74 : 36))
+        let wrap = max(0, floor(image ? photoW.constant - 21 : room - 29))
+        [fwd, quote, text, pollQuestion, pollInfo, meta].forEach { $0.preferredMaxLayoutWidth = wrap }
+        [fileName, fileMeta].forEach { $0.preferredMaxLayoutWidth = max(0, wrap - 42) }
+        sender.preferredMaxLayoutWidth = max(0, floor(room))
         if let f, !image {
             fileRow.isHidden = false
             fileName.text = f.str("name")
@@ -1708,6 +1749,10 @@ final class BubbleCell: UITableViewCell {
         let st = m.str("status")
         meta.text = (m.bool("edited") ? "изменено " : "") + hhmm(m.int64("sent_at"))
         delivery.isHidden = !out
+        // The mark hops when this message moves on: sent, delivered, read.
+        if out && statusId == boundId && !statusSig.isEmpty && statusSig != st && st != "queued" { delivery.pop(from: 0.4, response: 0.36, damping: 0.42) }
+        statusId = boundId
+        statusSig = st
         delivery.status = st
         delivery.color = st == "failed" ? Theme.warning : (big ? Theme.muted : (st == "read" ? .white : muted))
         delivery.alpha = st == "delivered" ? 0.75 : 1
@@ -1748,10 +1793,10 @@ final class BubbleCell: UITableViewCell {
             let names = r.str("names")
             b.accessibilityLabel = "Реакция \(e), \(r.int("count"))" + (mine ? ", ваша" : "") + (names.isEmpty ? "" : ", " + names)
             b.addAction(UIAction { [weak self] _ in self?.onReact?(e) }, for: .touchUpInside)
-            if pop {
-                b.transform = CGAffineTransform(scaleX: 0.4, y: 0.4)
+            if pop && !Theme.reducedMotion {
                 b.alpha = 0
-                Theme.animate(0.2, { b.transform = .identity; b.alpha = 1 })
+                UIView.animate(withDuration: 0.12) { b.alpha = 1 }
+                b.pop(from: 0.3, response: 0.42, damping: 0.45)
             }
             reactRow.insertArrangedSubview(b, at: i)
         }
@@ -1785,8 +1830,8 @@ final class BubbleCell: UITableViewCell {
     }
 }
 
-/// Starts only on a mostly horizontal drag toward the reply side, so scrolling and the
-/// edge swipe back keep working: a rightward drag (own messages) must not begin at the screen edge.
+/// Horizontal drags in either direction reply; rightward drags from the screen edge
+/// remain available to navigation, and vertical drags remain table scrolling.
 private final class ReplySwipeDelegate: NSObject, UIGestureRecognizerDelegate {
     weak var cell: BubbleCell?
 
@@ -1794,11 +1839,8 @@ private final class ReplySwipeDelegate: NSObject, UIGestureRecognizerDelegate {
         guard let p = g as? UIPanGestureRecognizer, cell?.onSwipeReply != nil else { return false }
         let v = p.velocity(in: p.view)
         guard abs(v.x) > abs(v.y) * 1.5 else { return false }
-        if cell?.swipesRight == true {
-            let x = p.location(in: p.view?.window).x
-            return v.x > 0 && x > 32
-        }
-        return v.x < 0
+        let startX = p.location(in: p.view?.window).x - p.translation(in: p.view?.window).x
+        return v.x < 0 || startX > 32
     }
 }
 
