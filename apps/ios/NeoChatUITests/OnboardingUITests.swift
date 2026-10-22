@@ -127,10 +127,8 @@ final class OnboardingUITests: XCTestCase {
 
         // Touch a populated cell: the old swipe-back check only covered an empty chat.
         // Repeat after the reply composer changes the layout and opens the keyboard.
-        for emptySpace in [false, true] {
-          for right in [false, true] {
-            let startX = emptySpace ? 0.25 : 0.65
-            let endX = emptySpace ? (right ? 0.65 : 0.05) : (right ? 0.95 : 0.25)
+        // First both directions on the bubble, then both on empty row space.
+        for (startX, endX) in [(0.65, 0.25), (0.65, 0.95), (0.25, 0.05), (0.25, 0.65)] {
             let start = message.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
             start.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
             XCTAssertEqual(app.state, .runningForeground)
@@ -145,13 +143,12 @@ final class OnboardingUITests: XCTestCase {
             XCTAssertTrue(message.exists)
             XCTAssertTrue(input.exists)
             XCTAssertEqual(app.state, .runningForeground)
-          }
         }
         shot("08-message-interactions")
 
         // A rightward gesture starting at the row's screen edge still goes back.
-        let edge = message.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
-        edge.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)))
+        let edge = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 2, dy: message.frame.midY))
+        edge.press(forDuration: 0.05, thenDragTo: edge.withOffset(CGVector(dx: app.frame.width * 0.85, dy: 0)))
         guard app.buttons["Сортировка архива"].waitForExistence(timeout: 5) else {
             shot("08-edge-back-failed")
             print(app.debugDescription)
