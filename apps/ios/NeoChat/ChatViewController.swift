@@ -486,7 +486,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         Notifier.visibleConversation = conversationId
-        navigationController?.interactivePopGestureRecognizer?.isEnabled = true
+        if let back = navigationController?.interactivePopGestureRecognizer {
+            back.isEnabled = true
+            table.panGestureRecognizer.require(toFail: back)
+        }
         markRead()
         presenceTimer?.invalidate()
         presenceTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refreshPresence() }
@@ -1167,6 +1170,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             return c
         case .msg(let m, let first, let last):
             let c = tableView.dequeueReusableCell(withIdentifier: "b", for: indexPath) as! BubbleCell
+            if let back = navigationController?.interactivePopGestureRecognizer { c.prioritizeBackGesture(back) }
             c.bind(m, group: group, first: first, last: last)
             c.onRetry = { [weak self] in self?.retry(m) }
             c.onPhoto = { [weak self] in self?.openPhoto(m) }
@@ -1568,6 +1572,8 @@ final class BubbleCell: UITableViewCell {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         onDoubleTap?()
     }
+
+    func prioritizeBackGesture(_ back: UIGestureRecognizer) { replyPan.require(toFail: back) }
 
     /// The row follows the finger in either direction; past the threshold a release replies.
     @objc private func panned(_ g: UIPanGestureRecognizer) {

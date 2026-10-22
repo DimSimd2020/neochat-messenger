@@ -235,7 +235,7 @@ public:
         const bool shown = isVisible();
         if (!shown && Theme::ms(180) > 0)
             setWindowOpacity(0);
-        show();
+        if (isMinimized()) showNormal(); else show();
         raise();
         activateWindow();
         if (!shown && Theme::ms(180) > 0) {

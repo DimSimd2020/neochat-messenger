@@ -22,6 +22,7 @@
 #include <QBuffer>
 #include <QPainter>
 #include <QDir>
+#include <QFontDatabase>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QContextMenuEvent>
@@ -974,6 +975,8 @@ void UiTest::dialogsAndPickers()
 
     // Profile: the bio field shows all 100 characters on three lines.
     find<QAbstractButton>([](QAbstractButton *b) { return b->accessibleName().startsWith("Профиль"); })->click();
+    QTRY_VERIFY(button("Изменить профиль"));
+    button("Изменить профиль")->click();
     QTRY_VERIFY(find<ui::TextArea>([](ui::TextArea *) { return true; }));
     auto *bio = find<ui::TextArea>([](ui::TextArea *) { return true; });
     bio->edit()->setPlainText(QString(100, QChar('я')));
@@ -1065,6 +1068,11 @@ void UiTest::calls()
         shot("41b-call-banner");
         banner->click();
         QTRY_COMPARE(callWindow(), currentCall);
+        currentCall->showMinimized();
+        QTRY_VERIFY(currentCall->isMinimized());
+        banner->click();
+        QTRY_VERIFY(!currentCall->isMinimized());
+        QCOMPARE(callWindow(), currentCall);
         currentCall->hide();
         banner->setFocus();
         QTest::keyClick(banner, Qt::Key_Space);
@@ -1225,6 +1233,8 @@ void UiTest::keyChangeBlocksSending()
     QVERIFY(!button("Отправить")->isEnabled());
     shot("16-key-changed");
     button("Сверить код")->click();
+    QTRY_VERIFY(button("Конфиденциальность"));
+    button("Конфиденциальность")->click();
     QTRY_VERIFY(button("Код сверен, принять новый ключ"));
     shot("17-safety-number");
 }
@@ -1313,6 +1323,10 @@ void UiTest::cleanupTestCase()
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
+#ifdef Q_OS_WIN
+    if (QGuiApplication::platformName() == QLatin1String("offscreen"))
+        QFontDatabase::addApplicationFont(qEnvironmentVariable("WINDIR") + "/Fonts/segoeui.ttf");
+#endif
     Q_INIT_RESOURCE(resources);
     QApplication::setOrganizationName("NeoChatTest");
     QApplication::setApplicationName("NeoChatUiTest");

@@ -152,7 +152,11 @@ final class OnboardingUITests: XCTestCase {
         // A rightward gesture starting at the row's screen edge still goes back.
         let edge = message.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
         edge.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)))
-        XCTAssertTrue(app.buttons["Сортировка архива"].waitForExistence(timeout: 5))
+        guard app.buttons["Сортировка архива"].waitForExistence(timeout: 5) else {
+            shot("08-edge-back-failed")
+            print(app.debugDescription)
+            return XCTFail("Edge back did not return to the archive")
+        }
         app.tables.cells.firstMatch.tap()
         XCTAssertTrue(message.waitForExistence(timeout: 5))
 
