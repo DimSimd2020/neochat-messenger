@@ -310,6 +310,58 @@ protected:
     }
 };
 
+class CallBanner : public QAbstractButton {
+public:
+    explicit CallBanner(QWidget *parent) : QAbstractButton(parent)
+    {
+        setObjectName("active-call-banner");
+        setAccessibleName(QStringLiteral("Показать текущий звонок"));
+        setFocusPolicy(Qt::StrongFocus);
+        setCursor(Qt::PointingHandCursor);
+        setFixedHeight(46);
+        auto *timer = new QTimer(this);
+        timer->setInterval(1000);
+        auto refresh = [this] {
+            auto *calls = CallController::instance();
+            const qint64 seconds = calls->phase() == CallController::Active ? qMax<qint64>(0, (QDateTime::currentMSecsSinceEpoch() - calls->activeSince()) / 1000) : 0;
+            QString status = QStringLiteral("Идёт звонок");
+            if (calls->phase() == CallController::Incoming) status = QStringLiteral("Входящий звонок");
+            else if (calls->phase() == CallController::Starting || calls->phase() == CallController::Outgoing) status = QStringLiteral("Вызов…");
+            else if (calls->phase() == CallController::Connecting) status = QStringLiteral("Подключение…");
+            setText(status + QStringLiteral("     %1:%2").arg(seconds / 60, 2, 10, QChar('0')).arg(seconds % 60, 2, 10, QChar('0')));
+            update();
+        };
+        connect(timer, &QTimer::timeout, this, refresh);
+        auto sync = [this, timer, refresh] {
+            const auto phase = CallController::instance()->phase();
+            const bool live = phase != CallController::Idle && phase != CallController::Ended;
+            setVisible(live);
+            if (live) { refresh(); timer->start(); } else timer->stop();
+        };
+        connect(CallController::instance(), &CallController::changed, this, sync);
+        connect(this, &QAbstractButton::clicked, CallController::instance(), &CallController::showCurrentCall);
+        connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
+        sync();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        QColor tint = Theme::p().action;
+        tint.setAlphaF(isDown() ? .32 : underMouse() ? .26 : .20);
+        Theme::paintBackdrop(p, this, tint);
+        p.setFont(Theme::instance()->font(14, QFont::DemiBold));
+        const int textWidth = p.fontMetrics().horizontalAdvance(text());
+        const int start = (width() - textWidth - 32) / 2;
+        ui::paintIcon(&p, QRectF(start, 14, 18, 18), "phone", Theme::p().accent);
+        p.setPen(Theme::p().text);
+        p.drawText(QRect(start + 32, 0, textWidth, height()), Qt::AlignCenter, text());
+        if (hasFocus()) ui::paintFocusRing(&p, rect().adjusted(4, 4, -4, -4), 8);
+    }
+};
+
 // Warning strip under the header; height and opacity change over 180 ms.
 class NoticeBar : public QWidget {
 public:
@@ -449,6 +501,7 @@ MainWindow::MainWindow()
     conv->setSpacing(0);
     m_header = new ConversationHeader(m_conversation);
     conv->addWidget(m_header);
+    conv->addWidget(new CallBanner(m_conversation));
     m_notice = new NoticeBar(m_conversation);
     conv->addWidget(m_notice);
     m_searchWrap = new QWidget;

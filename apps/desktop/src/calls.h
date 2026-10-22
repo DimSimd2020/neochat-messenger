@@ -28,6 +28,7 @@ public:
     void hangup();
     void setMic(bool on);
     void setCamera(bool on);
+    void showCurrentCall();
     // Ends a running call before the app quits.
     void shutdown();
 

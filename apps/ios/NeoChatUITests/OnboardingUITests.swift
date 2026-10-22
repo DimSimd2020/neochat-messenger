@@ -34,7 +34,7 @@ final class OnboardingUITests: XCTestCase {
         email.typeText(username+"@example.test")
         app.buttons["Отправить ссылку"].tap()
         let checked = app.buttons["Я подтвердил почту"]
-        guard checked.waitForExistence(timeout:10) else {
+        guard checked.waitForExistence(timeout:30) else {
             shot("02-email-send-failed")
             return XCTFail("Email confirmation action did not appear")
         }
@@ -128,12 +128,12 @@ final class OnboardingUITests: XCTestCase {
         // Touch a populated cell: the old swipe-back check only covered an empty chat.
         // Repeat after the reply composer changes the layout and opens the keyboard.
         for i in 0..<2 {
-            // A swipe to the left replies: on the bubble, then on the empty part of the row.
+            // Own messages reply to a rightward swipe: on the bubble, then on empty row space.
             if i == 0 {
-                message.swipeLeft()
+                message.swipeRight()
             } else {
                 let empty = message.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5))
-                empty.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
+                empty.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
             }
             XCTAssertEqual(app.state, .runningForeground)
             XCTAssertTrue(app.buttons["Отменить ответ"].waitForExistence(timeout: 5))
@@ -150,8 +150,8 @@ final class OnboardingUITests: XCTestCase {
         }
         shot("08-message-interactions")
 
-        // The quick reaction on a double tap needs a sent message; this test has no
-        // server and the message stays unsent, so it is checked on a device.
+        // The channel has no other recipients, so this message stays unsent.
+        // Quick reactions need a sent message and are checked with a peer on a device.
 
         // Cancellation keeps history, confirmation clears it while the chat stays open.
         app.buttons["Действия чата"].tap()

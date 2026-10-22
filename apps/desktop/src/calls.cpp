@@ -455,6 +455,12 @@ void CallController::showWindow()
     m_window->appear();
 }
 
+void CallController::showCurrentCall()
+{
+    if (m_phase != Idle && m_phase != Ended)
+        showWindow();
+}
+
 void CallController::closeWindow()
 {
     // Cleared first: the window deletes itself later and must not be reused.
