@@ -127,14 +127,12 @@ final class OnboardingUITests: XCTestCase {
 
         // Touch a populated cell: the old swipe-back check only covered an empty chat.
         // Repeat after the reply composer changes the layout and opens the keyboard.
-        for i in 0..<2 {
-            // Own messages reply to a rightward swipe: on the bubble, then on empty row space.
-            if i == 0 {
-                message.swipeRight()
-            } else {
-                let empty = message.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5))
-                empty.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
-            }
+        for emptySpace in [false, true] {
+          for right in [false, true] {
+            let startX = emptySpace ? 0.25 : 0.65
+            let endX = emptySpace ? (right ? 0.65 : 0.05) : (right ? 0.95 : 0.25)
+            let start = message.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
             XCTAssertEqual(app.state, .runningForeground)
             XCTAssertTrue(app.buttons["Отменить ответ"].waitForExistence(timeout: 5))
             app.buttons["Отменить ответ"].tap()
@@ -147,8 +145,16 @@ final class OnboardingUITests: XCTestCase {
             XCTAssertTrue(message.exists)
             XCTAssertTrue(input.exists)
             XCTAssertEqual(app.state, .runningForeground)
+          }
         }
         shot("08-message-interactions")
+
+        // A rightward gesture starting at the row's screen edge still goes back.
+        let edge = message.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+        edge.press(forDuration: 0.05, thenDragTo: message.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)))
+        XCTAssertTrue(app.buttons["Сортировка архива"].waitForExistence(timeout: 5))
+        app.tables.cells.firstMatch.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
 
         // The channel has no other recipients, so this message stays unsent.
         // Quick reactions need a sent message and are checked with a peer on a device.

@@ -1421,13 +1421,11 @@ final class BubbleCell: UITableViewCell {
     private var replyArmed = false
     private var replyIconTrailing: NSLayoutConstraint!
     private var replyIconLeading: NSLayoutConstraint!
-    /// Own messages are answered with a swipe to the right, the others' with a swipe to the left.
-    private(set) var swipesRight = false
     var onTap: (() -> Void)?
     var onMention: ((String) -> Void)?
     var onProfile: (() -> Void)?
     var onReact: ((String) -> Void)?
-    /// Swipe anywhere on the row, the empty part included: to the left for others' messages, to the right for own.
+    /// Reply with a swipe in either direction anywhere on the row, including empty space.
     var onSwipeReply: (() -> Void)?
     /// Double tap anywhere on the row: the quick reaction.
     var onDoubleTap: (() -> Void)? { didSet { doubleTap.isEnabled = onDoubleTap != nil } }
@@ -1571,13 +1569,21 @@ final class BubbleCell: UITableViewCell {
         onDoubleTap?()
     }
 
-    /// The row follows the finger toward the reply side; past the threshold a release replies.
+    /// The row follows the finger in either direction; past the threshold a release replies.
     @objc private func panned(_ g: UIPanGestureRecognizer) {
         let threshold: CGFloat = 56
         switch g.state {
         case .changed:
-            let sign: CGFloat = swipesRight ? 1 : -1
-            let raw = max(0, sign * g.translation(in: contentView).x)
+            let translation = g.translation(in: contentView).x
+            let sign: CGFloat = translation >= 0 ? 1 : -1
+            let raw = abs(translation)
+            if sign > 0 {
+                replyIconTrailing.isActive = false
+                replyIconLeading.isActive = true
+            } else {
+                replyIconLeading.isActive = false
+                replyIconTrailing.isActive = true
+            }
             let dx = raw < threshold ? raw : threshold + (raw - threshold) * 0.3
             contentView.transform = CGAffineTransform(translationX: sign * min(dx, 88), y: 0)
             let p = min(1, raw / threshold)
@@ -1627,9 +1633,6 @@ final class BubbleCell: UITableViewCell {
     func bind(_ m: JSON, group: Bool, first: Bool, last: Bool) {
         boundId = m.str("id")
         let out = m.bool("outgoing")
-        swipesRight = out
-        replyIconTrailing.isActive = !out
-        replyIconLeading.isActive = out
         let kind = m.str("kind")
         let col = bubble.superview as! UIStackView
         col.alignment = out ? .trailing : .leading
@@ -1821,8 +1824,8 @@ final class BubbleCell: UITableViewCell {
     }
 }
 
-/// Starts only on a mostly horizontal drag toward the reply side, so scrolling and the
-/// edge swipe back keep working: a rightward drag (own messages) must not begin at the screen edge.
+/// Horizontal drags in either direction reply; rightward drags from the screen edge
+/// remain available to navigation, and vertical drags remain table scrolling.
 private final class ReplySwipeDelegate: NSObject, UIGestureRecognizerDelegate {
     weak var cell: BubbleCell?
 
@@ -1830,11 +1833,8 @@ private final class ReplySwipeDelegate: NSObject, UIGestureRecognizerDelegate {
         guard let p = g as? UIPanGestureRecognizer, cell?.onSwipeReply != nil else { return false }
         let v = p.velocity(in: p.view)
         guard abs(v.x) > abs(v.y) * 1.5 else { return false }
-        if cell?.swipesRight == true {
-            let x = p.location(in: p.view?.window).x
-            return v.x > 0 && x > 32
-        }
-        return v.x < 0
+        let startX = p.location(in: p.view?.window).x - p.translation(in: p.view?.window).x
+        return v.x < 0 || startX > 32
     }
 }
 
