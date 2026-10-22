@@ -21,7 +21,10 @@ impl Inner {
         let sql = format!(
             "SELECT {COLUMNS},
                 (SELECT count(DISTINCT user_id) FROM receipts r WHERE r.message_id=m.id AND r.user_id<>?{n}),
-                (SELECT count(DISTINCT user_id) FROM receipts r WHERE r.message_id=m.id AND r.kind='read' AND r.user_id<>?{n})
+                (SELECT count(DISTINCT r.user_id) FROM receipts r
+                 WHERE r.message_id=m.id AND r.kind='read' AND r.user_id<>?{n}
+                 AND EXISTS (SELECT 1 FROM conversations cv, json_each(cv.members) j
+                             WHERE cv.id=m.conversation_id AND j.value=r.user_id))
              FROM messages m LEFT JOIN contacts c ON c.user_id=m.sender_user_id WHERE {cond}"
         );
         let mut params: Vec<&dyn ToSql> = args.to_vec();
@@ -218,4 +221,31 @@ struct Row {
     mentioned: bool,
     delivered: i64,
     read: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn read_count_is_current_members_only() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE conversations(id TEXT, members TEXT);
+             CREATE TABLE receipts(message_id TEXT, user_id TEXT, kind TEXT);
+             INSERT INTO conversations VALUES('c','[\"a\",\"b\"]');
+             INSERT INTO receipts VALUES('m','a','read'),('m','b','delivered'),('m','gone','read');",
+        )
+        .unwrap();
+        let n: i64 = c
+            .query_row(
+                "SELECT count(DISTINCT r.user_id) FROM receipts r
+                 WHERE r.message_id='m' AND r.kind='read'
+                 AND EXISTS (SELECT 1 FROM conversations cv, json_each(cv.members) j
+                             WHERE cv.id='c' AND j.value=r.user_id)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // b only has a delivery receipt, gone has left the group.
+        assert_eq!(n, 1);
+    }
 }

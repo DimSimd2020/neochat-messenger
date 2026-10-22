@@ -906,7 +906,6 @@ class SwipeToReplyLayout(
     private var tracking = false
     private var dragging = false
     private var armed = false
-    private var iconOnStart = true
     private var anim: ValueAnimator? = null
 
     init {
@@ -932,6 +931,7 @@ class SwipeToReplyLayout(
         running?.cancel()
         icon.animate().cancel()
         content?.translationX = 0f
+        icon.translationX = 0f
         applyIcon(0f)
         dragging = false
         tracking = false
@@ -1072,15 +1072,12 @@ class SwipeToReplyLayout(
         icon.alpha = p
         val mag = 0.6f + 0.4f * p
         // Arrow points toward the bubble on the side being revealed.
+        // translationX, not a gravity change: relayout of a row makes the whole list
+        // draw its previous positions on top of the new ones for one frame.
         icon.scaleX = if (tx >= 0f) -mag else mag
         icon.scaleY = mag
-        val start = tx >= 0f
-        if (start != iconOnStart && tx != 0f) {
-            iconOnStart = start
-            val lp = icon.layoutParams as LayoutParams
-            lp.gravity = Gravity.CENTER_VERTICAL or if (start) Gravity.START else Gravity.END
-            icon.layoutParams = lp
-        }
+        val travel = (width - dp(20) - icon.width).toFloat().coerceAtLeast(0f)
+        icon.translationX = if (tx < 0f) travel else 0f
         icon.visibility = if (p == 0f) INVISIBLE else VISIBLE
     }
 

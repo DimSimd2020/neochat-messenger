@@ -1778,8 +1778,12 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     override fun applyInsets(top: Int, bottom: Int, ime: Int) {
-        column.setPadding(0, top, 0, maxOf(bottom, ime))
-        if (ime > 0 && atBottom()) list.post { scrollToBottom(false) }
+        val pad = maxOf(bottom, ime)
+        if (column.paddingTop == top && column.paddingBottom == pad) return
+        // Same layout pass as the resize: a posted scroll draws the old positions for one frame.
+        val stick = atBottom()
+        column.setPadding(0, top, 0, pad)
+        if (stick) scrollToBottom(false)
     }
 
     override fun onBack(): Boolean {

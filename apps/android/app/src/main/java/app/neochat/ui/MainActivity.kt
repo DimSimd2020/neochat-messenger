@@ -13,6 +13,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsAnimation
 import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import app.neochat.FilesProvider
@@ -103,30 +104,56 @@ class MainActivity : Activity(), Sheet.Host {
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
         else root.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        // The window stays the same size when the keyboard moves. adjustResize composites the
+        // previous frame over the new one for an instant, so the chat looks mirrored on itself.
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+        // A back swipe that hides the keyboard reports the final (hidden) inset at the
+        // first frame. Applying it jumps the chat while the old frame is still on screen.
+        var deferIme = false
+        var imeAtStart = 0
+        fun publish() {
+            current?.applyInsets(top, bottom, ime)
+            insetListeners.toList().forEach { it() }
+        }
         root.setOnApplyWindowInsetsListener { _, ins ->
             if (Build.VERSION.SDK_INT >= 30) {
                 val sys = ins.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
                 top = sys.top
                 bottom = sys.bottom
-                ime = ins.getInsets(WindowInsets.Type.ime()).bottom
+                if (!deferIme) ime = ins.getInsets(WindowInsets.Type.ime()).bottom
             } else {
                 top = ins.systemWindowInsetTop
                 // Before API 30 the bottom inset already includes the keyboard.
                 val b = ins.systemWindowInsetBottom
                 bottom = minOf(b, ins.stableInsetBottom)
-                ime = if (b > ins.stableInsetBottom) b else 0
+                if (!deferIme) ime = if (b > ins.stableInsetBottom) b else 0
             }
-            current?.applyInsets(top, bottom, ime)
-            insetListeners.toList().forEach { it() }
+            if (!deferIme) publish()
             ins
         }
         if (Build.VERSION.SDK_INT >= 30) {
-            root.setWindowInsetsAnimationCallback(object : WindowInsetsAnimation.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+            root.setWindowInsetsAnimationCallback(object : WindowInsetsAnimation.Callback(DISPATCH_MODE_STOP) {
+                override fun onPrepare(animation: WindowInsetsAnimation) {
+                    if (animation.typeMask and WindowInsets.Type.ime() != 0) {
+                        deferIme = true
+                        imeAtStart = ime
+                    }
+                }
+
                 override fun onProgress(insets: WindowInsets, running: MutableList<WindowInsetsAnimation>): WindowInsets {
-                    ime = insets.getInsets(WindowInsets.Type.ime()).bottom
-                    current?.applyInsets(top, bottom, ime)
-                    insetListeners.toList().forEach { it() }
+                    val reported = insets.getInsets(WindowInsets.Type.ime()).bottom
+                    val anim = running.firstOrNull { it.typeMask and WindowInsets.Type.ime() != 0 }
+                    val fraction = anim?.interpolatedFraction ?: 1f
+                    // Hidden inset from the first frame of a back-swipe: follow the finger instead.
+                    ime = if (deferIme && imeAtStart > 0 && reported == 0 && fraction < 1f) (imeAtStart * (1f - fraction)).toInt() else reported
+                    publish()
                     return insets
+                }
+
+                override fun onEnd(animation: WindowInsetsAnimation) {
+                    if (animation.typeMask and WindowInsets.Type.ime() == 0) return
+                    deferIme = false
+                    root.requestApplyInsets()
                 }
             })
         }

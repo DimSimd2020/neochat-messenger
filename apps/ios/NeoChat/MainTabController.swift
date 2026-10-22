@@ -465,6 +465,7 @@ final class ArchiveEntryView: UIControl {
     private let icon = ArchiveIconView()
     private let disc = UIView()
     private let title = label("Архив", 17, .semibold)
+    private let ring = CAShapeLayer()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -474,6 +475,13 @@ final class ArchiveEntryView: UIControl {
         accessibilityTraits = .button
         disc.backgroundColor = Theme.accent.withAlphaComponent(0.16)
         disc.layer.cornerRadius = 26
+        ring.fillColor = UIColor.clear.cgColor
+        ring.strokeColor = Theme.accent.cgColor
+        ring.lineWidth = 2.5
+        ring.lineCap = .round
+        ring.strokeStart = 0
+        ring.strokeEnd = 0
+        layer.addSublayer(ring)
         accessibilityLabel = "Архив"
         for v in [disc, icon, title] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -501,7 +509,22 @@ final class ArchiveEntryView: UIControl {
         didSet { alpha = isHighlighted ? 0.7 : 1 }
     }
 
-    func setPullProgress(_ progress: CGFloat) { icon.progress = progress }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let center = disc.center
+        let radius = disc.bounds.width / 2 + 4
+        ring.frame = bounds
+        ring.path = UIBezierPath(arcCenter: center, radius: radius, startAngle: -.pi / 2, endAngle: 1.5 * .pi, clockwise: true).cgPath
+        ring.strokeColor = Theme.accent.cgColor
+    }
+
+    /// The ring fills while the row is pulled out; it fades once the row has opened.
+    func setPullProgress(_ progress: CGFloat) {
+        let p = min(1, max(0, progress))
+        icon.progress = p
+        ring.strokeEnd = p
+        ring.opacity = Float(p > 0.02 && p < 1 ? 1 : 0)
+    }
 }
 
 final class ChatsViewController: ChatListViewController {
@@ -511,11 +534,15 @@ final class ChatsViewController: ChatListViewController {
     private var presenceTimer: Timer?
     private var archiveShown = false
     private var archivePullArmed = false
+    private var pullFromTop = false
+    private var adjustingArchive = false
     private let archiveButton = ArchiveEntryView()
+    private let archiveHeader = UIView()
     private var offsetObserver: NSKeyValueObservation?
     private var logoItem: UIBarButtonItem?
-    // A chat row (72) and the gap under the entry.
-    private var archiveHeight: CGFloat { archiveShown && query.isEmpty && filter == 0 && !archived.isEmpty ? 80 : 0 }
+    /// Finger travel before the row locks open. Longer than the row itself, so a short tug does not open it.
+    private let archiveTravel: CGFloat = 150
+    private let archiveOpenHeight: CGFloat = 80
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -536,10 +563,12 @@ final class ChatsViewController: ChatListViewController {
             guard let self else { return }
             AppLock.unlockArchive(from: self) { [weak self] in self?.navigationController?.pushViewController(ArchiveViewController(), animated: !Theme.reducedMotion) }
         }, for: .touchUpInside)
-        tableView.addSubview(archiveButton)
+        archiveHeader.clipsToBounds = true
+        archiveHeader.addSubview(archiveButton)
+        setArchiveHeaderHeight(0)
         tableView.alwaysBounceVertical = true
         // The entry belongs to the very top of the list: once the first chat has moved up past the bar, it goes away.
-        offsetObserver = tableView.observe(\.contentOffset, options: []) { [weak self] tv, _ in
+        offsetObserver = tableView.observe(\.contentOffset, options: []) { [weak self] _, _ in
             self?.updateArchivePull()
         }
         let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(hideArchiveBySwipe(_:)))
@@ -587,45 +616,100 @@ final class ChatsViewController: ChatListViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        archiveButton.frame = CGRect(x: 12, y: -80, width: tableView.bounds.width - 24, height: 72)
-        updateArchivePull()
+        if archiveHeader.bounds.width != tableView.bounds.width {
+            setArchiveHeaderHeight(archiveHeader.bounds.height)
+        }
     }
 
-    override func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if archivePullArmed { setArchiveShown(true) }
+    override func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        let top = -tableView.adjustedContentInset.top
+        // Only a pull that starts with the first chat already under the filters counts.
+        pullFromTop = !archiveShown && archiveAvailable && tableView.contentOffset.y <= top + 1
         archivePullArmed = false
     }
 
-    private func updateArchivePull() {
-        let available = !isEditing && query.isEmpty && filter == 0 && !archived.isEmpty
-        let base = tableView.adjustedContentInset.top - tableView.contentInset.top
-        let exposed = max(0, -tableView.contentOffset.y - base)
-        archiveButton.isHidden = !available || exposed <= 0
-        archiveButton.setPullProgress(exposed / 80)
-        if available && tableView.isDragging && !archiveShown {
-            if !archivePullArmed && exposed >= 68 { archivePullArmed = true; replyHaptic() }
-            else if exposed < 56 { archivePullArmed = false }
-        }
-        if archiveShown && tableView.contentOffset.y > -base + 24 { setArchiveShown(false) }
+    override func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        let open = archivePullArmed && pullFromTop
+        archivePullArmed = false
+        pullFromTop = false
+        if open { setArchiveShown(true, pop: true) }
+        else if !archiveShown { setArchiveShown(false) }
     }
 
-    private func setArchiveShown(_ on: Bool) {
-        let oldHeight = tableView.contentInset.top
-        archiveShown = on && query.isEmpty && filter == 0 && !archived.isEmpty
-        let height = archiveHeight
-        guard oldHeight != height else { return }
-        if height > 0 { archiveButton.isHidden = false }
-        // Where the first chat rests under the bar without the entry.
-        let base = tableView.adjustedContentInset.top - oldHeight
-        let scrolledAway = height == 0 && tableView.contentOffset.y > -base
-        let settle = {
-            self.tableView.contentInset.top = height
-            // Leave the offset alone when the entry is already out of sight, so a fling is not cut short.
-            if !scrolledAway { self.tableView.contentOffset.y = -(base + height) }
-            self.view.setNeedsLayout()
-            self.view.layoutIfNeeded()
+    private var archiveAvailable: Bool { !isEditing && query.isEmpty && filter == 0 && !archived.isEmpty }
+
+    /// The row lives in the list header, under the filter chips, and pushes the chats down.
+    private func setArchiveHeaderHeight(_ height: CGFloat) {
+        let width = tableView.bounds.width
+        guard width > 0 else { return }
+        let h = max(0, height)
+        archiveButton.isHidden = h < 1
+        archiveButton.frame = CGRect(x: 12, y: 4, width: width - 24, height: 72)
+        guard abs(archiveHeader.bounds.height - h) > 0.5 || abs(archiveHeader.bounds.width - width) > 0.5 else { return }
+        archiveHeader.frame = CGRect(x: 0, y: 0, width: width, height: h)
+        tableView.tableHeaderView = archiveHeader
+    }
+
+    private func updateArchivePull() {
+        if adjustingArchive { return }
+        let top = -tableView.adjustedContentInset.top
+        guard archiveAvailable else {
+            if archiveHeader.bounds.height > 0 { setArchiveHeaderHeight(0) }
+            archiveShown = false
+            archiveButton.isHidden = true
+            return
         }
-        if scrolledAway { settle() } else { Theme.animate(0.22, settle) }
+        if archiveShown {
+            let away = tableView.contentOffset.y - top
+            guard (tableView.isDragging || tableView.isDecelerating), away > 0 else { return }
+            let left = max(0, archiveOpenHeight - away)
+            adjustingArchive = true
+            setArchiveHeaderHeight(left)
+            tableView.contentOffset.y = top
+            adjustingArchive = false
+            archiveButton.setPullProgress(left / archiveOpenHeight)
+            if left == 0 { archiveShown = false; updateArchiveChrome() }
+            return
+        }
+        guard pullFromTop, tableView.isDragging else { return }
+        let pull = max(0, tableView.panGestureRecognizer.translation(in: tableView).y)
+        let p = min(1, pull / archiveTravel)
+        adjustingArchive = true
+        setArchiveHeaderHeight(archiveOpenHeight * p)
+        if tableView.contentOffset.y < top { tableView.contentOffset.y = top }
+        adjustingArchive = false
+        archiveButton.setPullProgress(p)
+        if !archivePullArmed && p >= 1 { archivePullArmed = true; replyHaptic() }
+        else if p < 0.85 { archivePullArmed = false }
+    }
+
+    private func setArchiveShown(_ on: Bool, pop: Bool = false) {
+        let want = on && archiveAvailable
+        archiveShown = want
+        let height: CGFloat = want ? archiveOpenHeight : 0
+        let apply = {
+            self.setArchiveHeaderHeight(height)
+            self.archiveButton.setPullProgress(want ? 1 : 0)
+            self.archiveButton.transform = .identity
+            self.archiveButton.alpha = 1
+        }
+        if pop && want && !Theme.reducedMotion {
+            archiveButton.alpha = 0
+            archiveButton.transform = CGAffineTransform(scaleX: 0.9, y: 0.9).translatedBy(x: 0, y: 16)
+            setArchiveHeaderHeight(height)
+            Motion.animate(0.46, 0.62, {
+                self.archiveButton.alpha = 1
+                self.archiveButton.transform = .identity
+            })
+        } else if Theme.reducedMotion {
+            apply()
+        } else {
+            Theme.animate(0.22, apply)
+        }
+        updateArchiveChrome()
+    }
+
+    private func updateArchiveChrome() {
         navigationItem.leftBarButtonItem = archiveShown ? UIBarButtonItem(image: UIImage(systemName: "chevron.left"), primaryAction: UIAction { [weak self] _ in self?.setArchiveShown(false) }) : logoItem
         if archiveShown { navigationItem.leftBarButtonItem?.accessibilityLabel = "Скрыть архив" }
     }
