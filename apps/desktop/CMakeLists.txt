@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NeoChat VERSION 0.6.9.4 LANGUAGES CXX)
+project(NeoChat VERSION 0.6.9.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,7 +54,7 @@ set(NEOCHAT_VERSION_LABEL "${PROJECT_VERSION}")
 if(NEOCHAT_TAG)
     set(NEOCHAT_VERSION_LABEL "${PROJECT_VERSION} ${NEOCHAT_TAG}")
 endif()
-target_compile_definitions(neochat_ui PUBLIC NEOCHAT_VERSION="${PROJECT_VERSION}" NEOCHAT_VERSION_LABEL="${NEOCHAT_VERSION_LABEL}" UNICODE _UNICODE)
+target_compile_definitions(neochat_ui PUBLIC NEOCHAT_VERSION="${PROJECT_VERSION}" NEOCHAT_VERSION_LABEL="${NEOCHAT_VERSION_LABEL}" NEOCHAT_TAG="${NEOCHAT_TAG}" UNICODE _UNICODE)
 target_link_libraries(neochat_ui PUBLIC Qt6::Widgets Qt6::Svg "${NEOCORE_LIB}"
     crypt32 bcrypt advapi32 gdi32 user32 ws2_32 ntdll userenv dbghelp legacy_stdio_definitions)
 if(MSVC)

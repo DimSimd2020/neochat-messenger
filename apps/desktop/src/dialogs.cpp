@@ -16,6 +16,9 @@
 #include <functional>
 #include <memory>
 #include <QDateTime>
+#include <QDesktopServices>
+#include <QStandardPaths>
+#include <QUrl>
 #include <QGuiApplication>
 #include <QFileInfo>
 #include <QImageReader>
@@ -1073,6 +1076,14 @@ void settings(const DialogHost &h)
             h.checkUpdate();
     });
     sheet->body()->addWidget(update);
+    // Alpha builds keep a log of every call; this is how it reaches the person fixing the bug.
+    auto *logs = new ui::Button(QStringLiteral("Открыть журналы звонков (alpha)"), ui::Button::Secondary);
+    QObject::connect(logs, &QAbstractButton::clicked, sheet, [] {
+        const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + QStringLiteral("/logs");
+        QDir().mkpath(dir);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+    });
+    sheet->body()->addWidget(logs);
     sheet->body()->addSpacing(6);
     auto *logout = new ui::Button(QStringLiteral("Выйти из аккаунта"), ui::Button::Danger);
     QObject::connect(logout, &QAbstractButton::clicked, sheet, [=] {
