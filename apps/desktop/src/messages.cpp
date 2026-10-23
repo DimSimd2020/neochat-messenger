@@ -137,7 +137,9 @@ int bigEmojiCount(const QJsonObject &m)
 qint64 emojiStart(const QString &id)
 {
     static QHash<QString, qint64> started;
-    return started.try_emplace(id, clockMs()).first.value();
+    if (!started.contains(id))
+        started.insert(id, clockMs());
+    return started.value(id);
 }
 
 // Asks the view to paint again in a moment while an animation runs.
