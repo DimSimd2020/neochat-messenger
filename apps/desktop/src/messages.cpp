@@ -4,6 +4,7 @@
 #include "filepicker.h"
 #include "popupmenu.h"
 
+#include "animatedemoji.h"
 #include "core.h"
 #include "emoji.h"
 #include "profilestyle.h"
@@ -130,6 +131,30 @@ int bigEmojiCount(const QJsonObject &m)
     if (m.value("kind").toString() != "text" || m.value("reply_to").isObject())
         return 0;
     return m.value("emoji_only").toInt();
+}
+
+// When the animation of a big-emoji message began: the first time it was painted.
+qint64 emojiStart(const QString &id)
+{
+    static QHash<QString, qint64> started;
+    return started.try_emplace(id, clockMs()).first.value();
+}
+
+// Asks the view to paint again in a moment while an animation runs.
+void keepPainting(const QWidget *w)
+{
+    static qint64 until = 0;
+    const qint64 now = clockMs();
+    if (!w || now < until)
+        return;
+    until = now + 30;
+    auto *view = const_cast<QWidget *>(w);
+    QTimer::singleShot(33, view, [view] {
+        if (auto *area = qobject_cast<QAbstractScrollArea *>(view))
+            area->viewport()->update();
+        else
+            view->update();
+    });
 }
 
 bool isImage(const QJsonObject &m)
@@ -593,7 +618,10 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     } else if (const int n = bigEmojiCount(m); n > 0) {
         const QFontMetricsF bf(bigEmojiFont(n));
         L.big = true;
-        L.text = QRectF(0, h, bf.horizontalAdvance(text) + 4, bf.height());
+        // Animated emoji take the place of the text; the row keeps the height of the text either way.
+        const int moving = int(animatedemoji::keysOf(text).size());
+        const qreal tw = moving > 0 ? moving * animatedemoji::drawSize(moving) + (moving - 1) * 4 + 4 : bf.horizontalAdvance(text) + 4;
+        L.text = QRectF(0, h, tw, bf.height());
         w = qMax(w, L.text.width());
         h += L.text.height() + 2;
     } else if (!text.isEmpty()) {
@@ -933,9 +961,25 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         const QRectF tr = L.call.adjusted(48, 0, 0, 0);
         p->drawText(tr, Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(p->font()).elidedText(messageText(m), Qt::ElideRight, tr.width()));
     } else if (L.big) {
-        p->setFont(bigEmojiFont(bigEmojiCount(m)));
-        p->setPen(fg);
-        p->drawText(L.text, Qt::AlignLeft | Qt::AlignVCenter, messageText(m));
+        const QStringList keys = animatedemoji::keysOf(messageText(m));
+        if (!keys.isEmpty()) {
+            const qreal side = animatedemoji::drawSize(int(keys.size()));
+            const qint64 elapsed = clockMs() - emojiStart(m.value("id").toString());
+            qreal x = L.text.left();
+            bool moving = false;
+            for (const QString &key : keys) {
+                const animatedemoji::Sheet sheet = animatedemoji::sheet(key);
+                if (sheet.valid())
+                    moving |= animatedemoji::paint(p, sheet, QRectF(x, L.text.center().y() - side / 2, side, side), elapsed);
+                x += side + 4;
+            }
+            if (moving)
+                keepPainting(opt.widget);
+        } else {
+            p->setFont(bigEmojiFont(bigEmojiCount(m)));
+            p->setPen(fg);
+            p->drawText(L.text, Qt::AlignLeft | Qt::AlignVCenter, messageText(m));
+        }
     } else if (!L.text.isNull()) {
         QTextDocument *d = textDoc(m);
         QAbstractTextDocumentLayout::PaintContext ctx;

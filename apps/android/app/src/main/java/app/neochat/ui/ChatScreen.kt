@@ -337,6 +337,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val composerBg = GlassDrawable(ctx, radius = ctx.dpf(31))
     private val textSp = Prefs.textSize(ctx)
     private val bigEmoji = Prefs.of(ctx).getBoolean("big_emoji", true)
+    private val animatedEmoji = Prefs.of(ctx).getBoolean("animated_emoji", true)
     private val enterSends = Prefs.of(ctx).getBoolean("enter_send", false)
     private var baseSubtitle = ""
 
@@ -1007,6 +1008,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private val fileMeta = ctx.label("", 12.5f, 400)
         private val fileAction = ImageView(ctx)
         private val text = ctx.label("", 15.5f)
+        private val emojiRow = LinearLayout(ctx)
         private val photo = PosterView(ctx)
         private val poll = LinearLayout(ctx)
         private val pollQuestion = ctx.label("", 16f, 700)
@@ -1114,6 +1116,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             text.setOnClickListener { tap { menu(m, bubble) } }
             text.setOnTouchListener { v, e -> openLinkAt(v as TextView, e) }
             pollQuestion.maxWidth = maxText
+            bubble.addView(emojiRow, LayoutParams(WRAP, WRAP))
             bubble.addView(text, LayoutParams(WRAP, WRAP))
             bubble.addView(reactRow, LayoutParams(WRAP, WRAP).apply { topMargin = dp(6) })
             meta.gravity = Gravity.CENTER_VERTICAL or Gravity.END
@@ -1258,6 +1261,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             // One to three emoji without anything else are shown large and without a bubble.
             val emoji = if (bigEmoji && rep == null && f == null) m.optInt("emoji_only") else 0
             text.setTextSize(TypedValue.COMPLEX_UNIT_SP, when (emoji) { 1 -> 52f; 2 -> 42f; 3 -> 34f; else -> textSp })
+            // Where every emoji has an animation, they play in place of the text.
+            val moving = if (emoji > 0 && animatedEmoji) AnimatedEmoji.sheetsOf(ctx, body) else null
+            bindEmojiRow(moving)
+            if (moving != null) text.visibility = GONE
             if (emoji > 0) {
                 bubble.background = null
                 bubble.setPadding(dp(2), 0, dp(2), dp(2))
@@ -1300,6 +1307,19 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 for (r in m.optJSONArray("reactions")?.objects() ?: emptyList()) append(", ").append(r.str("emoji")).append(" ").append(r.optInt("count"))
             }
             invalidate()
+        }
+
+        private fun bindEmojiRow(sheets: List<AnimatedEmoji.Sheet>?) {
+            emojiRow.visibility = if (sheets == null) GONE else VISIBLE
+            if (sheets == null) return
+            val size = dp(when (sheets.size) { 1 -> 64; 2 -> 52; else -> 42 })
+            while (emojiRow.childCount > sheets.size) emojiRow.removeViewAt(emojiRow.childCount - 1)
+            while (emojiRow.childCount < sheets.size) emojiRow.addView(AnimatedEmojiView(ctx), LayoutParams(size, size))
+            for ((i, s) in sheets.withIndex()) {
+                val v = emojiRow.getChildAt(i) as AnimatedEmojiView
+                v.layoutParams = LayoutParams(size, size)
+                v.show(s)
+            }
         }
 
         private fun bindReactions(m: JSONObject, onAccent: Boolean) {

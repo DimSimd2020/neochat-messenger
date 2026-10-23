@@ -16,6 +16,7 @@ enum Prefs {
     }
     static var textSize: CGFloat { CGFloat(d.object(forKey: "text_size") as? Double ?? 17) }
     static var bigEmoji: Bool { bool("big_emoji", true) }
+    static var animatedEmoji: Bool { bool("animated_emoji", true) }
     static var autoload: Bool { bool("autoload", true) }
     static var chatSort: String { d.string(forKey: "chat_sort") ?? "activity" }
     /// stable receives only stable builds. Anything else, including a missing value, stays stable.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NeoChat VERSION 0.6.9.9 LANGUAGES CXX)
+project(NeoChat VERSION 0.6.9.10 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,7 @@ add_library(neochat_ui STATIC
     src/profiles.cpp src/profiles.h
     src/profilestyle.cpp src/profilestyle.h
     src/videoinfo.cpp src/videoinfo.h
+    src/animatedemoji.cpp src/animatedemoji.h
     src/mainwindow.cpp src/mainwindow.h
     src/calls.cpp src/calls.h
     src/style.cpp src/style.h
@@ -49,6 +50,10 @@ add_dependencies(neochat_ui neocore)
 # Russian strings for Qt's own widgets (context menus, file dialogs), embedded in the binary.
 qt_add_resources(neochat_ui "qt_ru" PREFIX "/i18n" BASE "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_TRANSLATIONS}"
     FILES "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_TRANSLATIONS}/qtbase_ru.qm")
+# Animated emoji sprite sheets, shared with the phone apps (PNG is compressed already, so stored as is).
+set(EMOJI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/animated-emoji")
+file(GLOB EMOJI_FILES CONFIGURE_DEPENDS "${EMOJI_DIR}/*.png" "${EMOJI_DIR}/index.json")
+qt_add_resources(neochat_ui "animated_emoji" PREFIX "/animated-emoji" BASE "${EMOJI_DIR}" OPTIONS -no-compress FILES ${EMOJI_FILES})
 target_include_directories(neochat_ui PUBLIC "${NEOCORE_DIR}/include" src)
 # A build that is not released from git (alpha) says so next to its version.
 set(NEOCHAT_TAG "" CACHE STRING "Build tag shown next to the version, e.g. alpha")

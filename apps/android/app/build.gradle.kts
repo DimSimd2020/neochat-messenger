@@ -22,8 +22,8 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 33
-        versionName = "0.6.9.9"
+        versionCode = 34
+        versionName = "0.6.9.10"
     }
 
     signingConfigs {
@@ -60,6 +60,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+
+    // Animated emoji sprite sheets are shared by all three apps from the repository root.
+    sourceSets.getByName("main").assets.srcDir("${rootDir}/../../assets")
 
     packaging { jniLibs { useLegacyPackaging = false } }
 }

@@ -1,6 +1,7 @@
 #include "dialogs.h"
 #include "profiles.h"
 
+#include "animatedemoji.h"
 #include "calls.h"
 #include "filepicker.h"
 #include "core.h"
@@ -1049,6 +1050,11 @@ void settings(const DialogHost &h)
     notify->setChecked(QSettings().value("notifications/enabled", true).toBool());
     QObject::connect(notify, &QAbstractButton::toggled, sheet, [](bool on) { QSettings().setValue("notifications/enabled", on); });
     sheet->body()->addWidget(notify);
+    auto *moving = new ui::Toggle(QStringLiteral("Анимированные эмодзи"));
+    moving->setChecked(animatedemoji::enabled());
+    QObject::connect(moving, &QAbstractButton::toggled, sheet, [](bool on) { animatedemoji::setEnabled(on); });
+    sheet->body()->addWidget(moving);
+    sheet->body()->addWidget(mutedText(QStringLiteral("Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи.")));
     // Shared by the user's devices through the core; a double click puts it on a message.
     auto *quick = new ui::Button(QStringLiteral("Быстрая реакция · ") + quickReaction(), ui::Button::Secondary);
     quick->setToolTip(QStringLiteral("Двойной щелчок по сообщению ставит эту реакцию. Настройка общая для всех ваших устройств"));

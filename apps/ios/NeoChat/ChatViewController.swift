@@ -1719,6 +1719,7 @@ final class BubbleCell: UITableViewCell {
     private let fileName = label("", 15, .semibold)
     private let fileMeta = label("", 13)
     private let text = label("", 17)
+    private let emojiRow = UIStackView()
     private let poll = UIStackView()
     private let pollQuestion = label("", 17, .semibold)
     private let pollInfo = label("", 13)
@@ -1818,7 +1819,10 @@ final class BubbleCell: UITableViewCell {
         let spacer = UIView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         reactRow.addArrangedSubview(spacer)
-        [fwd, quote, fileRow, text, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
+        emojiRow.spacing = 4
+        emojiRow.alignment = .center
+        emojiRow.isHidden = true
+        [fwd, quote, fileRow, emojiRow, text, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
         inner.setCustomSpacing(6, after: reactRow)
         bubbleTap.addTarget(self, action: #selector(tapped(_:)))
         bubbleTapDelegate.photo = photo
@@ -2091,6 +2095,7 @@ final class BubbleCell: UITableViewCell {
         }
         bindReactions(m.arr("reactions"), out: out && !big, fg: fg)
         text.isHidden = body.isEmpty || kind == "poll"
+        bindEmojiRow(big && Prefs.animatedEmoji ? AnimatedEmoji.keys(for: body) : nil)
         let st = m.str("status")
         meta.text = (m.bool("edited") ? "изменено " : "") + hhmm(m.int64("sent_at"))
         delivery.isHidden = !out
@@ -2111,6 +2116,23 @@ final class BubbleCell: UITableViewCell {
         for r in m.arr("reactions") { a += ", " + r.str("emoji") + " \(r.int("count"))" }
         accessibilityLabel = a
         accessibilityHint = "Коснитесь дважды, чтобы открыть реакции и действия"
+    }
+
+    /// Where every emoji has an animation, they play in place of the text.
+    private func bindEmojiRow(_ keys: [String]?) {
+        emojiRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let sheets = keys?.compactMap { AnimatedEmoji.sheet($0) } ?? []
+        emojiRow.isHidden = sheets.isEmpty || sheets.count != keys?.count
+        if emojiRow.isHidden { return }
+        text.isHidden = true
+        let side = AnimatedEmoji.side(sheets.count)
+        for s in sheets {
+            let v = AnimatedEmojiView()
+            v.show(s)
+            v.widthAnchor.constraint(equalToConstant: side).isActive = true
+            v.heightAnchor.constraint(equalToConstant: side).isActive = true
+            emojiRow.addArrangedSubview(v)
+        }
     }
 
     private func bindReactions(_ list: [JSON], out: Bool, fg: UIColor) {
