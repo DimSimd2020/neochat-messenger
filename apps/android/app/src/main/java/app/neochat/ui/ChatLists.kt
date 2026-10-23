@@ -20,6 +20,7 @@ import org.json.JSONObject
 
 /** Who is typing where, for a few seconds after each hint from the core. */
 object Typing {
+    fun reset() { until.clear(); main.removeCallbacks(tick) }
     private const val SHOW_MS = 6000L
     private val until = HashMap<String, Pair<Long, LinkedHashMap<String, String>>>()
     private val main = Handler(Looper.getMainLooper())

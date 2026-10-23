@@ -364,6 +364,43 @@ object Dialogs {
         }.getOrDefault("")
     }
 
+    fun accounts(act: MainActivity) {
+        val s = Sheet(act, "Сменить аккаунт")
+        val rows = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        s.add(rows, 0)
+        s.muted("Остальные аккаунты остаются подключёнными. Их переписка и ключи хранятся отдельно.", 8)
+        var selecting = false
+        fun select(method: String, params: JSONObject = JSONObject()) {
+            if (selecting) return
+            selecting = true
+            CoreClient.call(method, params) { _, e ->
+                selecting = false
+                if (e != null) act.toast(e.message) else s.dismiss()
+            }
+        }
+        val add = PillButton(act, "Добавить аккаунт", primary = false)
+        add.setOnClickListener { select("add_account") }
+        s.add(add)
+        CoreClient.call("list_accounts") { v, e ->
+            if (e != null) return@call act.toast(e.message)
+            for (a in (v as? org.json.JSONArray)?.objects() ?: emptyList()) {
+                val row = ListRow(act, 44)
+                val name = a.str("display_name").ifEmpty { "Новый аккаунт" }
+                row.title.text = name
+                row.avatar.set(name, a.str("account_id"), a.str("avatar_path"))
+                row.subtitle.text = listOfNotNull(
+                    a.str("username").takeIf { it.isNotEmpty() }?.let { "@$it" },
+                    "Текущий".takeIf { a.optBoolean("current") },
+                    "Требуется вход".takeIf { !a.optBoolean("logged_in") }
+                ).joinToString(" · ")
+                row.contentDescription = "$name, ${row.subtitle.text}"
+                row.setOnClickListener { select("switch_account", JSONObject().put("account_id", a.str("account_id"))) }
+                rows.addView(row, lp())
+            }
+        }
+        s.show()
+    }
+
     fun devices(act: MainActivity) {
         val s = Sheet(act, "Устройства")
         val ctx = s.ctx

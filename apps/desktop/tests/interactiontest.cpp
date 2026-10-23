@@ -1,10 +1,12 @@
 #include "composer.h"
+#include "dialogs.h"
 #include "messages.h"
 #include "popupmenu.h"
 #include "sheet.h"
 #include "theme.h"
 
 #include <QApplication>
+#include <QAbstractButton>
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QDir>
@@ -22,6 +24,47 @@ class InteractionTest : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { Theme::instance()->init(); }
+
+    void accountSettingsAndDeviceViewport() {
+        QWidget host;
+        host.resize(973, 742);
+        host.show();
+        DialogHost h;
+        h.host = &host;
+        h.toast = [](const QString &) {};
+        auto shot = [&](const QString &name) {
+            const QString dir = qEnvironmentVariable("NEOCHAT_SHOTS");
+            if (dir.isEmpty()) return;
+            QDir().mkpath(dir);
+            host.grab().save(dir + "/" + name + ".png");
+        };
+        dialogs::settings(h);
+        auto button = [&](const QString &text) -> QAbstractButton * {
+            for (auto *b : host.findChildren<QAbstractButton *>())
+                if (b->isVisible() && b->text() == text) return b;
+            return nullptr;
+        };
+        QTRY_VERIFY(button(QStringLiteral("Сменить аккаунт")));
+        QVERIFY(button(QStringLiteral("Устройства")));
+        QVERIFY(button(QStringLiteral("Сменить аккаунт"))->mapTo(&host, QPoint()).y() < button(QStringLiteral("Устройства"))->mapTo(&host, QPoint()).y());
+        QTest::qWait(250);
+        shot("multi-account-settings");
+        button(QStringLiteral("Сменить аккаунт"))->click();
+        QTRY_VERIFY(button(QStringLiteral("Добавить аккаунт")));
+        QVERIFY(button(QStringLiteral("Добавить аккаунт"))->focusPolicy() != Qt::NoFocus);
+        QTest::qWait(250);
+        Sheet::closeAll(&host);
+        QTest::qWait(250);
+        dialogs::devices(h);
+        auto *list = host.findChild<QScrollArea *>(QStringLiteral("devicesList"));
+        QVERIFY(list);
+        QTRY_COMPARE(list->height(), 208);
+        QVERIFY(list->viewport()->height() >= 206);
+        QTest::qWait(250);
+        shot("multi-account-devices");
+        Sheet::closeAll(&host);
+        QTest::qWait(250);
+    }
 
     void pasteImageAndSeveralFiles() {
         ComposerEdit edit;

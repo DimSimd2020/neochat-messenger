@@ -24,6 +24,8 @@ public:
     static Core *instance();
     bool open(const QString &dataDir, const QString &dbKeyHex, QString *error);
     void close();
+    QString accountId() const { return m_accountId; }
+    void receiveEvent(const QJsonObject &event);
 
     // `cb` runs on the thread of `ctx`, and only if `ctx` is still alive.
     void call(const QString &method, const QJsonObject &params, QObject *ctx = nullptr, Callback cb = {});
@@ -36,4 +38,6 @@ private:
     ~Core() override;
     void *m_core = nullptr;
     QThreadPool m_pool;
+    QString m_accountId;
+    quint64 m_accountGeneration = 0;
 };

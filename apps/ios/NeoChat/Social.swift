@@ -136,6 +136,7 @@ var tzOffsetMinutes: Int { TimeZone.current.secondsFromGMT() / 60 }
 
 /// "печатает…" hints: shown for 6 s after the last one.
 enum Typing {
+    static func reset() { until.removeAll(); timer?.invalidate(); timer = nil }
     private static var until: [String: (Date, [String: String])] = [:]
     private static var timer: Timer?
 

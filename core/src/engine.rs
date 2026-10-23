@@ -32,6 +32,7 @@ pub const DEFAULT_SERVER: &str = "https://r1270286.s2566.vm.mydomain.zone:8443";
 pub struct Inner {
     pub db: Mutex<Db>,
     pub data_dir: PathBuf,
+    installation_id: Option<String>,
     cb: EventCallback,
     wake: (Mutex<bool>, Condvar),
     pub foreground: AtomicBool,
@@ -73,6 +74,7 @@ impl Core {
         let inner = Arc::new(Inner {
             db: Mutex::new(db),
             data_dir,
+            installation_id: config["installation_id"].as_str().filter(|id| !id.is_empty()).map(|id| hex::encode(keys::sha256(format!("NeoChat-installation-v1\n{id}").as_bytes()))),
             cb,
             wake: (Mutex::new(false), Condvar::new()),
             foreground: AtomicBool::new(config["foreground"].as_bool().unwrap_or(true)),
@@ -89,7 +91,10 @@ impl Core {
             ice_cache: Mutex::new(None),
         });
         let w = inner.clone();
-        let worker = std::thread::Builder::new().name("neocore-worker".into()).spawn(move || w.worker_loop()).ok();
+        let worker = std::thread::Builder::new().name("neocore-worker".into()).spawn(move || {
+            w.record_installation();
+            w.worker_loop();
+        }).ok();
         Ok(Core { inner, worker })
     }
 
@@ -432,7 +437,7 @@ impl Inner {
             "key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?),
             "account_identity_key": b64(&account.identity_key().serialize()),
             "recovery_hash": b64(&keys::sha256(&secret)),
-            "device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?,
+            "device": self.device_upload(&device, p)?,
             "roster": {"revision": "1", "blob": b64(&blob), "signature": b64(&sig)},
         });
         let out = Api::new(&server).call("POST", "/v1/accounts", None, Some(&body))?;
@@ -477,6 +482,7 @@ impl Inner {
     }
 
     fn after_login(&self) {
+        self.record_installation();
         // For a while after sign-in, fresher history copies from other devices are merged in.
         let _ = kv_set(&self.db().conn, "history_fresh_until", (now_ms() + 15 * 60 * 1000).to_string().as_bytes());
         // A fresh sign-in does not show the notes of the version it started on.
@@ -487,9 +493,23 @@ impl Inner {
         self.wake();
     }
 
+    fn record_installation(&self) {
+        if let Some(id) = &self.installation_id {
+            let _ = self.authed("PUT", "/v1/devices/current/installation", Some(&json!({"installation_id": id})));
+        }
+    }
+
+    fn device_upload(&self, device: &keys::NewDevice, p: &Value) -> Result<Value> {
+        let mut upload = device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?;
+        if let Some(id) = &self.installation_id {
+            upload["installation_id"] = json!(id);
+        }
+        Ok(upload)
+    }
+
     /// Resolves nickname or verified email to KDF salt and canonical username.
     fn password_salt(server: &str, login: &str) -> Result<(String, String)> {
-        match Api::new(server).call("POST", "/v1/accounts/password-salt", None, Some(&json!({"login": login, "username": login}))) {
+        match Api::new(server).call("POST", "/v1/accounts/password-salt", None, Some(&json!({"username": login}))) {
             Ok(v) => Ok((s(&v, "salt")?.to_string(), v["username"].as_str().unwrap_or(login).to_string())),
             Err(Error::Api { status: 404, .. }) => Ok((login.to_string(), login.to_string())),
             Err(e) => Err(e),
@@ -589,6 +609,10 @@ impl Inner {
     fn login_new_device(&self, server: &str, login: &str, username: &str, pw: &backup::PasswordKeys, p: &Value) -> Result<Value> {
         let api = Api::new(server);
         let mut start = json!({"username": login, "password": pw.auth});
+        if let Some(id) = &self.installation_id {
+            start["installation_id"] = json!(id);
+            start["platform"] = json!(s(p, "platform")?);
+        }
         if let Some(code) = p["code"].as_str().map(str::trim).filter(|c| !c.is_empty()) {
             start["code"] = code.into();
         }
@@ -611,6 +635,9 @@ impl Inner {
         let blob = unb64(st["roster"]["blob"].as_str().unwrap_or_default())?;
         let sig = unb64(st["roster"]["signature"].as_str().unwrap_or_default())?;
         let mut r = keys::verify_roster(&account_key, &blob, &sig)?;
+        if let Some(previous) = st["replace_device_id"].as_str().filter(|id| !id.is_empty()) {
+            r.devices.retain(|device| device.device_id != previous);
+        }
         if r.devices.len() >= keys::MAX_DEVICES {
             return Err(Error::Invalid(format!("У аккаунта уже {} устройств. Отзовите одно из них", keys::MAX_DEVICES)));
         }
@@ -625,7 +652,7 @@ impl Inner {
             None,
             Some(&json!({
                 "start_token": s(&st, "start_token")?,
-                "device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?,
+                "device": self.device_upload(&device, p)?,
                 "roster": {"revision": r.revision.to_string(), "blob": b64(&nb), "signature": b64(&ns)},
             })),
         )?;
@@ -687,7 +714,7 @@ impl Inner {
             "key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?),
             "recovery_hash": b64(&keys::sha256(&secret)),
             "account_identity_key": b64(&account.identity_key().serialize()),
-            "device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?,
+            "device": self.device_upload(&device, p)?,
             "roster": {"revision": rev.to_string(), "blob": b64(&blob), "signature": b64(&sig)},
         });
         let out = Api::new(&server).call("POST", "/v1/accounts/recover", None, Some(&body))?;
@@ -718,7 +745,7 @@ impl Inner {
             "POST",
             "/v1/devices/qr",
             None,
-            Some(&json!({"device": device.upload_json(p["device_name"].as_str().unwrap_or("NeoChat"), s(p, "platform")?)?})),
+            Some(&json!({"device": self.device_upload(&device, p)?})),
         )?;
         let link_id = s(&out, "link_id")?.to_string();
         let mut db = self.db();
@@ -819,6 +846,9 @@ impl Inner {
         }
         let new_dev = keys::RosterDevice { device_id: pending["device_id"].as_str().unwrap_or_default().to_string(), identity_key: identity, auth_key: auth };
         let (blob, sig, rev) = self.next_own_roster(&account, |devs| {
+            if let Some(previous) = pending["replace_device_id"].as_str().filter(|id| !id.is_empty()) {
+                devs.retain(|device| device.device_id != previous);
+            }
             if devs.len() >= keys::MAX_DEVICES {
                 return Err(Error::Invalid(format!("У аккаунта уже {} устройств. Отзовите одно из них", keys::MAX_DEVICES)));
             }

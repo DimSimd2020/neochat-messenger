@@ -89,6 +89,16 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         switchMode.addTarget(self, action: #selector(onSwitch), for: .touchUpInside)
         forgotLink.addTarget(self, action: #selector(onForgot), for: .touchUpInside)
         recoverLink.addTarget(self, action: #selector(onRecover), for: .touchUpInside)
+        let accounts = PillButton("Сменить аккаунт", primary: false)
+        accounts.isHidden = true
+        accounts.addAction(UIAction { [weak self] _ in
+            guard let self, !self.busy else { return }
+            self.present(UINavigationController(rootViewController: AccountsViewController()), animated: !Theme.reducedMotion)
+        }, for: .touchUpInside)
+        stack.addArrangedSubview(accounts)
+        Core.shared.call("list_accounts") { r in
+            if case .success(let v) = r { accounts.isHidden = (v as? [JSON] ?? []).count < 2 }
+        }
         setMode(mode)
     }
 

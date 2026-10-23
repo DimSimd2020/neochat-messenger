@@ -6,7 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use serde_json::{Value, json};
 
-use crate::engine::Core;
+use crate::accounts::Core;
 
 pub type EventFn = extern "C" fn(ctx: *mut c_void, json: *const c_char);
 

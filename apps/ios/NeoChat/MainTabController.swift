@@ -12,6 +12,7 @@ final class ChatNavController: UINavigationController, UIGestureRecognizerDelega
     // Leaving a chat slides the transparent tab bar back in. In the light theme its glass
     // picks up the mint spot and sits over the list, blocking taps, until the transition ends.
     func navigationController(_ nc: UINavigationController, willShow vc: UIViewController, animated: Bool) {
+        nc.setNavigationBarHidden(vc is ChatViewController, animated: animated && !Theme.reducedMotion)
         guard let bar = tabBarController?.tabBar else { return }
         let returning = animated && !vc.hidesBottomBarWhenPushed && nc.transitionCoordinator?.viewController(forKey: .from)?.hidesBottomBarWhenPushed == true
         guard returning, let coordinator = nc.transitionCoordinator else {

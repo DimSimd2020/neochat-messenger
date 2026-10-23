@@ -1,0 +1,14 @@
+{
+  "verifyEmailTemplate": {
+    "senderDisplayName": "NeoChat",
+    "subject": "Подтвердите почту NeoChat",
+    "bodyFormat": "HTML",
+    "body": "<div style=\"background:#e9eff9;padding:32px 16px;font-family:Arial,sans-serif;color:#1c2638\"><div style=\"max-width:480px;margin:auto;background:#fff;border-radius:20px;padding:32px\"><p style=\"font-size:24px;font-weight:bold;color:#315dcf\">NeoChat</p><h1 style=\"font-size:26px\">Подтвердите электронную почту</h1><p style=\"line-height:1.6\">Вы указали %EMAIL% при регистрации или привязке почты в NeoChat. Откройте ссылку, чтобы подтвердить этот адрес.</p><p style=\"margin:28px 0\"><a href=\"%LINK%\" style=\"display:inline-block;background:#315dcf;color:#fff;text-decoration:none;border-radius:12px;padding:16px 22px\">Подтвердить почту</a></p><p style=\"font-size:13px;line-height:1.6;color:#53617a\">Ссылка действует 30 минут. Если вы не запрашивали подтверждение, просто проигнорируйте письмо.</p></div></div>"
+  },
+  "resetPasswordTemplate": {
+    "senderDisplayName": "NeoChat",
+    "subject": "Сброс пароля NeoChat",
+    "bodyFormat": "HTML",
+    "body": "<div style=\"background:#e9eff9;padding:32px 16px;font-family:Arial,sans-serif;color:#1c2638\"><div style=\"max-width:480px;margin:auto;background:#fff;border-radius:20px;padding:32px\"><p style=\"font-size:24px;font-weight:bold;color:#315dcf\">NeoChat</p><h1 style=\"font-size:26px\">Восстановление доступа</h1><p style=\"line-height:1.6\">Для аккаунта с почтой %EMAIL% запрошен сброс пароля. Откройте защищённую страницу NeoChat и получите код для установки нового пароля в приложении.</p><p style=\"margin:28px 0\"><a href=\"%LINK%\" style=\"display:inline-block;background:#315dcf;color:#fff;text-decoration:none;border-radius:12px;padding:16px 22px\">Восстановить доступ</a></p><p style=\"font-size:13px;line-height:1.6;color:#53617a\">Ссылка действует 30 минут. Никому не передавайте код. Если это были не вы, проигнорируйте письмо — пароль останется прежним.</p></div></div>"
+  }
+}

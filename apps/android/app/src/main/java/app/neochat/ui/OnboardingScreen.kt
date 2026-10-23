@@ -109,6 +109,13 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         recoverLink.setOnClickListener { if (!busy) setMode(Mode.RECOVER) }
         recoverLink.role(Theme.Role.MUTED)
         form.addView(recoverLink, lp())
+        val accounts = PillButton(ctx, "Сменить аккаунт", primary = false)
+        accounts.visibility = View.GONE
+        accounts.setOnClickListener { if (!busy) Dialogs.accounts(act) }
+        form.addView(accounts, lp().apply { topMargin = dp(10) })
+        CoreClient.call("list_accounts") { v, _ ->
+            accounts.visibility = if (((v as? org.json.JSONArray)?.length() ?: 0) > 1) View.VISIBLE else View.GONE
+        }
     }
 
     private fun buildRecovery() {

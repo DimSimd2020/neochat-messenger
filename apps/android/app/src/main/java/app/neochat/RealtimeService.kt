@@ -84,8 +84,9 @@ class RealtimeService : Service() {
                 stop(app)
                 return done()
             }
-            CoreClient.call("status") { v, _ ->
-                if ((v as? JSONObject)?.optBoolean("logged_in") == true) {
+            CoreClient.call("list_accounts") { v, _ ->
+                val accounts = v as? org.json.JSONArray
+                if (accounts != null && (0 until accounts.length()).any { accounts.optJSONObject(it)?.optBoolean("logged_in") == true }) {
                     // Starting from the background is refused on Android 12+; the next foreground start retries.
                     runCatching { app.startForegroundService(Intent(app, RealtimeService::class.java)) }
                 } else stop(app)

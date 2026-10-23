@@ -28,6 +28,7 @@ public:
     static Typing *instance();
     void onEvent(const QJsonObject &ev);
     void clear(const QString &conv);
+    void reset() { m_entries.clear(); }
     QString text(const QString &conv, bool group) const;
 
 signals:
@@ -74,6 +75,7 @@ class ChatPanel : public QWidget {
 public:
     explicit ChatPanel(QWidget *parent = nullptr);
     void reload();
+    void resetAccount();
     void select(const QString &id);
     QString selected() const { return m_selected; }
     void focusSearch();

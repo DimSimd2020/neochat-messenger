@@ -30,8 +30,9 @@
     <p>{{.Message}}</p>
     {{if .Address}}<p class="address">{{.Address}}</p>{{end}}
     {{if .Token}}
-    <form method="post" action="/v1/accounts/email/confirm">
+    <form method="post" action="{{if .FirebaseCode}}/v1/accounts/email/action{{else}}/v1/accounts/email/confirm{{end}}">
       <input type="hidden" name="t" value="{{.Token}}">
+      {{if .FirebaseCode}}<input type="hidden" name="mode" value="verifyEmail"><input type="hidden" name="oobCode" value="{{.FirebaseCode}}">{{end}}
       <button type="submit">Подтвердить почту</button>
     </form>
     <p class="hint">Если вы не запрашивали подтверждение, просто закройте эту страницу.</p>

@@ -20,6 +20,34 @@ final class Core {
     private var handle: UnsafeMutableRawPointer?
     private let queue = DispatchQueue(label: "app.neochat.core", qos: .userInitiated, attributes: .concurrent)
     private let limit = DispatchSemaphore(value: 4)
+    private let accountLock = NSLock()
+    private var selectedAccount = ""
+    private var selectionVersion = 0
+    private var accountGeneration: Int {
+        accountLock.lock()
+        defer { accountLock.unlock() }
+        return selectionVersion
+    }
+    var accountId: String {
+        accountLock.lock()
+        defer { accountLock.unlock() }
+        return selectedAccount
+    }
+
+    func receive(_ ev: JSON) {
+        if ev.str("type") == "account_selected" {
+            accountLock.lock()
+            selectedAccount = ev.str("account_id")
+            selectionVersion += 1
+            accountLock.unlock()
+        }
+        DispatchQueue.main.async {
+            let id = ev.str("account_id")
+            if id.isEmpty || id == self.accountId || ev.str("type") == "account_notify" {
+                NotificationCenter.default.post(name: .coreEvent, object: nil, userInfo: ev)
+            }
+        }
+    }
 
     var isOpen: Bool { handle != nil }
 
@@ -34,7 +62,7 @@ final class Core {
         var d = dir
         try? d.setResourceValues(values)
         let key = try DbKey.loadOrCreate()
-        let cfg: [String: Any] = ["data_dir": dir.path, "db_key": key, "foreground": true]
+        let cfg: [String: Any] = ["data_dir": dir.path, "db_key": key, "foreground": true, "installation_id": "ios:" + (try DbKey.loadOrCreate(account: "installation-id-v1"))]
         let json = String(data: try JSONSerialization.data(withJSONObject: cfg), encoding: .utf8)!
         var err: UnsafeMutablePointer<CChar>?
         let h = json.withCString { nc_open($0, coreEventCallback, nil, &err) }
@@ -53,7 +81,9 @@ final class Core {
     /// Synchronous call for background work; never use it on the main thread.
     func callBlocking(_ method: String, _ params: [String: Any] = [:]) -> Result<Any?, CoreError> {
         guard let handle else { return .failure(CoreError(code: "closed", message: "Хранилище не открыто")) }
-        let p = String(data: (try? JSONSerialization.data(withJSONObject: params)) ?? Data("{}".utf8), encoding: .utf8)!
+        var bound = params
+        if bound["_account_id"] == nil && !accountId.isEmpty { bound["_account_id"] = accountId }
+        let p = String(data: (try? JSONSerialization.data(withJSONObject: bound)) ?? Data("{}".utf8), encoding: .utf8)!
         guard let out = method.withCString({ m in p.withCString { nc_call(handle, m, $0) } }) else {
             return .failure(CoreError(code: "unknown", message: "Нет ответа"))
         }
@@ -70,11 +100,17 @@ final class Core {
     }
 
     func call(_ method: String, _ params: [String: Any] = [:], _ cb: ((Result<Any?, CoreError>) -> Void)? = nil) {
+        let account = params["_account_id"] as? String ?? accountId
+        let generation = accountGeneration
+        var bound = params
+        if !account.isEmpty { bound["_account_id"] = account }
+        let request = bound
         queue.async {
             self.limit.wait()
-            let r = self.callBlocking(method, params)
+            let r = self.callBlocking(method, request)
             self.limit.signal()
-            if let cb { DispatchQueue.main.async { cb(r) } }
+            // File callbacks must still remove their temporary source after a switch.
+            if let cb { DispatchQueue.main.async { if method == "send_file" || account.isEmpty || (account == self.accountId && generation == self.accountGeneration) { cb(r) } } }
         }
     }
 }
@@ -83,17 +119,13 @@ private func coreEventCallback(_ ctx: UnsafeMutableRawPointer?, _ json: UnsafePo
     guard let json else { return }
     let s = String(cString: json)
     guard let ev = try? JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any] else { return }
-    DispatchQueue.main.async {
-        NotificationCenter.default.post(name: .coreEvent, object: nil, userInfo: ev)
-    }
+    Core.shared.receive(ev)
 }
 
 /// Random 32-byte database key kept in the Keychain, available after first unlock, never synced.
 enum DbKey {
     private static let service = "app.neochat.db"
-    private static let account = "db-key-v1"
-
-    static func loadOrCreate() throws -> String {
+    static func loadOrCreate(account: String = "db-key-v1") throws -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

@@ -677,7 +677,10 @@ void devices(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Устройства"));
     sheet->setBack([h] { dialogs::settings(h); });
-    auto *list = new RowList(300);
+    // 3.5 rows (58 px + 2 px spacing), with the next row hinting at scrolling.
+    auto *list = new RowList(208);
+    list->setObjectName("devicesList");
+    list->setMinimumHeight(208);
     sheet->body()->addWidget(list);
     sheet->body()->addWidget(mutedText(QStringLiteral("Отзыв устройства прекращает доставку новых сообщений на него. "
                                                       "Уже скачанные на нём копии удалённо не стираются.")));
@@ -723,7 +726,7 @@ void devices(const DialogHost &h)
                     });
                     list->add(row);
                 }
-                list->fit();
+                list->setFixedHeight(208);
             });
         }
     };
@@ -929,6 +932,45 @@ void privacySettings(const DialogHost &h)
     sheet->open();
 }
 
+void accounts(const DialogHost &h)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Сменить аккаунт"));
+    sheet->setBack([h] { dialogs::settings(h); });
+    auto *list = new RowList(360);
+    sheet->body()->addWidget(list);
+    sheet->body()->addWidget(mutedText(QStringLiteral("Остальные аккаунты остаются подключёнными. Их переписка и ключи хранятся отдельно.")));
+    auto run = [=](const QString &method, const QJsonObject &params) {
+        sheet->body()->parentWidget()->setEnabled(false);
+        Core::instance()->call(method, params, sheet, [=](const QJsonValue &, const CoreError &e) {
+            sheet->body()->parentWidget()->setEnabled(true);
+            if (!e.ok()) fail(h, e);
+            else sheet->close();
+        });
+    };
+    auto *add = new ui::Button(QStringLiteral("Добавить аккаунт"), ui::Button::Secondary);
+    sheet->body()->addWidget(add);
+    QObject::connect(add, &QAbstractButton::clicked, sheet, [=] { run("add_account", {}); });
+    Core::instance()->call("list_accounts", {}, sheet, [=](const QJsonValue &v, const CoreError &e) {
+        if (!e.ok()) return fail(h, e);
+        for (const auto &value : v.toArray()) {
+            const auto a = value.toObject();
+            QString sub = a.value("username").toString();
+            if (!sub.isEmpty()) sub.prepend('@');
+            if (a.value("current").toBool()) sub += QStringLiteral(" · текущий");
+            if (!a.value("logged_in").toBool()) sub += QStringLiteral(" · требуется вход");
+            const QString id = a.value("account_id").toString();
+            auto *row = new PersonRow(a.value("display_name").toString(QStringLiteral("Новый аккаунт")), sub, id);
+            row->avatar = a.value("avatar_path").toString();
+            list->add(row);
+            QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
+                run("switch_account", {{"account_id", id}});
+            });
+        }
+        list->fit();
+    });
+    sheet->open();
+}
+
 void settings(const DialogHost &h)
 {
     auto *sheet = new Sheet(h.host, QStringLiteral("Настройки"), 480);
@@ -952,6 +994,13 @@ void settings(const DialogHost &h)
     groups->addWidget(privacy);
     groups->addWidget(calls);
     sheet->body()->addLayout(groups);
+    sheet->body()->addWidget(new ui::Label(QStringLiteral("Аккаунт"), 14, QFont::DemiBold));
+    auto *switchBtn = new ui::Button(QStringLiteral("Сменить аккаунт"), ui::Button::Secondary);
+    QObject::connect(switchBtn, &QAbstractButton::clicked, sheet, [=] {
+        sheet->close();
+        accounts(h);
+    });
+    sheet->body()->addWidget(switchBtn);
     auto *devicesBtn = new ui::Button(QStringLiteral("Устройства"), ui::Button::Secondary);
     QObject::connect(devicesBtn, &QAbstractButton::clicked, sheet, [=] {
         sheet->close();
