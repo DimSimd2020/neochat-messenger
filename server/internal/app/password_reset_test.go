@@ -2,11 +2,46 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestLoginByNicknameAndVerifiedEmail(t *testing.T) {
+	s, ts, _ := emailTestServer(t)
+	a := register(t, s, ts, "login_compat")
+	var email string
+	if err := s.db.QueryRow(context.Background(), `SELECT email FROM users WHERE id=$1`, a.userID).Scan(&email); err != nil {
+		t.Fatal(err)
+	}
+	c := &client{t: t, base: ts.URL}
+	for _, login := range []string{"Login_Compat", strings.ToUpper(email)} {
+		for _, request := range []map[string]string{{"username": login}, {"username": login, "login": login}} {
+			var salt map[string]any
+			if st, _ := c.do("POST", "/v1/accounts/password-salt", request, &salt); st != 200 || salt["username"] != "login_compat" || salt["salt"] != "login_compat" {
+				t.Fatalf("password salt compatibility: status=%d", st)
+			}
+		}
+		stamp := strconv.FormatInt(time.Now().Unix(), 10)
+		sig := ed25519.Sign(a.authPriv, LoginChallenge("login_compat", a.deviceID, stamp))
+		for _, password := range []string{"correct horse battery", "wrong password!"} {
+			want := 200
+			if password == "wrong password!" {
+				want = 401
+			}
+			if st, _ := c.do("POST", "/v1/sessions", loginReq{Username: login, Password: password, DeviceID: a.deviceID, Timestamp: stamp, Signature: sig}, nil); st != want {
+				t.Fatalf("existing-device login: got=%d want=%d", st, want)
+			}
+			if st, _ := c.do("POST", "/v1/devices/new/start", map[string]string{"username": login, "password": password}, nil); st != want {
+				t.Fatalf("new-device login: got=%d want=%d", st, want)
+			}
+		}
+	}
+}
 
 func TestPasswordResetAuthOnly(t *testing.T) {
 	s, ts, mailbox := emailTestServer(t)

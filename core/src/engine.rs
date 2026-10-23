@@ -489,7 +489,7 @@ impl Inner {
 
     /// Resolves nickname or verified email to KDF salt and canonical username.
     fn password_salt(server: &str, login: &str) -> Result<(String, String)> {
-        match Api::new(server).call("POST", "/v1/accounts/password-salt", None, Some(&json!({"login": login, "username": login}))) {
+        match Api::new(server).call("POST", "/v1/accounts/password-salt", None, Some(&json!({"username": login}))) {
             Ok(v) => Ok((s(&v, "salt")?.to_string(), v["username"].as_str().unwrap_or(login).to_string())),
             Err(Error::Api { status: 404, .. }) => Ok((login.to_string(), login.to_string())),
             Err(e) => Err(e),
