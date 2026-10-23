@@ -13,6 +13,7 @@
 #include "popupmenu.h"
 #include "sheet.h"
 #include "profilestyle.h"
+#include "videoinfo.h"
 #include "theme.h"
 #include "transition.h"
 #include "widgets.h"
@@ -530,7 +531,7 @@ private:
         QString t = m.value("text").toString().simplified();
         if (kind == "file") {
             const QJsonObject f = m.value("file").toObject();
-            t = (f.value("image").toBool() ? QStringLiteral("Фото") : QStringLiteral("Файл ") + f.value("name").toString()) + (t.isEmpty() ? QString() : ": " + t);
+            t = (f.value("image").toBool() ? QStringLiteral("Фото") : f.value("video").toBool() ? QStringLiteral("Видео") : QStringLiteral("Файл ") + f.value("name").toString()) + (t.isEmpty() ? QString() : ": " + t);
         } else if (kind == "poll") {
             t = QStringLiteral("Опрос: ") + t;
         }
@@ -780,6 +781,10 @@ MainWindow::MainWindow()
         auto *menu = new PopupMenu(this);
         menu->addAction(QStringLiteral("Фото"), this, [this] {
             filepicker::open(this, QStringLiteral("Выберите фото"), {"jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"}, true,
+                             [this](const QStringList &files) { attachDialog(files, true); });
+        });
+        menu->addAction(QStringLiteral("Видео"), this, [this] {
+            filepicker::open(this, QStringLiteral("Выберите видео"), {"mp4", "mov", "m4v", "webm", "mkv", "avi", "3gp"}, true,
                              [this](const QStringList &files) { attachDialog(files, true); });
         });
         menu->addAction(QStringLiteral("Файл"), this, [this] {
@@ -1417,6 +1422,18 @@ void MainWindow::sendNextFile()
             p["thumb"] = thumb;
             p["width"] = size.width();
             p["height"] = size.height();
+        }
+        if (file.value("photo").toBool() && type.startsWith("video/")) {
+            // The first frame and the length come from the system; a video it cannot read goes as a plain file.
+            const videoinfo::Info clip = videoinfo::read(path);
+            if (!clip.thumb.isEmpty())
+                p["thumb"] = clip.thumb;
+            if (!clip.size.isEmpty()) {
+                p["width"] = clip.size.width();
+                p["height"] = clip.size.height();
+            }
+            if (clip.durationMs > 0)
+                p["duration"] = clip.durationMs;
         }
         if (guard) QMetaObject::invokeMethod(guard, [guard, p] {
             if (!guard) return;

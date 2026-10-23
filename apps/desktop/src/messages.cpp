@@ -137,6 +137,20 @@ bool isImage(const QJsonObject &m)
     return m.value("kind").toString() == "file" && m.value("file").toObject().value("image").toBool();
 }
 
+bool isVideo(const QJsonObject &m)
+{
+    return m.value("kind").toString() == "file" && m.value("file").toObject().value("video").toBool();
+}
+
+// 0:07, 12:30, 1:02:03.
+QString clockText(qint64 ms)
+{
+    const qint64 total = qMax<qint64>(0, ms / 1000);
+    const qint64 h = total / 3600, m = total % 3600 / 60, s = total % 60;
+    return h > 0 ? QStringLiteral("%1:%2:%3").arg(h).arg(m, 2, 10, QLatin1Char('0')).arg(s, 2, 10, QLatin1Char('0'))
+                 : QStringLiteral("%1:%2").arg(m).arg(s, 2, 10, QLatin1Char('0'));
+}
+
 QString votesText(int n)
 {
     const int m10 = n % 10, m100 = n % 100;
@@ -385,6 +399,8 @@ QVariant MessageModel::data(const QModelIndex &index, int role) const
         QString s = m.value("sender_name").toString() + ", " + QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm") + ": ";
         if (isImage(m))
             s += QStringLiteral("фото. ");
+        else if (isVideo(m))
+            s += QStringLiteral("видео. ");
         else if (m.value("kind").toString() == "file")
             s += QStringLiteral("файл ") + m.value("file").toObject().value("name").toString() + ". ";
         else if (m.value("kind").toString() == "poll")
@@ -542,7 +558,7 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     }
     const QString kind = m.value("kind").toString();
     const QString text = messageText(m);
-    if (isImage(m)) {
+    if (isImage(m) || isVideo(m)) {
         const QJsonObject f = m.value("file").toObject();
         qreal iw = f.value("width").toDouble(), ih = f.value("height").toDouble();
         if (iw <= 0 || ih <= 0)
@@ -814,7 +830,8 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     }
 
     if (!L.image.isNull()) {
-        QPixmap px = ImageCache::instance()->full(m);
+        // A video shows only its first frame; the file itself is fetched when it is played.
+        QPixmap px = isVideo(m) ? QPixmap() : ImageCache::instance()->full(m);
         if (px.isNull())
             px = ImageCache::instance()->thumb(m);
         p->save();
@@ -828,6 +845,25 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
             const qreal k = qMax(L.image.width() / px.width(), L.image.height() / px.height());
             const QSizeF src = L.image.size() / k;
             p->drawPixmap(L.image, px, QRectF(QPointF((px.width() - src.width()) / 2, (px.height() - src.height()) / 2), src));
+        }
+        if (isVideo(m)) {
+            const QPointF mid = L.image.center();
+            p->setRenderHint(QPainter::Antialiasing);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(0, 0, 0, 150));
+            p->drawEllipse(mid, 26, 26);
+            p->setBrush(Qt::white);
+            p->drawPolygon(QPolygonF({QPointF(mid.x() - 8, mid.y() - 12), QPointF(mid.x() + 13, mid.y()), QPointF(mid.x() - 8, mid.y() + 12)}));
+            const qint64 ms = qint64(m.value("file").toObject().value("duration").toDouble());
+            if (ms > 0) {
+                p->setFont(Theme::instance()->font(12, QFont::DemiBold));
+                const QString length = clockText(ms);
+                const QRectF pill(L.image.left() + 10, L.image.top() + 10, QFontMetricsF(p->font()).horizontalAdvance(length) + 16, 22);
+                p->setBrush(QColor(0, 0, 0, 150));
+                p->drawRoundedRect(pill, 11, 11);
+                p->setPen(Qt::white);
+                p->drawText(pill, Qt::AlignCenter, length);
+            }
         }
         p->restore();
     }
@@ -1533,7 +1569,7 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
         else if (L.retry.contains(e->pos()))
             retry(m);
         else if (L.image.contains(e->pos()))
-            openImage(m);
+            isVideo(m) ? openFile(m) : openImage(m);
         else if (link.startsWith(QStringLiteral("mention:")))
             openMention(link.mid(8));
         else if (!link.isEmpty())
@@ -1772,6 +1808,8 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
         menu->addAction(QStringLiteral("Копировать текст"), this, [m] { QApplication::clipboard()->setText(messageText(m)); });
     if (isImage(m))
         menu->addAction(QStringLiteral("Открыть фото"), this, [this, m] { openImage(m); });
+    if (isVideo(m))
+        menu->addAction(QStringLiteral("Открыть видео"), this, [this, m] { openFile(m); });
     if (kind == "poll" && m.value("outgoing").toBool() && !m.value("poll").toObject().value("closed").toBool())
         menu->addAction(QStringLiteral("Завершить опрос"), this, [this, m] {
             Core::instance()->call("close_poll", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
@@ -1832,7 +1870,7 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
 
 void MessageView::openFile(const QJsonObject &m)
 {
-    emit toast(QStringLiteral("Расшифровываем файл…"));
+    emit toast(isVideo(m) ? QStringLiteral("Расшифровываем видео…") : QStringLiteral("Расшифровываем файл…"));
     Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
             return emit toast(e.message);

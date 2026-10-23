@@ -40,6 +40,7 @@ add_library(neochat_ui STATIC
     src/appearance.cpp
     src/profiles.cpp src/profiles.h
     src/profilestyle.cpp src/profilestyle.h
+    src/videoinfo.cpp src/videoinfo.h
     src/mainwindow.cpp src/mainwindow.h
     src/calls.cpp src/calls.h
     src/style.cpp src/style.h
@@ -82,7 +83,7 @@ target_link_libraries(neocall_selftest PRIVATE neocall)
 target_include_directories(neochat_ui PUBLIC neocall)
 # neocall.dll is loaded on the first call or device query (delay-load), so the
 # 12 MB libwebrtc never slows the start of the messenger.
-target_link_libraries(neochat_ui PUBLIC neocall winmm delayimp)
+target_link_libraries(neochat_ui PUBLIC neocall winmm delayimp shell32 ole32 propsys uuid gdi32)
 target_link_options(neochat_ui INTERFACE /DELAYLOAD:neocall.dll)
 
 add_executable(neochat WIN32 src/main.cpp packaging/neochat.rc)

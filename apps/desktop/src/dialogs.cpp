@@ -1762,18 +1762,26 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
     sheet->body()->addLayout(buttons);
 
     auto isImage = [](const QString &path) { return QMimeDatabase().mimeTypeForFile(path).name().startsWith("image/"); };
-    // Pictures can go as photos or as files; with anything else in the set there is no choice to offer.
+    auto isVideo = [](const QString &path) { return QMimeDatabase().mimeTypeForFile(path).name().startsWith("video/"); };
+    auto isMedia = [=](const QString &path) { return isImage(path) || isVideo(path); };
+    // Pictures and videos can go as such or as files; with anything else in the set there is no choice to offer.
     auto refresh = [=] {
+        const bool media = std::all_of(paths->begin(), paths->end(), isMedia);
+        asFile->setVisible(media);
+        const bool photos = media ? !asFile->isChecked() : asPhotos;
         const bool images = std::all_of(paths->begin(), paths->end(), isImage);
-        asFile->setVisible(images);
-        const bool photos = images ? !asFile->isChecked() : asPhotos;
         preview->setPaths(*paths, photos && images);
-        if (images && photos)
+        if (media && photos && std::all_of(paths->begin(), paths->end(), isVideo))
+            sheet->setTitle(paths->size() == 1 ? QStringLiteral("Отправить видео") : QStringLiteral("Отправить видео: %1").arg(paths->size()));
+        else if (media && photos && !images)
+            sheet->setTitle(QStringLiteral("Отправить медиа: %1").arg(paths->size()));
+        else if (images && photos)
             sheet->setTitle(paths->size() == 1 ? QStringLiteral("Отправить фото") : QStringLiteral("Отправить фото: %1").arg(paths->size()));
         else
             sheet->setTitle(paths->size() == 1 ? QStringLiteral("Отправить файл") : QStringLiteral("Отправить файлы: %1").arg(paths->size()));
     };
-    asFile->setChecked(!asPhotos);
+    // Videos picked as documents still go as videos unless "as a file" is switched on.
+    asFile->setChecked(!(asPhotos || std::all_of(paths->begin(), paths->end(), isVideo)));
     QObject::connect(asFile, &QAbstractButton::toggled, sheet, refresh);
     QObject::connect(add, &QAbstractButton::clicked, sheet, [=] {
         filepicker::open(sheet, QStringLiteral("Добавить файлы"), {}, true, [=](const QStringList &more) {
@@ -1791,8 +1799,8 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
     });
     auto submit = [=] {
         *sent = true;
-        const bool images = std::all_of(paths->begin(), paths->end(), isImage);
-        const bool photos = images ? !asFile->isChecked() : asPhotos;
+        const bool media = std::all_of(paths->begin(), paths->end(), isMedia);
+        const bool photos = media ? !asFile->isChecked() : asPhotos;
         const QStringList chosen = *paths;
         const QString text = caption->text().trimmed();
         sheet->close();
