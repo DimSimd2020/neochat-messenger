@@ -218,15 +218,15 @@ final class ThemeEditorViewController: SheetViewController {
             chips.addArrangedSubview(chip("\(i + 1)", "Точка \(i + 1)", spot.color, index: i))
         }
         addButton.isEnabled = canvas.spots.count < Appearance.maxSpots
-        removeButton.isEnabled = canvas.selected >= 0
-        let chosen = canvas.selected >= 0 && canvas.selected < canvas.spots.count
-        well.selectedColor = Theme.rgb(chosen ? canvas.spots[canvas.selected].color : canvas.base)
-        wellTitle.text = chosen ? "Цвет точки \(canvas.selected + 1)" : "Цвет фона"
+        removeButton.isEnabled = canvas.picked >= 0
+        let chosen = canvas.picked >= 0 && canvas.picked < canvas.spots.count
+        well.selectedColor = Theme.rgb(chosen ? canvas.spots[canvas.picked].color : canvas.base)
+        wellTitle.text = chosen ? "Цвет точки \(canvas.picked + 1)" : "Цвет фона"
     }
 
     private func chip(_ title: String, _ accessibility: String, _ color: UInt32, index: Int) -> SwatchChipView {
         let chip = SwatchChipView(title: title, accessibility: accessibility, color: Theme.rgb(color))
-        chip.isSelected = canvas.selected == index
+        chip.isSelected = canvas.picked == index
         chip.addAction(UIAction { [weak self] _ in self?.canvas.select(index) }, for: .touchUpInside)
         return chip
     }
@@ -236,7 +236,7 @@ final class ThemeEditorViewController: SheetViewController {
         let hex = hexOf(color)
         canvas.setColor(hex)
         // Keep the chip in step without rebuilding the row under the user's hand.
-        let index = canvas.selected + 1
+        let index = canvas.picked + 1
         if index < chips.arrangedSubviews.count, let chip = chips.arrangedSubviews[index] as? SwatchChipView {
             chip.setColor(Theme.rgb(hex))
         }
@@ -432,7 +432,7 @@ final class SwatchChipView: UIControl {
 final class BackdropCanvasView: UIControl {
     private(set) var base: UInt32 = 0x101A2E
     private(set) var spots: [BackdropSpot] = []
-    private(set) var selected = -1
+    private(set) var picked = -1
     var onSelect: ((Int) -> Void)?
     private let preview = BackdropView()
     private var handles: [UILabel] = []
@@ -461,22 +461,22 @@ final class BackdropCanvasView: UIControl {
     func load(base: UInt32, spots: [BackdropSpot]) {
         self.base = base
         self.spots = spots
-        selected = -1
+        picked = -1
         render(rebuild: true)
     }
 
     func select(_ index: Int) {
-        selected = index
+        picked = index
         placeHandles()
         onSelect?(index)
     }
 
-    /// Recolors the base (nothing selected) or the selected point.
+    /// Recolors the base (nothing picked) or the picked point.
     func setColor(_ color: UInt32) {
-        if selected < 0 {
+        if picked < 0 {
             base = color
-        } else if selected < spots.count {
-            spots[selected].color = color
+        } else if picked < spots.count {
+            spots[picked].color = color
         }
         render(rebuild: false)
     }
@@ -484,17 +484,17 @@ final class BackdropCanvasView: UIControl {
     func addSpot(x: CGFloat, y: CGFloat) {
         guard spots.count < Appearance.maxSpots else { return }
         spots.append(BackdropSpot(x: x, y: y, color: freshColor()))
-        selected = spots.count - 1
+        picked = spots.count - 1
         render(rebuild: true)
-        onSelect?(selected)
+        onSelect?(picked)
     }
 
     func removeSelected() {
-        guard selected >= 0, selected < spots.count else { return }
-        spots.remove(at: selected)
-        selected = spots.isEmpty ? -1 : min(selected, spots.count - 1)
+        guard picked >= 0, picked < spots.count else { return }
+        spots.remove(at: picked)
+        picked = spots.isEmpty ? -1 : min(picked, spots.count - 1)
         render(rebuild: true)
-        onSelect?(selected)
+        onSelect?(picked)
     }
 
     /// A color no point uses yet.
@@ -533,7 +533,7 @@ final class BackdropCanvasView: UIControl {
     private func placeHandles() {
         for (i, spot) in spots.enumerated() where i < handles.count {
             let h = handles[i]
-            let on = i == selected
+            let on = i == picked
             let size: CGFloat = on ? 32 : 26
             h.bounds = CGRect(x: 0, y: 0, width: size, height: size)
             h.center = position(of: spot)
@@ -571,7 +571,7 @@ final class BackdropCanvasView: UIControl {
             // A new point follows the finger at once.
             let f = fraction(of: p)
             addSpot(x: f.x, y: f.y)
-            drag = selected
+            drag = picked
         }
         return true
     }
