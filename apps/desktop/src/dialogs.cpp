@@ -1433,6 +1433,9 @@ static void groupInfo(const DialogHost &h, const QString &cid)
                     sub += QStringLiteral(" · админ");
                 if (!m.value("tag").toString().isEmpty())
                     sub += QStringLiteral(" · ") + m.value("tag").toString();
+                const bool muted = m.value("muted_until").toDouble() != 0;
+                if (muted)
+                    sub += QStringLiteral(" · не может писать");
                 auto *row = new PersonRow(m.value("display_name").toString(), sub, uid);
                 row->avatar = m.value("avatar_path").toString();
                 if (m.value("key_changed").toBool())
@@ -1475,6 +1478,24 @@ static void groupInfo(const DialogHost &h, const QString &cid)
                             menu->addAction(QStringLiteral("Назначить админом"), sheet, [=] {
                                 setMembers({{"member_ids", others({}, {})}, {"admin_ids", adminIds({}, uid)}}, QStringLiteral("Назначен админ"));
                             });
+                    }
+                    if (!me && !channel && uid != ownerId && (owner || !admins.contains(uid))) {
+                        auto mute = [=](int minutes, const QString &done) {
+                            Core::instance()->call("group_mute", {{"conversation_id", cid}, {"user_id", uid}, {"minutes", minutes}}, sheet,
+                                                   [=](const QJsonValue &, const CoreError &me2) {
+                                                       if (!me2.ok())
+                                                           return fail(h, me2);
+                                                       h.toast(done);
+                                                       (*build)();
+                                                   });
+                        };
+                        if (muted) {
+                            menu->addAction(QStringLiteral("Снять ограничение"), sheet, [=] { mute(0, QStringLiteral("Ограничение снято")); });
+                        } else {
+                            menu->addAction(QStringLiteral("Заглушить на час"), sheet, [=] { mute(60, QStringLiteral("Участник заглушён на час")); });
+                            menu->addAction(QStringLiteral("Заглушить на сутки"), sheet, [=] { mute(1440, QStringLiteral("Участник заглушён на сутки")); });
+                            menu->addAction(QStringLiteral("Заглушить навсегда"), sheet, [=] { mute(-1, QStringLiteral("Участник заглушён")); });
+                        }
                     }
                     if (!me && uid != ownerId && (owner || !admins.contains(uid)))
                         menu->addAction(channel ? QStringLiteral("Удалить из канала") : QStringLiteral("Исключить из группы"), sheet, [=] {

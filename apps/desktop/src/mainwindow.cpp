@@ -1087,7 +1087,7 @@ void MainWindow::applyConversation(const QJsonObject &c)
     const QString seed = c.value("kind").toString() == "direct" && !c.value("peer_user_id").toString().isEmpty() ? c.value("peer_user_id").toString() : c.value("id").toString();
     m_header->title->set(c.value("title").toString(), count, names, seed, accent, c.value("avatar_path").toString());
     const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
-    m_composer->setVisible(!gone && c.value("can_post").toBool(true));
+    m_composer->setVisible(!gone && c.value("can_post").toBool(true) && c.value("muted").toDouble() == 0);
     // Calls are one-to-one, through a direct chat the peer can receive in.
     const bool callable = c.value("kind").toString() == "direct" && !gone && c.value("can_post").toBool(true) && !c.value("peer_user_id").toString().isEmpty();
     m_header->audioCall->setVisible(callable);

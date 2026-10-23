@@ -379,6 +379,8 @@ QVariant MessageModel::data(const QModelIndex &index, int role) const
         if (it.isDate)
             return dateTitle(it.date);
         const QJsonObject &m = it.msg;
+        if (m.value("kind").toString() == "service")
+            return messageText(m);
         QString s = m.value("sender_name").toString() + ", " + QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm") + ": ";
         if (isImage(m))
             s += QStringLiteral("фото. ");
@@ -481,7 +483,7 @@ void MessageModel::rebuild()
         it.msg = m;
         it.appearAt = m_appear.value(m.value("id").toString(), -1);
         it.reactAt = m_react.value(m.value("id").toString(), -1);
-        if (!flat && !m_items.isEmpty() && !m_items.last().isDate) {
+        if (!flat && !m_items.isEmpty() && !m_items.last().isDate && m_items.last().msg.value("kind") != "service" && m.value("kind") != "service") {
             const QJsonObject &prev = m_items.last().msg;
             const bool same = prev.value("sender_user_id") == m.value("sender_user_id") && prev.value("outgoing") == m.value("outgoing") &&
                               qAbs(m.value("sent_at").toDouble() - prev.value("sent_at").toDouble()) < 5 * 60 * 1000;
@@ -505,6 +507,11 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         return L;
     }
     const QJsonObject &m = it.msg;
+    if (m.value("kind").toString() == "service") {
+        // One centered line about members; long ones wrap on the paint side by eliding.
+        L.height = 38;
+        return L;
+    }
     const bool out = m.value("outgoing").toBool();
     const bool showAvatar = group && !out;
     const qreal pad = width < 560 ? 12 : 24;
@@ -677,6 +684,20 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     }
 
     const QJsonObject &m = it->msg;
+    if (m.value("kind").toString() == "service") {
+        p->setFont(Theme::instance()->font(12.5));
+        const qreal maxW = qMin(width - 48, 640.0);
+        const QString t = QFontMetricsF(p->font()).elidedText(messageText(m), Qt::ElideRight, maxW - 28);
+        const qreal tw = QFontMetricsF(p->font()).horizontalAdvance(t) + 28;
+        const QRectF pill((width - tw) / 2, 7, tw, 24);
+        p->setPen(Qt::NoPen);
+        p->setBrush(c.selected);
+        p->drawRoundedRect(pill, 12, 12);
+        p->setPen(c.muted);
+        p->drawText(pill, Qt::AlignCenter, t);
+        p->restore();
+        return;
+    }
     const MessageLayout L = layout(*it, width, model->group && !model->flat);
     const bool out = m.value("outgoing").toBool();
     const auto *view = qobject_cast<const MessageView *>(parent());
@@ -1325,7 +1346,7 @@ QJsonObject MessageView::messageAt(const QPoint &pos, MessageLayout *lay) const
     if (!idx.isValid())
         return {};
     const MessageItem &it = m_model->item(idx.row());
-    if (it.isDate)
+    if (it.isDate || it.msg.value("kind") == "service")
         return {};
     const QRect vr = visualRect(idx);
     MessageLayout L = MessageDelegate::layout(it, vr.width(), m_model->group && !m_model->flat);
@@ -1602,7 +1623,7 @@ void MessageView::keyPressEvent(QKeyEvent *e)
         }
     }
     const QModelIndex idx = currentIndex();
-    if (idx.isValid() && !m_model->item(idx.row()).isDate) {
+    if (idx.isValid() && !m_model->item(idx.row()).isDate && m_model->item(idx.row()).msg.value("kind") != "service") {
         const QJsonObject m = m_model->item(idx.row()).msg;
         if (e->matches(QKeySequence::Copy)) {
             const QString sel = selectedText();

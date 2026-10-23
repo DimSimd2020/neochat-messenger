@@ -454,7 +454,7 @@ pub fn presence_text(status: &str, last_seen: i64, now: i64, tz_min: i64) -> Str
 }
 
 /// Days since 1970-01-01 to (year, month, day), proleptic Gregorian.
-fn civil(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

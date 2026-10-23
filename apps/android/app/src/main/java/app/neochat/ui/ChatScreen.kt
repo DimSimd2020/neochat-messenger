@@ -514,7 +514,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (system) baseSubtitle = "Системные сообщения"
             updateSubtitle()
             val left = conv.optBoolean("left") || conv.optBoolean("archived") || system
-            val muteComposer = left || !conv.optBoolean("can_post", true)
+            val muted = conv.optLong("muted") != 0L
+            val muteComposer = left || muted || !conv.optBoolean("can_post", true)
             // Calls are one-to-one, through a direct chat the peer can receive in.
             val callable = conv.str("kind") == "direct" && !left && conv.optBoolean("can_post", true) && conv.str("peer_user_id").isNotEmpty()
             if (callable) app.neochat.calls.CallManager.warmUp()
@@ -526,6 +527,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 system -> "Сюда приходят коды входа и сообщения о новых устройствах"
                 conv.optBoolean("archived") -> if (channel) "Канал в архиве. Новые публикации недоступны" else "Группа в архиве. Новые сообщения недоступны"
                 conv.optBoolean("left") -> if (channel) "Вы вышли из канала" else "Вы вышли из этой группы"
+                muted -> "Вам запретили писать в этой группе"
                 channel -> "Публикуют только владелец и админы канала"
                 else -> "Писать здесь могут только владелец и админы"
             }
@@ -687,8 +689,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             }
             val prev = ms.getOrNull(i - 1)
             val next = ms.getOrNull(i + 1)
-            val sameAsPrev = prev != null && prev.str("sender_user_id") == m.str("sender_user_id") && dayKey(prev.optLong("sent_at")) == day
-            val sameAsNext = next != null && next.str("sender_user_id") == m.str("sender_user_id") && dayKey(next.optLong("sent_at")) == day
+            // A service line (who added whom) is not part of anyone's run of messages.
+            val plain = m.str("kind") != "service"
+            val sameAsPrev = plain && prev != null && prev.str("kind") != "service" && prev.str("sender_user_id") == m.str("sender_user_id") && dayKey(prev.optLong("sent_at")) == day
+            val sameAsNext = plain && next != null && next.str("kind") != "service" && next.str("sender_user_id") == m.str("sender_user_id") && dayKey(next.optLong("sent_at")) == day
             out += Item(m, firstInRun = !sameAsPrev, lastInRun = !sameAsNext)
         }
         return out
@@ -750,11 +754,15 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
         private fun key(x: Any) = if (x is Item) "m:" + x.m.str("id") else "d:$x"
 
-        override fun getItemViewType(position: Int) = if (items[position] is String) 0 else 1
+        override fun getItemViewType(position: Int): Int {
+            val it = items[position]
+            return if (it is String) 0 else if ((it as Item).m.str("kind") == "service") 2 else 1
+        }
         override fun getItemCount() = items.size
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
             if (viewType == 0) object : RecyclerView.ViewHolder(DateRow(ctx)) {}
+            else if (viewType == 2) object : RecyclerView.ViewHolder(ServiceRow(ctx)) {}
             else {
                 val row = BubbleRow(ctx)
                 val swipe = SwipeToReplyLayout(
@@ -775,6 +783,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         override fun onBindViewHolder(h: RecyclerView.ViewHolder, position: Int) {
             val it = items[position]
             if (it is String) return (h.itemView as DateRow).set(it)
+            if (h.itemViewType == 2) return (h.itemView as ServiceRow).set((it as Item).m.str("text"))
             val holder = h as MessageHolder
             val item = it as Item
             holder.swipe.reset()
@@ -824,6 +833,26 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
         fun set(t: String) {
             text.text = t
+            contentDescription = t
+        }
+    }
+
+    /** "ner1s был добавлен владельцем DimSimd": a centered line, not a bubble. */
+    private inner class ServiceRow(ctx: Context) : LinearLayout(ctx) {
+        private val text = ctx.label("", 12.5f, 500, Theme.Role.MUTED)
+
+        init {
+            gravity = Gravity.CENTER
+            layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
+            setPadding(dp(24), dp(6), dp(24), dp(6))
+            text.gravity = Gravity.CENTER
+            text.setPadding(dp(14), dp(5), dp(14), dp(5))
+            addView(text, LayoutParams(WRAP, WRAP))
+        }
+
+        fun set(t: String) {
+            text.text = t
+            text.background = GradientDrawable().apply { setColor(Theme.p.glass); cornerRadius = ctx.dpf(14) }
             contentDescription = t
         }
     }

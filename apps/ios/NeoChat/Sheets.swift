@@ -784,6 +784,8 @@ final class ConversationInfoViewController: SheetViewController, PHPickerViewCon
                 var sub = me ? "это вы" : "@" + m.str("username")
                 if uid == ownerId { sub += " · владелец" } else if admins.contains(uid) { sub += " · админ" }
                 if !m.str("tag").isEmpty { sub += " · " + m.str("tag") }
+                let muted = m.int64("muted_until") != 0
+                if muted { sub += " · не может писать" }
                 if warn { sub = "Ключ изменился — сверьте код в личном чате" }
                 let name = m.str("display_name")
                 self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, avatar: m.str("avatar_path"), subColor: warn ? Theme.warning : Theme.muted, action: admin && !gone ? {
@@ -798,6 +800,18 @@ final class ConversationInfoViewController: SheetViewController, PHPickerViewCon
                             a.addAction(UIAlertAction(title: "Назначить админом", style: .default) { _ in
                                 self.call("group_set_members", ["conversation_id": self.cid, "member_ids": others("", ""), "admin_ids": admins.sorted() + [uid]], ok: "Назначен админ")
                             })
+                        }
+                    }
+                    if !me && !channel && uid != ownerId && (owner || !admins.contains(uid)) {
+                        let mute = { (minutes: Int, done: String) in
+                            self.call("group_mute", ["conversation_id": self.cid, "user_id": uid, "minutes": minutes], ok: done)
+                        }
+                        if muted {
+                            a.addAction(UIAlertAction(title: "Снять ограничение", style: .default) { _ in mute(0, "Ограничение снято") })
+                        } else {
+                            a.addAction(UIAlertAction(title: "Заглушить на час", style: .default) { _ in mute(60, "Участник заглушён на час") })
+                            a.addAction(UIAlertAction(title: "Заглушить на сутки", style: .default) { _ in mute(1440, "Участник заглушён на сутки") })
+                            a.addAction(UIAlertAction(title: "Заглушить навсегда", style: .default) { _ in mute(-1, "Участник заглушён") })
                         }
                     }
                     if !me && uid != ownerId && (owner || !admins.contains(uid)) {

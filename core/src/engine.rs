@@ -321,6 +321,7 @@ impl Inner {
             "open_direct" => self.open_direct(p),
             "create_group" => self.create_group(p),
             "group_set_members" => self.group_set_members(p),
+            "group_mute" => self.group_mute(p),
             "group_leave" => self.group_leave(p),
             "group_rename" => self.group_rename(p),
             "group_set_info" => self.group_set_info(p),

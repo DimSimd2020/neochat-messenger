@@ -112,6 +112,7 @@ pub fn may_post(conn: &rusqlite::Connection, conv: &str, sender: &str, kind: &st
         "text" => r.can_post(sender),
         "file" => r.can_media(sender),
         "poll" => r.can_polls(sender),
+        "service" => r.kind == "group" && r.is_admin(sender),
         _ => true,
     }
 }

@@ -148,6 +148,8 @@ impl Db {
             // Time of the last edit of a message (0 = never edited).
             "ALTER TABLE messages ADD COLUMN edited_at INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN mentioned INTEGER NOT NULL DEFAULT 0",
+            // Muted members of a group, as {user_id: until} (Unix ms, -1 = without an end), from the server.
+            "ALTER TABLE conversations ADD COLUMN muted TEXT NOT NULL DEFAULT '{}'",
         ] {
             let _ = conn.execute(sql, []);
         }

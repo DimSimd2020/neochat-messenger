@@ -122,6 +122,9 @@ impl Inner {
         if c["kind"] == "system" {
             return Err(Error::Invalid("В этот чат нельзя писать".into()));
         }
+        if c["muted"].as_i64().unwrap_or(0) != 0 {
+            return Err(Error::Invalid("Вам запретили писать в этой группе".into()));
+        }
         if c["can_post"] == false {
             return Err(Error::Invalid(if c["kind"] == "channel" { "Публикуют в канале только владелец и админы" } else { "Писать в группу могут только админы" }.into()));
         }
@@ -472,7 +475,7 @@ impl Inner {
         conn.execute("DELETE FROM reactions WHERE message_id=?1", [id])?;
         conn.execute("DELETE FROM poll_votes WHERE poll_id=?1", [id])?;
         conn.execute(
-            "UPDATE conversations SET last_preview=COALESCE((SELECT CASE kind WHEN 'file' THEN '📎 Файл' WHEN 'poll' THEN '📊 ' || body WHEN 'call' THEN '📞 Звонок' ELSE body END FROM messages WHERE conversation_id=?1 ORDER BY local_id DESC LIMIT 1),'') WHERE id=?1",
+            "UPDATE conversations SET last_preview=COALESCE((SELECT CASE kind WHEN 'file' THEN '📎 Файл' WHEN 'poll' THEN '📊 ' || body WHEN 'call' THEN '📞 Звонок' WHEN 'service' THEN '' ELSE body END FROM messages WHERE conversation_id=?1 ORDER BY local_id DESC LIMIT 1),'') WHERE id=?1",
             [conv],
         )?;
         Ok(())

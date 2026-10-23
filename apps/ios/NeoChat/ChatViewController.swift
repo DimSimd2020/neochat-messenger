@@ -203,6 +203,8 @@ enum Photos {
 private enum Item {
     case date(String)
     case msg(JSON, first: Bool, last: Bool)
+    /// A service line ("ner1s был добавлен владельцем DimSimd"): text and message id.
+    case note(String, id: String)
 }
 
 /// One conversation: history, composer and header with details.
@@ -302,6 +304,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         table.keyboardDismissMode = .interactive
         table.register(BubbleCell.self, forCellReuseIdentifier: "b")
         table.register(DateCell.self, forCellReuseIdentifier: "d")
+        table.register(NoteCell.self, forCellReuseIdentifier: "n")
         table.accessibilityLabel = "Сообщения"
 
         notice.axis = .horizontal
@@ -497,6 +500,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         switch it {
         case .date(let t): return "d:" + t
         case .msg(let m, _, _): return "m:" + m.str("id")
+        case .note(_, let id): return "n:" + id
         }
     }
 
@@ -504,6 +508,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         guard indexPath.row < items.count else { return 60 }
         if let h = heights[key(items[indexPath.row])] { return h }
         if case .date = items[indexPath.row] { return 44 }
+        if case .note = items[indexPath.row] { return 44 }
         return 60
     }
 
@@ -993,13 +998,15 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.updateSubtitle()
             if first { self.refreshPresence() }
             let gone = c.bool("left") || c.bool("archived") || system
-            let mute = gone || !(c["can_post"] as? Bool ?? true)
+            let muted = c.int64("muted") != 0
+            let mute = gone || muted || !(c["can_post"] as? Bool ?? true)
             if mute { self.input.resignFirstResponder() }
             self.composer.isHidden = mute
             self.goneLabel.isHidden = !mute
             self.goneLabel.text = system ? "Сюда приходят коды входа и сообщения о новых устройствах"
                 : c.bool("archived") ? (channel ? "Канал в архиве. Новые публикации недоступны" : "Группа в архиве. Новые сообщения недоступны")
                 : c.bool("left") ? (channel ? "Вы вышли из канала" : "Вы вышли из этой группы")
+                : muted ? "Вам запретили писать в этой группе"
                 : channel ? "Публикуют только владелец и админы канала" : "Писать здесь могут только владелец и админы"
             self.updateAttachMenu()
             self.updateCallButton(gone: gone || mute)
@@ -1138,8 +1145,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             let d = Date(timeIntervalSince1970: TimeInterval(m.int64("sent_at")) / 1000)
             let day = cal.dateComponents([.year, .month, .day], from: d)
             if day != lastDay { out.append(.date(dateTitle(m.int64("sent_at")))); lastDay = day }
+            if m.str("kind") == "service" { out.append(.note(m.str("text"), id: m.str("id"))); continue }
             let same = { (o: JSON?) -> Bool in
-                guard let o else { return false }
+                guard let o, o.str("kind") != "service" else { return false }
                 return o.str("sender_user_id") == m.str("sender_user_id") && cal.isDate(Date(timeIntervalSince1970: TimeInterval(o.int64("sent_at")) / 1000), inSameDayAs: d)
             }
             out.append(.msg(m, first: !same(i > 0 ? ms[i - 1] : nil), last: !same(i + 1 < ms.count ? ms[i + 1] : nil)))
@@ -1196,6 +1204,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         switch items[indexPath.row] {
         case .date(let t):
             let c = tableView.dequeueReusableCell(withIdentifier: "d", for: indexPath) as! DateCell
+            c.set(t)
+            return c
+        case .note(let t, _):
+            let c = tableView.dequeueReusableCell(withIdentifier: "n", for: indexPath) as! NoteCell
             c.set(t)
             return c
         case .msg(let m, let first, let last):
@@ -1420,6 +1432,41 @@ final class DateCell: UITableViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
     func set(_ t: String) { l.text = t }
+}
+
+final class NoteCell: UITableViewCell {
+    private let l = label("", 12.5, .medium, color: Theme.muted)
+    private let pill = UIView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        backgroundColor = .clear
+        selectionStyle = .none
+        pill.backgroundColor = Theme.muted.withAlphaComponent(0.16)
+        pill.layer.cornerRadius = 14
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        l.textAlignment = .center
+        l.numberOfLines = 0
+        l.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(pill)
+        pill.addSubview(l)
+        NSLayoutConstraint.activate([
+            pill.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6), pill.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+            pill.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            pill.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 24),
+            pill.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -24),
+            l.topAnchor.constraint(equalTo: pill.topAnchor, constant: 5), l.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -5),
+            l.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 14), l.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -14),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func set(_ t: String) {
+        l.text = t
+        accessibilityLabel = t
+        isAccessibilityElement = true
+    }
 }
 
 final class BubbleCell: UITableViewCell {

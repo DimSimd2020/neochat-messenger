@@ -19,6 +19,7 @@ mod keys;
 mod outbox;
 mod profiles;
 mod mentions;
+mod service;
 mod social;
 mod state;
 mod store;

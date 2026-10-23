@@ -132,6 +132,7 @@ impl Inner {
                 "text": match &call {
                     Some(c) => crate::calls::call_text(r.outgoing, c["video"] == true, c["status"].as_str().unwrap_or(""), c["duration"].as_i64().unwrap_or(0)),
                     None if r.kind == "undecryptable" => "Не удалось расшифровать сообщение".to_string(),
+                    None if r.kind == "service" => crate::service::text_in(&db.conn, &me, self.tz_offset.load(std::sync::atomic::Ordering::Relaxed) as i64, &r.body),
                     None => r.body,
                 },
                 "call": call,

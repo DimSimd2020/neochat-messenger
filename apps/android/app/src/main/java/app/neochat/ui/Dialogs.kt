@@ -615,6 +615,7 @@ object Dialogs {
                         var sub = if (m.optBoolean("me")) "это вы" else "@" + m.str("username")
                         if (uid == ownerId) sub += " · владелец" else if (uid in admins) sub += " · админ"
                         if (m.str("tag").isNotEmpty()) sub += " · " + m.str("tag")
+                        if (m.optLong("muted_until") != 0L) sub += " · не может писать"
                         row.subtitle.text = sub
                     }
                     row.contentDescription = "${row.title.text}, ${row.subtitle.text}"
@@ -627,6 +628,21 @@ object Dialogs {
                                 setMembers(JSONObject().put("member_ids", others()).put("admin_ids", JSONArray(admins.filter { it != uid })), "Права админа сняты")
                             } else menu.add("Назначить админом") {
                                 setMembers(JSONObject().put("member_ids", others()).put("admin_ids", JSONArray(admins.toList() + uid)), "Назначен админ")
+                            }
+                        }
+                        if (!me && !channel && uid != ownerId && (owner || uid !in admins)) {
+                            fun mute(minutes: Int, done: String) {
+                                CoreClient.call("group_mute", JSONObject().put("conversation_id", cid).put("user_id", uid).put("minutes", minutes)) { _, e ->
+                                    if (e != null) return@call act.toast(e.message)
+                                    act.toast(done)
+                                    reload()
+                                }
+                            }
+                            if (m.optLong("muted_until") != 0L) menu.add("Снять ограничение") { mute(0, "Ограничение снято") }
+                            else {
+                                menu.add("Заглушить на час") { mute(60, "Участник заглушён на час") }
+                                menu.add("Заглушить на сутки") { mute(1440, "Участник заглушён на сутки") }
+                                menu.add("Заглушить навсегда") { mute(-1, "Участник заглушён") }
                             }
                         }
                         if (!me && uid != ownerId && (owner || uid !in admins)) menu.add(if (channel) "Удалить из канала" else "Исключить из группы", danger = true) {

@@ -313,7 +313,7 @@ fn group_membership_and_files() {
     alice.sync();
     bob.sync();
     carol.sync();
-    assert_eq!(bob.texts(&gid), vec!["всем привет", "без Кэрол"]);
+    assert_eq!(bob.texts(&gid), vec!["всем привет", "Тест был исключён владельцем Тест", "без Кэрол"]);
     assert_eq!(carol.texts(&gid), vec!["всем привет"]);
     assert_eq!(carol.call("get_conversation", json!({"conversation_id": gid}))["left"], true);
     assert!(carol.try_call("send_text", json!({"conversation_id": gid, "text": "x"})).is_err());
@@ -738,6 +738,66 @@ fn groups_admins_tags_polls_and_channels() {
     let posts = bob.messages(&chid);
     assert_eq!(posts.last().unwrap()["text"], "Первый пост");
     assert_eq!(posts.last().unwrap()["sender_name"], "Новости");
+}
+
+#[test]
+fn group_service_lines_and_mute() {
+    let Some(e) = env() else { return };
+    let users: Vec<(Client, String)> = (0..4).map(|i| {
+        let name = uname(&format!("s{i}"));
+        (register(&e, &name).0, name)
+    }).collect();
+    let [(owner, _), (admin, an), (bob, bn), (carol, cn)] = <[_; 4]>::try_from(users).ok().unwrap();
+    let id = |c: &Client, n: &str| c.call("resolve_contact", json!({"username": n}))["user_id"].as_str().unwrap().to_string();
+    let (a, b) = (id(&owner, &an), id(&owner, &bn));
+    let c = id(&admin, &cn);
+    let gid = owner.call("create_group", json!({"title": "Служебные", "member_ids": [a, b], "admin_ids": [a]}))["id"].as_str().unwrap().to_string();
+    let lines = |x: &Client| -> Vec<String> { x.messages(&gid).iter().filter(|m| m["kind"] == "service").filter_map(|m| m["text"].as_str().map(str::to_string)).collect() };
+
+    // An admin adds Carol: everyone, Carol included, sees who did it.
+    admin.sync();
+    admin.call("group_set_members", json!({"conversation_id": gid, "member_ids": [uid(&owner), b, c]}));
+    admin.sync();
+    owner.sync();
+    bob.sync();
+    carol.sync();
+    assert!(lines(&admin).last().unwrap().ends_with("был добавлен вами"), "{:?}", lines(&admin));
+    assert!(lines(&bob).last().unwrap().ends_with("был добавлен администратором Тест"), "{:?}", lines(&bob));
+    assert_eq!(lines(&carol).last().unwrap(), "Вы были добавлены администратором Тест");
+    assert_eq!(bob.call("get_conversation", json!({"conversation_id": gid}))["unread"], 0);
+
+    // The owner removes her; the rest read it.
+    owner.sync();
+    owner.call("group_set_members", json!({"conversation_id": gid, "member_ids": [a, b]}));
+    owner.sync();
+    admin.sync();
+    bob.sync();
+    assert_eq!(lines(&bob).last().unwrap(), "Тест был исключён владельцем Тест");
+    assert!(lines(&owner).last().unwrap().ends_with("был исключён вами"));
+
+    // Muting: ordinary members cannot, the owner can; the muted member cannot write.
+    assert!(bob.try_call("group_mute", json!({"conversation_id": gid, "user_id": a, "minutes": 60})).is_err());
+    owner.call("group_mute", json!({"conversation_id": gid, "user_id": b, "minutes": 60}));
+    owner.sync();
+    bob.sync();
+    admin.sync();
+    let bc = bob.call("get_conversation", json!({"conversation_id": gid}));
+    assert_eq!(bc["can_send"], false);
+    assert_ne!(bc["muted"], 0);
+    assert_eq!(bc["notice"], "Вам запретили писать в этой группе");
+    assert!(bob.try_call("send_text", json!({"conversation_id": gid, "text": "можно?"})).is_err());
+    assert!(lines(&bob).last().unwrap().starts_with("Вы были заглушены владельцем Тест до "), "{:?}", lines(&bob));
+    let seen = admin.call("get_conversation", json!({"conversation_id": gid}));
+    assert!(seen["members"].as_array().unwrap().iter().any(|m| m["user_id"] == b.as_str() && m["muted_until"].as_i64().unwrap() > 0));
+    assert!(admin.try_call("group_mute", json!({"conversation_id": gid, "user_id": uid(&owner), "minutes": 60})).is_err());
+
+    // Released: writing works again and the group is told.
+    owner.call("group_mute", json!({"conversation_id": gid, "user_id": b, "minutes": 0}));
+    owner.sync();
+    bob.sync();
+    assert_eq!(bob.call("get_conversation", json!({"conversation_id": gid}))["can_send"], true);
+    bob.call("send_text", json!({"conversation_id": gid, "text": "снова пишу"}));
+    assert_eq!(lines(&bob).last().unwrap(), "Владелец Тест снял ограничение с вас");
 }
 
 #[test]
