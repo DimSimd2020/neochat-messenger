@@ -6,6 +6,7 @@
 
 #include "core.h"
 #include "emoji.h"
+#include "profilestyle.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -723,7 +724,8 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
 
     if (!L.name.isNull()) {
         p->setFont(Theme::instance()->font(12.5, QFont::DemiBold));
-        p->setPen(c.accent);
+        const QColor chosen = profilestyle::nameOn(m.value("sender_color").toString(), c.canvas);
+        p->setPen(chosen.isValid() ? chosen : c.accent);
         const QString name = m.value("sender_name").toString();
         p->drawText(L.name, Qt::AlignLeft | Qt::AlignVCenter, name);
         const QString tag = m.value("sender_tag").toString();
@@ -773,7 +775,9 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         p->setBrush(out ? c.onOutgoing : c.accent);
         p->drawRoundedRect(QRectF(L.reply.left(), L.reply.top(), 3, L.reply.height()), 1.5, 1.5);
         p->setFont(Theme::instance()->font(12.5, QFont::DemiBold));
-        p->setPen(out ? c.onOutgoing : c.accent);
+        // The quoted person's own colour, read against the block it sits in.
+        const QColor quoted = profilestyle::nameOn(rep.value("sender_color").toString(), out ? c.outgoing : c.surface);
+        p->setPen(quoted.isValid() ? quoted : (out ? c.onOutgoing : c.accent));
         p->drawText(L.reply.adjusted(10, 3, -8, -20), Qt::AlignLeft | Qt::AlignVCenter, rep.value("sender_name").toString());
         p->setFont(Theme::instance()->font(13));
         p->setPen(meta);

@@ -59,6 +59,8 @@ impl Inner {
         // Per conversation: (channel title when it is a channel, member tags).
         let mut convs: std::collections::HashMap<String, (Option<String>, Value)> = Default::default();
         let mut polls: Vec<(usize, String, Value)> = Vec::new();
+        // The colour each person chose for their name, looked up once per page.
+        let mut colors: std::collections::HashMap<String, String> = Default::default();
         let mut reactions: Vec<Value> = Vec::with_capacity(rows.len());
         for r in &rows {
             reactions.push(self.reactions_json(&db.conn, &r.id, &me)?);
@@ -69,15 +71,19 @@ impl Inner {
                 Some(rid) => db
                     .conn
                     .query_row(
-                        "SELECT m.body, m.outgoing, COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END,''), COALESCE(c.last_name,''), COALESCE(c.username,''), m.kind FROM messages m
+                        "SELECT m.body, m.outgoing, COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END,''), COALESCE(c.last_name,''), COALESCE(c.username,''), m.kind, m.sender_user_id FROM messages m
                          LEFT JOIN contacts c ON c.user_id=m.sender_user_id WHERE m.id=?1",
                         [rid],
                         |x| {
                             let name = if x.get::<_, i64>(1)? == 1 { "Вы".to_string() } else { display_name(&x.get::<_, String>(2)?, &x.get::<_, String>(3)?, &x.get::<_, String>(4)?) };
-                            Ok(json!({"id": rid, "text": x.get::<_, String>(0)?.chars().take(120).collect::<String>(), "sender_name": name, "kind": x.get::<_, String>(5)?}))
+                            Ok((json!({"id": rid, "text": x.get::<_, String>(0)?.chars().take(120).collect::<String>(), "sender_name": name, "kind": x.get::<_, String>(5)?}), x.get::<_, String>(6)?))
                         },
                     )
-                    .optional()?,
+                    .optional()?
+                    .map(|(mut quote, sender)| {
+                        quote["sender_color"] = json!(colors.entry(sender.clone()).or_insert_with(|| crate::profiles::name_color_in(&db.conn, &sender)).clone());
+                        quote
+                    }),
                 None => None,
             };
             let file = match &r.file {
@@ -112,12 +118,14 @@ impl Inner {
                 None if r.outgoing => "Вы".to_string(),
                 None => r.sender_name,
             };
+            let sender_color = if channel.is_some() { String::new() } else { colors.entry(r.sender.clone()).or_insert_with(|| crate::profiles::name_color_in(&db.conn, &r.sender)).clone() };
             out.push(json!({
                 "local_id": r.local_id,
                 "id": r.id,
                 "conversation_id": r.conversation_id,
                 "sender_user_id": r.sender,
                 "sender_name": sender_name,
+                "sender_color": sender_color,
                 "sender_avatar_path": self.avatar_path(&if r.outgoing { crate::store::kv_get_str(&db.conn, "avatar")?.unwrap_or_default() } else {
                     db.conn.query_row("SELECT avatar FROM contacts WHERE user_id=?1", [&r.sender], |x| x.get::<_, String>(0)).optional()?.unwrap_or_default()
                 }),

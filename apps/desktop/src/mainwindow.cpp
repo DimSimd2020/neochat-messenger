@@ -12,6 +12,7 @@
 #include "onboarding.h"
 #include "popupmenu.h"
 #include "sheet.h"
+#include "profilestyle.h"
 #include "theme.h"
 #include "transition.h"
 #include "widgets.h"
@@ -230,6 +231,12 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     }
+    // The colour a person chose for their name, as '#rrggbb'.
+    void setTitleColor(const QString &hex)
+    {
+        m_titleColor = hex;
+        update();
+    }
     void set(const QString &title, const QString &count, const QString &names, const QString &seed, bool accent = false, const QString &avatar = {})
     {
         m_title = title;
@@ -252,7 +259,8 @@ protected:
         ui::paintAvatar(&p, QRectF(0, (height() - 36) / 2.0, 36, 36), m_title, m_seed, m_avatar);
         const qreal x = 48;
         p.setFont(Theme::instance()->font(17, QFont::DemiBold));
-        p.setPen(c.text);
+        const QColor chosen = profilestyle::nameOn(m_titleColor, c.canvas);
+        p.setPen(chosen.isValid() ? chosen : c.text);
         const qreal w = width() - x;
         p.drawText(QRectF(x, 4, w, 24), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(m_title, Qt::ElideRight, int(w)));
         p.setFont(Theme::instance()->font(12.5));
@@ -266,7 +274,7 @@ protected:
     }
 
 private:
-    QString m_title, m_count, m_names, m_seed, m_avatar;
+    QString m_title, m_count, m_names, m_seed, m_avatar, m_titleColor;
     bool m_accent = false;
 };
 
@@ -1216,6 +1224,7 @@ void MainWindow::applyConversation(const QJsonObject &c)
         accent = true;
     }
     const QString seed = c.value("kind").toString() == "direct" && !c.value("peer_user_id").toString().isEmpty() ? c.value("peer_user_id").toString() : c.value("id").toString();
+    m_header->title->setTitleColor(c.value("title_color").toString());
     m_header->title->set(c.value("title").toString(), count, names, seed, accent, c.value("avatar_path").toString());
     const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
     m_composer->setVisible(!gone && c.value("can_post").toBool(true) && c.value("muted").toDouble() == 0);

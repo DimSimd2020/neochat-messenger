@@ -49,10 +49,10 @@ class SheetViewController: UIViewController {
         return row
     }
 
-    func personRow(_ name: String, _ sub: String, seed: String, avatar: String = "", subColor: UIColor = Theme.muted, action: (() -> Void)? = nil) -> UIView {
+    func personRow(_ name: String, _ sub: String, seed: String, avatar: String = "", subColor: UIColor = Theme.muted, nameColor: UIColor? = nil, action: (() -> Void)? = nil) -> UIView {
         let av = AvatarView(size: 44)
         av.set(name, seed: seed, avatar: avatar)
-        let t = label(name, 16, .semibold)
+        let t = label(name, 16, .semibold, color: nameColor ?? Theme.text)
         let s = label(sub, 14, color: subColor)
         let col = UIStackView(arrangedSubviews: [t, s])
         col.axis = .vertical
@@ -806,7 +806,7 @@ final class ConversationInfoViewController: SheetViewController, PHPickerViewCon
                 if muted { sub += " · не может писать" }
                 if warn { sub = "Ключ изменился — сверьте код в личном чате" }
                 let name = m.str("display_name")
-                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, avatar: m.str("avatar_path"), subColor: warn ? Theme.warning : Theme.muted, action: admin && !gone ? {
+                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, avatar: m.str("avatar_path"), subColor: warn ? Theme.warning : Theme.muted, nameColor: ProfileStyle.name(m.str("name_color")), action: admin && !gone ? {
                     let a = UIAlertController(title: name, message: nil, preferredStyle: .actionSheet)
                     a.addAction(UIAlertAction(title: "Тег…", style: .default) { _ in self.editTag(uid, name: name, current: m.str("tag")) })
                     if owner && !me {

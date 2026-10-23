@@ -801,6 +801,58 @@ fn group_service_lines_and_mute() {
 }
 
 #[test]
+fn profile_style_reaches_other_people() {
+    let Some(e) = env() else { return };
+    let (an, bn) = (uname("sa"), uname("sb"));
+    let (alice, _) = register(&e, &an);
+    let (bob, _) = register(&e, &bn);
+    let b = alice.call("resolve_contact", json!({"username": bn}))["user_id"].as_str().unwrap().to_string();
+    let a = bob.call("resolve_contact", json!({"username": an}))["user_id"].as_str().unwrap().to_string();
+    let cid = alice.call("open_direct", json!({"user_id": b}))["id"].as_str().unwrap().to_string();
+    bob.call("open_direct", json!({"user_id": a}));
+    let gid = alice.call("create_group", json!({"title": "Цвета", "member_ids": [b]}))["id"].as_str().unwrap().to_string();
+
+    // Nothing chosen yet: empty strings, not missing fields.
+    assert_eq!(bob.call("user_profile", json!({"user_id": a}))["name_color"], "");
+    assert!(alice.try_call("set_profile", json!({"name_color": "red"})).is_err());
+    assert!(alice.try_call("set_profile", json!({"header": "#111111,#222222,#333333,#444444"})).is_err());
+
+    alice.call("set_profile", json!({"name_color": "#FF8800", "header": "#112233,#445566"}));
+    alice.sync();
+    bob.sync();
+    let status = alice.call("status", json!({}));
+    assert_eq!((status["name_color"].as_str(), status["header"].as_str()), (Some("#ff8800"), Some("#112233,#445566")));
+    let profile = bob.call("user_profile", json!({"user_id": a}));
+    assert_eq!((profile["name_color"].as_str(), profile["header"].as_str()), (Some("#ff8800"), Some("#112233,#445566")));
+
+    // Where names are shown: messages, quotes, members and the title of a direct chat.
+    let first = alice.call("send_text", json!({"conversation_id": cid, "text": "привет"}));
+    alice.call("send_text", json!({"conversation_id": gid, "text": "в группе"}));
+    alice.sync();
+    bob.sync();
+    let reply = bob.call("send_text", json!({"conversation_id": cid, "text": "ответ", "reply_to": first["id"]}));
+    bob.sync();
+    alice.sync();
+    let seen = bob.messages(&cid);
+    assert_eq!(seen[0]["sender_color"], "#ff8800");
+    assert_eq!(seen.iter().find(|m| m["id"] == reply["id"]).unwrap()["reply_to"]["sender_color"], "#ff8800");
+    assert_eq!(bob.messages(&gid).last().unwrap()["sender_color"], "#ff8800");
+    assert_eq!(bob.call("get_conversation", json!({"conversation_id": cid}))["title_color"], "#ff8800");
+    let members = bob.call("get_conversation", json!({"conversation_id": gid}))["members"].clone();
+    assert_eq!(members.as_array().unwrap().iter().find(|m| m["user_id"] == a.as_str()).unwrap()["name_color"], "#ff8800");
+    // My own messages carry my own colour too.
+    assert_eq!(alice.messages(&cid)[0]["sender_color"], "#ff8800");
+    assert_eq!(alice.messages(&cid).iter().find(|m| m["id"] == reply["id"]).unwrap()["sender_color"], "");
+
+    // Clearing goes back to the default everywhere.
+    alice.call("set_profile", json!({"name_color": "", "header": ""}));
+    alice.sync();
+    bob.sync();
+    assert_eq!(bob.messages(&cid)[0]["sender_color"], "");
+    assert_eq!(bob.call("user_profile", json!({"user_id": a}))["header"], "");
+}
+
+#[test]
 fn pinned_messages_and_saved_chat() {
     let Some(e) = env() else { return };
     let (an, bn) = (uname("pa"), uname("pb"));

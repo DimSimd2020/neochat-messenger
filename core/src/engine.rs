@@ -394,6 +394,8 @@ impl Inner {
             "logged_in": kv_get(c, "refresh_token")?.is_some() && kv_get(c, "user_id")?.is_some(),
             "display_name": kv_get_str(c, "display_name")?,
             "bio": kv_get_str(c, "bio")?.unwrap_or_default(),
+            "name_color": kv_get_str(c, "name_color")?.unwrap_or_default(),
+            "header": kv_get_str(c, "header")?.unwrap_or_default(),
             "avatar_path": self.avatar_path(&kv_get_str(c, "avatar")?.unwrap_or_default()),
             "number": kv_get_str(c, "number")?,
             "has_device_keys": kv_get(c, "device_identity")?.is_some() && kv_get(c, "user_id")?.is_some(),
@@ -989,8 +991,17 @@ impl Inner {
             }
         }
         tx.execute(
-            "UPDATE contacts SET username=?2, profile_name=?3, number=?4, bio=?5, avatar=?6 WHERE user_id=?1",
-            params![user_id, s(u, "username")?, u["display_name"].as_str().unwrap_or("").trim(), u["number"].as_str().unwrap_or(""), u["bio"].as_str().unwrap_or("").chars().take(100).collect::<String>(), u["avatar_id"].as_str().unwrap_or("")],
+            "UPDATE contacts SET username=?2, profile_name=?3, number=?4, bio=?5, avatar=?6, name_color=?7, header=?8 WHERE user_id=?1",
+            params![
+                user_id,
+                s(u, "username")?,
+                u["display_name"].as_str().unwrap_or("").trim(),
+                u["number"].as_str().unwrap_or(""),
+                u["bio"].as_str().unwrap_or("").chars().take(100).collect::<String>(),
+                u["avatar_id"].as_str().unwrap_or(""),
+                crate::profiles::clean_color(u["name_color"].as_str().unwrap_or("")),
+                crate::profiles::clean_header(u["header"].as_str().unwrap_or(""))
+            ],
         )?;
         if let Some((first, last)) = as_contact {
             tx.execute(
@@ -1025,6 +1036,8 @@ impl Inner {
         kv_set(&db.conn, "display_name", u["display_name"].as_str().unwrap_or("").as_bytes())?;
         kv_set(&db.conn, "number", u["number"].as_str().unwrap_or("").as_bytes())?;
         kv_set(&db.conn, "bio", u["bio"].as_str().unwrap_or("").as_bytes())?;
+        kv_set(&db.conn, "name_color", crate::profiles::clean_color(u["name_color"].as_str().unwrap_or("")).as_bytes())?;
+        kv_set(&db.conn, "header", crate::profiles::clean_header(u["header"].as_str().unwrap_or("")).as_bytes())?;
         kv_set(&db.conn, "avatar", u["avatar_id"].as_str().unwrap_or("").as_bytes())?;
         drop(db);
         let _ = self.cache_user_avatar(&u);
@@ -1048,6 +1061,19 @@ impl Inner {
                 return Err(Error::Invalid("О себе: до 100 символов".into()));
             }
             body["bio"] = json!(bio);
+        }
+        // The look of the profile: '' puts the default back.
+        if let Some(color) = p["name_color"].as_str() {
+            if !color.trim().is_empty() && crate::profiles::clean_color(color).is_empty() {
+                return Err(Error::Invalid("Цвет имени: #RRGGBB".into()));
+            }
+            body["name_color"] = json!(crate::profiles::clean_color(color));
+        }
+        if let Some(header) = p["header"].as_str() {
+            if !header.trim().is_empty() && crate::profiles::clean_header(header).is_empty() {
+                return Err(Error::Invalid("Шапка профиля: до трёх цветов #RRGGBB".into()));
+            }
+            body["header"] = json!(crate::profiles::clean_header(header));
         }
         if let Some(username) = p["username"].as_str() {
             let username = username.trim().trim_start_matches('@');
@@ -1095,7 +1121,7 @@ impl Inner {
         let db = self.db();
         db.conn
             .query_row(
-                "SELECT user_id, username, first_name, last_name, verified, key_changed, is_contact, added_at, profile_name, number, bio, avatar FROM contacts WHERE user_id=?1",
+                "SELECT user_id, username, first_name, last_name, verified, key_changed, is_contact, added_at, profile_name, number, bio, avatar, name_color, header FROM contacts WHERE user_id=?1",
                 [user_id],
                 |r| {
                     Ok(json!({
@@ -1107,6 +1133,8 @@ impl Inner {
                         "profile_name": r.get::<_, String>(8)?,
                         "number": r.get::<_, String>(9)?,
                         "bio": r.get::<_, String>(10)?,
+                        "name_color": r.get::<_, String>(12)?,
+                        "header": r.get::<_, String>(13)?,
                         "avatar_path": self.avatar_path(&r.get::<_, String>(11)?),
                         "verified": r.get::<_, i64>(4)? == 1,
                         "key_changed": r.get::<_, i64>(5)? == 1,

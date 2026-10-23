@@ -230,7 +230,7 @@ void Label::restyle()
 void Label::paintEvent(QPaintEvent *e)
 {
     const Palette &c = Theme::p();
-    const QColor color = m_role == Muted ? c.muted : m_role == Accent ? c.accent : m_role == Warning ? c.warning : c.text;
+    const QColor color = m_override.isValid() ? m_override : m_role == Muted ? c.muted : m_role == Accent ? c.accent : m_role == Warning ? c.warning : c.text;
     if (palette().color(QPalette::WindowText) != color) {
         QPalette pal = palette();
         pal.setColor(QPalette::WindowText, color);

@@ -511,6 +511,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (e != null) return@call act.toast(e.message)
             conv = v as JSONObject
             title.text = conv.str("title")
+            title.personColor(conv.str("title_color"), Theme.Role.TEXT)
             avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId }, conv.str("avatar_path"))
             val members = conv.optJSONArray("members") ?: JSONArray()
             val channel = conv.str("kind") == "channel"
@@ -1153,6 +1154,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             sender.setOnClickListener { act.openPage(PersonProfilePage(act,m.str("sender_user_id"))) }
             sender.visibility = if (group && !out && item.firstInRun) VISIBLE else GONE
             sender.text = m.str("sender_name") + m.str("sender_tag").let { if (it.isEmpty()) "" else " · $it" }
+            sender.personColor(m.str("sender_color"), Theme.Role.MUTED)
             (col.layoutParams as LayoutParams).gravity = if (out) Gravity.END else Gravity.START
             col.gravity = if (out) Gravity.END else Gravity.START
             val undecryptable = m.str("kind") == "undecryptable"
@@ -1164,6 +1166,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             time.setTextColor(muted)
             quoteName.setTextColor(fg)
             quoteText.setTextColor(muted)
+            // The quoted person's own colour, read against the bubble it sits in.
+            m.optJSONObject("reply_to")?.str("sender_color")?.let { c ->
+                ProfileStyle.nameOn(c, if (out) Theme.p.outgoing else Theme.p.bg1)?.let { quoteName.setTextColor(it) }
+            }
             fileName.setTextColor(fg)
             fileMeta.setTextColor(muted)
             fileAction.imageTintList = android.content.res.ColorStateList.valueOf(fg)

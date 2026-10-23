@@ -140,6 +140,9 @@ impl Db {
             "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE contacts ADD COLUMN bio TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE contacts ADD COLUMN avatar TEXT NOT NULL DEFAULT ''",
+            // How a profile looks: the colour of the name and the header gradient (see profiles.rs).
+            "ALTER TABLE contacts ADD COLUMN name_color TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE contacts ADD COLUMN header TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
             // Forwarded messages keep a small header: who originally sent it and when.
             "ALTER TABLE messages ADD COLUMN fwd TEXT",

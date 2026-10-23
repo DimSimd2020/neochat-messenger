@@ -9,6 +9,27 @@ use crate::engine::{Inner, s};
 use crate::error::{Error, Result};
 use crate::store::{kv_get, kv_get_str, kv_set};
 
+/// '#rrggbb' in lower case, or an empty string for anything else.
+pub fn clean_color(c: &str) -> String {
+    let c = c.trim();
+    let ok = c.len() == 7 && c.starts_with('#') && c[1..].bytes().all(|b| b.is_ascii_hexdigit());
+    if ok { c.to_ascii_lowercase() } else { String::new() }
+}
+
+/// Up to three '#rrggbb' joined by commas; one bad colour drops the whole header.
+pub fn clean_header(h: &str) -> String {
+    let parts: Vec<String> = h.split(',').map(clean_color).collect();
+    if h.trim().is_empty() || parts.len() > 3 || parts.iter().any(String::is_empty) { String::new() } else { parts.join(",") }
+}
+
+/// The colour of a person's name as they chose it; mine comes from my own profile.
+pub fn name_color_in(conn: &rusqlite::Connection, user_id: &str) -> String {
+    let theirs: Option<String> = conn.query_row("SELECT name_color FROM contacts WHERE user_id=?1", [user_id], |r| r.get(0)).optional().ok().flatten();
+    theirs.unwrap_or_else(|| {
+        if kv_get_str(conn, "user_id").ok().flatten().as_deref() == Some(user_id) { kv_get_str(conn, "name_color").ok().flatten().unwrap_or_default() } else { String::new() }
+    })
+}
+
 impl Inner {
     pub fn user_profile(&self, p: &Value) -> Result<Value> {
         let (me, _) = self.me()?;

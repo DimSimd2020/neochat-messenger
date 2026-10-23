@@ -7,6 +7,7 @@
 #include "messages.h"
 #include "popupmenu.h"
 #include "sheet.h"
+#include "profilestyle.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -152,6 +153,8 @@ public:
     bool multi = false;
     QString warning;
     QString avatar;
+    // The colour the person chose for their name, as '#rrggbb'.
+    QString nameHex;
     QSize sizeHint() const override { return {300, 58}; }
 
 protected:
@@ -170,7 +173,8 @@ protected:
         ui::paintAvatar(&p, QRectF(8, (height() - 40) / 2.0, 40, 40), m_name, m_seed, avatar);
         const qreal right = multi ? width() - 44 : width() - 10;
         p.setFont(Theme::instance()->font(15, QFont::DemiBold));
-        p.setPen(c.text);
+        const QColor chosen = profilestyle::nameOn(nameHex, c.surface);
+        p.setPen(chosen.isValid() ? chosen : c.text);
         p.drawText(QRectF(60, 9, right - 60, 22), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(m_name, Qt::ElideRight, int(right - 60)));
         p.setFont(Theme::instance()->font(12.5));
         p.setPen(warning.isEmpty() ? c.muted : c.warning);
@@ -1448,6 +1452,7 @@ static void groupInfo(const DialogHost &h, const QString &cid)
                     sub += QStringLiteral(" · не может писать");
                 auto *row = new PersonRow(m.value("display_name").toString(), sub, uid);
                 row->avatar = m.value("avatar_path").toString();
+                row->nameHex = m.value("name_color").toString();
                 if (m.value("key_changed").toBool())
                     row->warning = QStringLiteral("Ключ изменился — сверьте код в личном чате");
                 list->add(row);

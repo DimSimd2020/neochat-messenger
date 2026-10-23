@@ -405,21 +405,21 @@ impl Inner {
         let mut peer_verified = false;
         for m in &member_ids {
             if *m == me {
-                members_out.push(json!({"user_id": m, "display_name": "Вы", "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true, "avatar_path": self.avatar_path(&kv_get_str(&db.conn, "avatar")?.unwrap_or_default()),
+                members_out.push(json!({"user_id": m, "display_name": "Вы", "name_color": kv_get_str(&db.conn, "name_color")?.unwrap_or_default(), "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true, "avatar_path": self.avatar_path(&kv_get_str(&db.conn, "avatar")?.unwrap_or_default()),
                     "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!("")), "muted_until": muted.get(m).cloned().unwrap_or(json!(0))}));
                 continue;
             }
             let c = db
                 .conn
-                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed, c.bio, c.avatar FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?))
+                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed, c.bio, c.avatar, c.name_color FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?))
                 })
                 .optional()?;
-            if let Some((u, f, l, v, k, bio, avatar)) = c {
+            if let Some((u, f, l, v, k, bio, avatar, color)) = c {
                 if Some(m) == peer.as_ref() {
                     peer_verified = v == 1;
                 }
-                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio, "avatar_path": self.avatar_path(&avatar),
+                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio, "name_color": color, "avatar_path": self.avatar_path(&avatar),
                     "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!("")), "muted_until": muted.get(m).cloned().unwrap_or(json!(0))}));
             }
         }
@@ -458,6 +458,8 @@ impl Inner {
             "id": id,
             "kind": kind,
             "title": display,
+            // A direct chat is titled with the other person's name, in the colour they chose.
+            "title_color": if kind == "direct" { members_out.iter().find(|m| m["me"] == false).and_then(|m| m["name_color"].as_str()).unwrap_or("").to_string() } else { String::new() },
             "peer_user_id": peer,
             "avatar_path": if kind == "direct" {
                 members_out.iter().find(|m| Some(m["user_id"].as_str().unwrap_or("")) == peer.as_deref()).map(|m| m["avatar_path"].clone()).unwrap_or(json!(""))

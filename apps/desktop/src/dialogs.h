@@ -37,6 +37,8 @@ void appearance(const DialogHost &h);
 void whatsNew(const DialogHost &h);
 void profile(const DialogHost &h);
 void editProfile(const DialogHost &h);
+// The colour of the name and the header gradient of my profile; `done` runs after saving or going back.
+void profileStyle(const DialogHost &h, const QJsonObject &profile, std::function<void()> done);
 void myQr(const DialogHost &h);
 void profileQr(const DialogHost &h, const QString &userId = {});
 void conversationInfo(const DialogHost &h, const QString &conversationId);

@@ -622,6 +622,7 @@ object Dialogs {
                     val row = ListRow(ctx, 40)
                     row.avatar.set(m.str("display_name"), uid, m.str("avatar_path"))
                     row.title.text = m.str("display_name")
+                    row.title.personColor(m.str("name_color"), Theme.Role.TEXT)
                     if (m.optBoolean("key_changed")) {
                         row.subtitle.text = "Ключ изменился — сверьте код в личном чате"
                         row.subtitle.role(Theme.Role.WARNING)

@@ -1133,6 +1133,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) + (c.int("online_count") > 0 ? ", \(c.int("online_count")) в сети" : "") : channel ? (c.bool("saved") ? "Заметки для себя" : memberCount(c.int("member_count"), channel: true))
                 : seen.isEmpty ? handle : seen
             self.titleLabel.text = c.str("title")
+            self.titleLabel.textColor = ProfileStyle.name(c.str("title_color")) ?? Theme.text
             let peer = c.str("peer_user_id")
             self.headerAvatar.set(c.str("title"), seed: peer.isEmpty ? self.conversationId : peer, avatar: c.str("avatar_path"))
             self.headerAvatar.online = self.peerOnline
@@ -1901,6 +1902,7 @@ final class BubbleCell: UITableViewCell {
         avatar.set(m.str("sender_name"), seed: m.str("sender_user_id"), avatar: m.str("sender_avatar_path"))
         sender.isHidden = !(group && !out && first)
         sender.text = m.str("sender_name") + (m.str("sender_tag").isEmpty ? "" : " · " + m.str("sender_tag"))
+        sender.textColor = ProfileStyle.name(m.str("sender_color")) ?? Theme.muted
         // One to three emoji without text are shown large, without a bubble.
         let emojiCount = Prefs.bigEmoji && kind == "text" && m.obj("reply_to") == nil ? m.int("emoji_only") : 0
         let big = emojiCount > 0
@@ -1921,7 +1923,16 @@ final class BubbleCell: UITableViewCell {
         } else { fwd.isHidden = true }
         if let r = m.obj("reply_to") {
             quote.isHidden = false
-            quote.text = r.str("sender_name") + ": " + (r.str("kind") == "file" ? "Файл" : r.str("text").replacingOccurrences(of: "\n", with: " "))
+            let who = r.str("sender_name")
+            let line = who + ": " + (r.str("kind") == "file" ? "Файл" : r.str("text").replacingOccurrences(of: "\n", with: " "))
+            // The quoted person's own colour on their name, read against the bubble it sits in.
+            if let tint = ProfileStyle.name(r.str("sender_color"), on: out ? Theme.outgoing : Theme.canvas) {
+                let styled = NSMutableAttributedString(string: line, attributes: [.font: quote.font as Any, .foregroundColor: muted])
+                styled.addAttribute(.foregroundColor, value: tint, range: NSRange(location: 0, length: (who as NSString).length + 1))
+                quote.attributedText = styled
+            } else {
+                quote.text = line
+            }
         } else { quote.isHidden = true }
         let f = m.obj("file")
         let image = isImage(m)

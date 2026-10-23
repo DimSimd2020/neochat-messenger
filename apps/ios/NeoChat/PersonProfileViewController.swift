@@ -10,6 +10,8 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
     private let details = UIStackView()
     private let content = UIStackView()
     private let avatar = AvatarView(size: 112)
+    // The cover with the avatar on its lower edge.
+    private let cover = ProfileCoverView()
     private let name = label("", 28, .bold)
     private let subtitle = label("", 14, color: Theme.muted)
     private var category = "media"
@@ -38,7 +40,7 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
         avatar.accessibilityTraits = .button
         avatar.isUserInteractionEnabled = true
         avatar.addGestureRecognizer(TapGesture { [weak self] in self?.showPhotos() })
-        [avatar, name, subtitle, details].forEach(stack.addArrangedSubview)
+        [name, subtitle, details].forEach(stack.addArrangedSubview)
         let tabScroll = UIScrollView()
         tabScroll.showsHorizontalScrollIndicator = false
         tabs.translatesAutoresizingMaskIntoConstraints = false
@@ -60,11 +62,15 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(scroll); scroll.addSubview(stack)
+        cover.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scroll); scroll.addSubview(cover); scroll.addSubview(avatar); scroll.addSubview(stack)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 18), stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -28),
+            cover.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), cover.heightAnchor.constraint(equalToConstant: 150),
+            cover.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor), cover.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor),
+            avatar.centerXAnchor.constraint(equalTo: scroll.frameLayoutGuide.centerXAnchor), avatar.topAnchor.constraint(equalTo: cover.bottomAnchor, constant: -56),
+            stack.topAnchor.constraint(equalTo: avatar.bottomAnchor, constant: 14), stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -28),
             stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16), stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
             details.widthAnchor.constraint(equalTo: stack.widthAnchor), tabScroll.widthAnchor.constraint(equalTo: stack.widthAnchor), content.widthAnchor.constraint(equalTo: stack.widthAnchor),
             name.widthAnchor.constraint(equalTo: stack.widthAnchor), subtitle.widthAnchor.constraint(equalTo: stack.widthAnchor),
@@ -102,6 +108,8 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
             self.profile = p
             let own = p.bool("me"), uid = p.str("user_id")
             self.name.text = p.str("display_name").isEmpty ? "@"+p.str("username") : p.str("display_name")
+            self.name.textColor = ProfileStyle.name(p.str("name_color")) ?? Theme.text
+            self.cover.colors = ProfileStyle.colors(header: p.str("header"), userId: uid)
             self.avatar.set(self.name.text ?? "", seed: uid, avatar: p.str("avatar_path"))
             self.subtitle.text = own ? "Ваш профиль" : (p.bool("verified") ? "Ключ сверен" : "@"+p.str("username"))
             self.navigationItem.rightBarButtonItem = own ? UIBarButtonItem(image: UIImage(systemName: "pencil"), primaryAction: UIAction { [weak self] _ in self?.presentSheet(EditProfileViewController()) }) : nil
@@ -125,6 +133,7 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
             }
             card.addArrangedSubview(line)
             card.addArrangedSubview(self.info("О себе", p.str("bio").isEmpty ? "Не указано" : p.str("bio")))
+            if own { card.addArrangedSubview(self.info("Оформление", "Цвет имени и шапка профиля") { [weak self] in self?.presentSheet(ProfileStyleViewController(profile: p)) }) }
             if !own { card.addArrangedSubview(self.info("Заметки · видны только вам", p.str("note").isEmpty ? "Добавить заметку" : p.str("note")) { [weak self] in self?.editNote() }) }
             self.details.addArrangedSubview(card)
             self.select(self.category, animated:false)

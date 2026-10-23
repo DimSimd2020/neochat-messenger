@@ -29,6 +29,12 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     private val details = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
     private val content = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
     private val avatar = AvatarView(act, 112)
+    // The cover reaches under the status bar; the avatar sits on its lower edge.
+    private val cover = ProfileHeaderView(act)
+    private val coverBox = FrameLayout(act)
+    private val body = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+    private var backButton: View? = null
+    private var inset = 0
     private val name = act.label("", 27f, 700)
     private val sub = act.label("", 14f, 400, Theme.Role.MUTED)
     private val tabs = BottomNav(act, listOf("Медиа", "Файлы", "Ссылки", "Группы", "Конфиденциальность").map { 0 to it }, textOnly = true, equalWidth = false)
@@ -44,29 +50,41 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     init {
         root.addView(BackgroundView(act), flp(MATCH, MATCH))
         val column = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        col.setPadding(0,0,0,dp(28))
+        coverBox.addView(cover,FrameLayout.LayoutParams(MATCH,dp(150)))
+        coverBox.addView(avatar,FrameLayout.LayoutParams(dp(112),dp(112),Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(94) })
         if (userId != null) {
-            val bar = LinearLayout(act).apply { gravity = Gravity.CENTER_VERTICAL }
-            bar.addView(IconButton(act,R.drawable.ic_back,"Назад").apply { setOnClickListener { act.closePage() } })
-            bar.addView(act.label("Профиль",18f,600),lp(0,WRAP,1f)); column.addView(bar,lp(MATCH,dp(56)))
+            val back = IconButton(act,R.drawable.ic_back,"Назад",glass = true).apply { setOnClickListener { act.closePage() } }
+            coverBox.addView(back,FrameLayout.LayoutParams(dp(48),dp(48),Gravity.TOP or Gravity.START).apply { topMargin = dp(8); marginStart = dp(8) })
+            backButton = back
         }
-        col.setPadding(dp(16),dp(18),dp(16),dp(28))
-        col.addView(avatar,lp(dp(112),dp(112)))
+        col.addView(coverBox,lp(MATCH,dp(206)))
+        body.setPadding(dp(16),dp(14),dp(16),0)
+        col.addView(body,lp())
         avatar.contentDescription = "Открыть фото профиля"; avatar.isFocusable = true
         avatar.setOnClickListener { showProfilePhotos(act,profile.str("user_id"),profile.optBoolean("me")) { load() } }
         name.gravity = Gravity.CENTER; sub.gravity = Gravity.CENTER
-        col.addView(name,lp().apply { topMargin = dp(16) }); col.addView(sub,lp().apply { topMargin = dp(6) })
-        col.addView(details,lp().apply { topMargin = dp(22) })
+        body.addView(name,lp().apply { topMargin = dp(4) }); body.addView(sub,lp().apply { topMargin = dp(6) })
+        body.addView(details,lp().apply { topMargin = dp(22) })
         val tabScroll = HorizontalScrollView(act).apply {
             isHorizontalScrollBarEnabled = false
             clipChildren = false
             addView(tabs, android.widget.FrameLayout.LayoutParams(WRAP, dp(68)))
         }
         tabs.onSelect = { select(tabKeys[it]) }
-        col.addView(tabScroll,lp().apply { topMargin = dp(22) }); col.addView(content,lp().apply { topMargin = dp(16) })
+        body.addView(tabScroll,lp().apply { topMargin = dp(22) }); body.addView(content,lp().apply { topMargin = dp(16) })
         scroll.addView(col); column.addView(scroll,lp(MATCH,0,1f)); root.addView(column,flp(MATCH,MATCH))
         load()
     }
-    override fun applyInsets(top:Int,bottom:Int,ime:Int) { root.setPadding(0,top,0,maxOf(bottom,ime)) }
+    override fun applyInsets(top:Int,bottom:Int,ime:Int) {
+        inset = top
+        root.setPadding(0,0,0,maxOf(bottom,ime))
+        (cover.layoutParams as FrameLayout.LayoutParams).height = dp(150) + top
+        (avatar.layoutParams as FrameLayout.LayoutParams).topMargin = dp(94) + top
+        backButton?.let { (it.layoutParams as FrameLayout.LayoutParams).topMargin = dp(8) + top }
+        coverBox.layoutParams.height = dp(206) + top
+        coverBox.requestLayout()
+    }
     fun setBottomPadding(px:Int) = scroll.setPadding(0,0,0,px)
     override fun onShown() = load()
     override fun onEvent(ev:JSONObject) { if (ev.str("type") in listOf("account_changed","contacts_changed","identity_changed")) load() }
@@ -84,6 +102,8 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             profile = v as? JSONObject ?: return@call
             val own = profile.optBoolean("me"); val uid = profile.str("user_id")
             name.text = profile.str("display_name").ifEmpty { "@"+profile.str("username") }
+            name.personColor(profile.str("name_color"),Theme.Role.TEXT)
+            cover.colors = ProfileStyle.colors(profile.str("header"),uid)
             sub.text = if(own) "Ваш профиль" else "@"+profile.str("username")
             avatar.set(name.text.toString(),uid,profile.str("avatar_path"))
             details.removeAllViews()
@@ -107,6 +127,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
                 setOnClickListener { CoreClient.call("resolve_contact",JSONObject().put("username",profile.str("username"))) { _,err -> if(err!=null) act.toast(err.message) else { act.toast("Контакт добавлен"); load() } } }
             })
             card.addView(line); card.addView(info("О себе",profile.str("bio").ifEmpty { "Не указано" }))
+            if (own) card.addView(info("Оформление","Цвет имени и шапка профиля") { editProfileStyle(act,profile) { load() } })
             if (!own) card.addView(info("Заметки · видны только вам",profile.str("note").ifEmpty { "Добавить заметку" }) { editNote() })
             details.addView(card,lp().apply { topMargin=dp(14) }); select(category,false)
         }

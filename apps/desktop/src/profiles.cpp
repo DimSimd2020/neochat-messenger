@@ -4,6 +4,7 @@
 #include "filepicker.h"
 #include "messages.h"
 #include "popupmenu.h"
+#include "profilestyle.h"
 #include "sheet.h"
 #include "theme.h"
 #include "widgets.h"
@@ -356,9 +357,10 @@ void dialogs::personProfile(const DialogHost &h,const QString &userId)
     Core::instance()->call("user_profile",userId.isEmpty()?QJsonObject():QJsonObject{{"user_id",userId}},sheet,[=](const QJsonValue &v,const CoreError &e) {
         if(!e.ok())return h.toast(e.message);
         const auto p=v.toObject();const bool own=p.value("me").toBool();const QString uid=p.value("user_id").toString();
-        auto *avatar=new ProfileAvatar;avatar->name=p.value("display_name").toString();avatar->seed=uid;avatar->path=p.value("avatar_path").toString();body->addWidget(avatar,0,Qt::AlignHCenter);
+        auto *avatar=new ProfileAvatar;avatar->name=p.value("display_name").toString();avatar->seed=uid;avatar->path=p.value("avatar_path").toString();
+        auto *cover=new profilestyle::Cover(avatar->name,uid,avatar->path);cover->setColors(profilestyle::colors(p.value("header").toString(),uid));cover->setAvatarWidget(avatar);body->addWidget(cover);
         QObject::connect(avatar,&QAbstractButton::clicked,sheet,[=]{showPhotos(h,sheet,uid,own,[=]{sheet->close();dialogs::personProfile(h,uid);});});
-        auto *name=new ui::Label(avatar->name.isEmpty()?"@"+p.value("username").toString():avatar->name,28,QFont::Bold);name->setTextFormat(Qt::PlainText);name->setWordWrap(true);name->setAlignment(Qt::AlignCenter);body->addWidget(name);
+        auto *name=new ui::Label(avatar->name.isEmpty()?"@"+p.value("username").toString():avatar->name,28,QFont::Bold);name->setTextFormat(Qt::PlainText);name->setWordWrap(true);name->setAlignment(Qt::AlignCenter);name->setColorOverride(profilestyle::nameOn(p.value("name_color").toString(),Theme::p().surface));body->addWidget(name);
         if(!own) {
             auto *actions=new QHBoxLayout;
             auto *chat=new ui::Button(QStringLiteral("Написать"),ui::Button::Secondary);actions->addWidget(chat);
@@ -371,6 +373,7 @@ void dialogs::personProfile(const DialogHost &h,const QString &userId)
         } else {
             auto *actions=new QHBoxLayout;
             auto *edit=new ui::Button(QStringLiteral("Изменить профиль"),ui::Button::Secondary);actions->addWidget(edit);QObject::connect(edit,&QAbstractButton::clicked,sheet,[=]{sheet->close();dialogs::editProfile(h);});
+            auto *look=new ui::Button(QStringLiteral("Оформление"),ui::Button::Secondary);actions->addWidget(look);QObject::connect(look,&QAbstractButton::clicked,sheet,[=]{sheet->close();dialogs::profileStyle(h,p,[=]{dialogs::personProfile(h);});});
             auto *settings=new ui::Button(QStringLiteral("Настройки"),ui::Button::Secondary);actions->addWidget(settings);QObject::connect(settings,&QAbstractButton::clicked,sheet,[=]{sheet->close();dialogs::settings(h);});
             body->addLayout(actions);
         }

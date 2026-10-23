@@ -74,6 +74,7 @@ fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
     row.avatar.set(title, c.str("peer_user_id").ifEmpty { c.str("id") }, c.str("avatar_path"))
     row.avatar.online = c.optJSONObject("presence")?.optBoolean("online") == true
     row.title.text = title
+    row.title.personColor(c.str("title_color"), Theme.Role.TEXT)
     row.groupIcon.visibility = if (c.str("kind") == "group") View.VISIBLE else View.GONE
     row.time.text = formatListTime(c.optLong("last_activity"))
     row.pin.visibility = if (c.optBoolean("pinned")) View.VISIBLE else View.GONE

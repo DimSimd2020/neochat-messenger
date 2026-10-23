@@ -3,6 +3,7 @@
 #include "core.h"
 #include "popupmenu.h"
 #include "sheet.h"
+#include "profilestyle.h"
 #include "theme.h"
 #include "transition.h"
 #include "widgets.h"
@@ -234,7 +235,8 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
     const qreal top = r.center().y() - (titleH + prevH + 4) / 2;
 
     p->setFont(titleFont);
-    p->setPen(c.text);
+    const QColor chosen = archiveRow ? QColor() : profilestyle::nameOn(o.value("title_color").toString(), c.canvas);
+    p->setPen(chosen.isValid() ? chosen : c.text);
     const QRectF titleR(x, top, right - x - timeW - 8, titleH);
     p->drawText(titleR, Qt::AlignLeft | Qt::AlignVCenter,
                 QFontMetricsF(titleFont).elidedText(archiveRow ? QStringLiteral("Архив") : o.value("title").toString(), Qt::ElideRight, titleR.width()));
