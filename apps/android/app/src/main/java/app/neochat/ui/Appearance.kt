@@ -245,6 +245,11 @@ private class ThemeCard(ctx: Context, private val label: String) : View(ctx), Th
         pressFeedback()
     }
 
+    // A bare View measures to zero height under wrap_content, so the card names its own.
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        setMeasuredDimension(getDefaultSize(suggestedMinimumWidth, widthSpec), resolveSize(dp(124), heightSpec))
+    }
+
     override fun onDraw(c: Canvas) {
         val p = Theme.p
         val inset = dpf(2)
