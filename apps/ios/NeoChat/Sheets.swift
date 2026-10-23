@@ -1010,6 +1010,7 @@ struct OutgoingFile {
     let mime: String
     var size: Int64 { Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
     var isImage: Bool { mime.hasPrefix("image/") }
+    var isVideo: Bool { mime.hasPrefix("video/") }
 }
 
 /// The window every attachment passes through: preview, "send as a file" for pictures, a caption.
@@ -1036,9 +1037,9 @@ final class AttachViewController: SheetViewController {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private var allImages: Bool { files.allSatisfy { $0.isImage } }
-    // Pictures can go as photos or as files; with anything else in the set there is no choice to offer.
-    private var photosNow: Bool { allImages ? !asFile : asPhotos }
+    private var allMedia: Bool { files.allSatisfy { $0.isImage || $0.isVideo } }
+    // Pictures and videos can go as such or as files; with anything else in the set there is no choice to offer.
+    private var photosNow: Bool { allMedia ? !asFile : asPhotos }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -1090,11 +1091,17 @@ final class AttachViewController: SheetViewController {
     }
 
     private func refresh() {
-        let images = allImages
-        asFileRow?.isHidden = !images
-        let photos = photosNow && images
-        title = photos ? (files.count == 1 ? "Отправить фото" : "Отправить фото: \(files.count)")
-            : (files.count == 1 ? "Отправить файл" : "Отправить файлы: \(files.count)")
+        let media = allMedia
+        asFileRow?.isHidden = !media
+        let photos = photosNow && media
+        if photos && files.allSatisfy({ $0.isVideo }) {
+            title = files.count == 1 ? "Отправить видео" : "Отправить видео: \(files.count)"
+        } else if photos && files.contains(where: { $0.isVideo }) {
+            title = "Отправить медиа: \(files.count)"
+        } else {
+            title = photos ? (files.count == 1 ? "Отправить фото" : "Отправить фото: \(files.count)")
+                : (files.count == 1 ? "Отправить файл" : "Отправить файлы: \(files.count)")
+        }
         preview.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if photos { addImagePreview() } else { addFileRows() }
     }
@@ -1111,12 +1118,22 @@ final class AttachViewController: SheetViewController {
         img.clipsToBounds = true
         img.translatesAutoresizingMaskIntoConstraints = false
         img.isAccessibilityElement = true
-        img.accessibilityLabel = files.count > 1 ? "Первое из \(files.count) фото" : "Фото"
+        let video = files[0].isVideo
+        img.accessibilityLabel = files.count > 1 ? "Первое из \(files.count): " + (video ? "видео" : "фото") : (video ? "Видео" : "Фото")
         box.addSubview(img)
         NSLayoutConstraint.activate([
             img.topAnchor.constraint(equalTo: box.topAnchor), img.bottomAnchor.constraint(equalTo: box.bottomAnchor),
             img.leadingAnchor.constraint(equalTo: box.leadingAnchor), img.trailingAnchor.constraint(equalTo: box.trailingAnchor),
         ])
+        if video {
+            let mark = VideoMarkView()
+            mark.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(mark)
+            NSLayoutConstraint.activate([
+                mark.topAnchor.constraint(equalTo: box.topAnchor), mark.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+                mark.leadingAnchor.constraint(equalTo: box.leadingAnchor), mark.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+            ])
+        }
         if files.count > 1 {
             let badge = label("+\(files.count - 1)", 13, .semibold, color: .white)
             badge.textAlignment = .center
@@ -1136,7 +1153,7 @@ final class AttachViewController: SheetViewController {
         let token = loadToken
         let url = files[0].url
         DispatchQueue.global(qos: .userInitiated).async {
-            let decoded = Photos.decode(url, maxSide: 900)
+            let decoded = video ? Videos.poster(url, maxSide: 900) : Photos.decode(url, maxSide: 900)
             DispatchQueue.main.async { [weak self] in
                 if let self, self.loadToken == token { img.image = decoded }
             }

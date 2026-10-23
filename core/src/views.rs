@@ -92,7 +92,8 @@ impl Inner {
                     let downloaded = self.data_dir.join("files").join(format!("{}.enc", r.id)).exists();
                     Some(json!({"name": meta.name, "size": meta.size, "mime": meta.mime, "downloaded": downloaded,
                         "image": meta.mime.starts_with("image/") && meta.thumb.is_some(),
-                        "thumb": meta.thumb, "width": meta.w, "height": meta.h}))
+                        "thumb": meta.thumb, "width": meta.w, "height": meta.h,
+                        "video": meta.is_video(), "duration": meta.duration}))
                 }
                 None => None,
             };

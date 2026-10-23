@@ -1,3 +1,5 @@
+import AVFoundation
+import AVKit
 import ImageIO
 import PhotosUI
 import QuickLook
@@ -76,6 +78,7 @@ private func votesText(_ n: Int) -> String {
 }
 
 func isImage(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("image") ?? false) }
+func isVideo(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("video") ?? false) }
 
 /// Links found by the core's markdown parser.
 func links(_ m: JSON) -> [String] { m.arr("spans").compactMap { $0["link"] as? String } }
@@ -698,7 +701,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         replyTo = nil
         let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
         replyTitle.text = "Изменение сообщения"
-        replyText.text = t.isEmpty ? (isImage(m) ? "Фото" : "Файл") : t
+        replyText.text = t.isEmpty ? (isImage(m) ? "Фото" : isVideo(m) ? "Видео" : "Файл") : t
         replyBar.accessibilityLabel = "Изменение сообщения: " + (replyText.text ?? "")
         cancelButton?.accessibilityLabel = "Отменить изменение"
         input.text = m.str("text")
@@ -817,6 +820,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private func updateAttachMenu() {
         var acts: [UIMenuElement] = [
             UIAction(title: "Фото", image: UIImage(systemName: "photo")) { [weak self] _ in self?.pickPhotos() },
+            UIAction(title: "Видео", image: UIImage(systemName: "video")) { [weak self] _ in self?.pickVideos() },
             UIAction(title: "Камера", image: UIImage(systemName: "camera")) { [weak self] _ in self?.takePhoto() },
             UIAction(title: "Файл", image: UIImage(systemName: "doc")) { [weak self] _ in self?.pickFile() },
         ]
@@ -842,6 +846,18 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         (presentedViewController ?? self).present(picker, animated: true)
     }
 
+    private func pickVideos(more: (([OutgoingFile]) -> Void)? = nil) {
+        pendingPick = more
+        var cfg = PHPickerConfiguration()
+        cfg.filter = .videos
+        cfg.selectionLimit = 5
+        // The original file: it is re-encoded here, to MP4, before it is sent.
+        cfg.preferredAssetRepresentationMode = .current
+        let picker = PHPickerViewController(configuration: cfg)
+        picker.delegate = self
+        (presentedViewController ?? self).present(picker, animated: true)
+    }
+
     private func deliver(_ files: [OutgoingFile], photos: Bool) {
         if let done = pendingPick {
             pendingPick = nil
@@ -859,7 +875,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
         input.resignFirstResponder()
         presentSheet(AttachViewController(files: files, asPhotos: photos, more: { [weak self] done in
-            if photos && files.allSatisfy({ $0.isImage }) { self?.pickPhotos(more: done) } else { self?.pickFile(more: done) }
+            if files.allSatisfy({ $0.isVideo }) { self?.pickVideos(more: done) }
+            else if photos && files.allSatisfy({ $0.isImage }) { self?.pickPhotos(more: done) }
+            else { self?.pickFile(more: done) }
         }, send: { [weak self] chosen, asPhotos, caption in
             for (n, f) in chosen.enumerated() { self?.sendOutgoing(f, photo: asPhotos, caption: n == 0 ? caption : "") }
         }))
@@ -890,7 +908,25 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         let lock = NSLock()
         for (n, r) in results.enumerated() {
             let prov = r.itemProvider
-            guard prov.hasItemConformingToTypeIdentifier(UTType.image.identifier) else { continue }
+            guard prov.hasItemConformingToTypeIdentifier(UTType.image.identifier) else {
+                if prov.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+                    group.enter()
+                    prov.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, _ in
+                        defer { group.leave() }
+                        guard let url else { return }
+                        // The provider removes its file after this block: keep a copy.
+                        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("outgoing", isDirectory: true)
+                        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                        let dest = dir.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
+                        guard (try? FileManager.default.copyItem(at: url, to: dest)) != nil else { return }
+                        let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "video/quicktime"
+                        lock.lock()
+                        found[n] = OutgoingFile(url: dest, name: url.lastPathComponent, mime: mime)
+                        lock.unlock()
+                    }
+                }
+                continue
+            }
             group.enter()
             prov.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { url, _ in
                 defer { group.leave() }
@@ -926,13 +962,28 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     /// The thumbnail is made only for pictures that go as photos.
     private func sendOutgoing(_ f: OutgoingFile, photo: Bool, caption: String) {
+        if photo && f.isVideo { return sendVideo(f, caption: caption) }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let thumb = photo && f.isImage ? Photos.makeThumb(f.url) : nil
             DispatchQueue.main.async { self?.sendPhoto(f.url, name: f.name, mime: f.mime, thumb: thumb, caption: caption) }
         }
     }
 
-    private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?, caption: String = "") {
+    /// A video that goes as a video: made portable and small enough, then sent with its first frame and length.
+    private func sendVideo(_ f: OutgoingFile, caption: String) {
+        toast("Готовим видео…")
+        Videos.prepare(f) { [weak self] video in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let video else { return self.toast("Видео не удалось подготовить: оно слишком длинное или в неизвестном формате") }
+                var thumb: (String, Int, Int)?
+                if let t = video.info?.thumb, let i = video.info { thumb = (t, i.width, i.height) }
+                self.sendPhoto(video.url, name: video.name, mime: video.mime, thumb: thumb, caption: caption, duration: video.info?.duration)
+            }
+        }
+    }
+
+    private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?, caption: String = "", duration: Int? = nil) {
         guard accountId == Core.shared.accountId else { try? FileManager.default.removeItem(at: url); return }
         var p: JSON = ["_account_id": accountId, "conversation_id": conversationId, "path": url.path, "mime": mime, "name": name]
         if !caption.isEmpty { p["caption"] = caption }
@@ -941,6 +992,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             p["width"] = t.1
             p["height"] = t.2
         }
+        if let duration { p["duration"] = duration }
         Core.shared.call("send_file", p) { [weak self] r in
             try? FileManager.default.removeItem(at: url)
             if self?.accountId == Core.shared.accountId, case .failure(let e) = r { self?.toast(e.message) }
@@ -968,12 +1020,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         var files: [OutgoingFile] = []
         for u in urls {
             let size = (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            if size > 25 * 1024 * 1024 { toast("Файл больше 25 МБ"); continue }
             let mime = UTType(filenameExtension: u.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+            // A video may be longer: it is re-encoded smaller before it is sent.
+            if size > 25 * 1024 * 1024 && !mime.hasPrefix("video/") { toast("Файл больше 25 МБ"); continue }
             files.append(OutgoingFile(url: u, name: u.lastPathComponent, mime: mime))
         }
         if files.isEmpty { pendingPick = nil; return }
-        deliver(files, photos: false)
+        deliver(files, photos: files.allSatisfy { $0.isVideo })
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { pendingPick = nil }
@@ -1045,7 +1098,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
         let s: String
         if m.str("kind") == "poll" { s = "Опрос: " + t }
-        else if let f = m.obj("file") { s = (isImage(m) ? "Фото" : "Файл " + f.str("name")) + (t.isEmpty ? "" : ": " + t) }
+        else if let f = m.obj("file") { s = (isImage(m) ? "Фото" : isVideo(m) ? "Видео" : "Файл " + f.str("name")) + (t.isEmpty ? "" : ": " + t) }
         else { s = t }
         return s.count > 120 ? String(s.prefix(119)) + "…" : s
     }
@@ -1361,7 +1414,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             if let back = navigationController?.interactivePopGestureRecognizer { c.prioritizeBackGesture(back) }
             c.bind(m, group: group, first: first, last: last)
             c.onRetry = { [weak self] in self?.retry(m) }
-            c.onPhoto = { [weak self] in self?.openPhoto(m) }
+            c.onPhoto = { [weak self] in if isVideo(m) { self?.openVideo(m) } else { self?.openPhoto(m) } }
             c.onProfile = { [weak self] in self?.navigationController?.pushViewController(PersonProfileViewController(userId:m.str("sender_user_id")),animated:!Theme.reducedMotion) }
             c.onMention = { [weak self] name in
                 guard let self else { return }
@@ -1426,6 +1479,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             if let u = URL(string: l) { acts.append(MenuAction(title: "Открыть ссылку: " + (u.host ?? l), icon: "safari") { UIApplication.shared.open(u) }) }
         }
         if isImage(m) { acts.append(MenuAction(title: "Открыть фото", icon: "photo") { [weak self] in self?.openPhoto(m) }) }
+        if isVideo(m) { acts.append(MenuAction(title: "Открыть видео", icon: "play.rectangle") { [weak self] in self?.openVideo(m) }) }
         let postable = ok && m.str("status") != "failed" && ["text", "file", "poll"].contains(m.str("kind"))
         if postable && conv.bool("can_pin") {
             let on = !m.bool("pinned")
@@ -1526,6 +1580,23 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         let photos = messages.filter { isImage($0) }
         let at = photos.firstIndex { $0.str("id") == m.str("id") }
         present(PhotoGalleryController(photos: at == nil ? [m] : photos, start: at ?? 0), animated: !Theme.reducedMotion)
+    }
+
+    /// Fetches and decrypts the video, then plays it in the system player.
+    private func openVideo(_ m: JSON) {
+        if m.obj("file")?.bool("downloaded") != true { toast("Загружаем видео…") }
+        Core.shared.call("download_file", ["message_id": m.str("id")]) { [weak self] r in
+            switch r {
+            case .failure(let e): self?.toast(e.message)
+            case .success(let v):
+                guard let self, let path = (v as? JSON)?.str("path"), !path.isEmpty else { return }
+                // The silent switch must not mute a video; a running call keeps its own audio session.
+                if CallManager.shared.call.isEmpty { try? AVAudioSession.sharedInstance().setCategory(.playback) }
+                let vc = AVPlayerViewController()
+                vc.player = AVPlayer(url: URL(fileURLWithPath: path))
+                self.present(vc, animated: !Theme.reducedMotion) { vc.player?.play() }
+            }
+        }
     }
 
     private func retry(_ m: JSON) {
@@ -1638,6 +1709,7 @@ final class BubbleCell: UITableViewCell {
     private let bubble = UIView()
     private let content = UIStackView()
     private let photo = UIImageView()
+    private let mark = VideoMarkView()
     private var photoW: NSLayoutConstraint!
     private var photoH: NSLayoutConstraint!
     private let inner = UIStackView()
@@ -1720,6 +1792,13 @@ final class BubbleCell: UITableViewCell {
         photo.layer.cornerCurve = .continuous
         photo.isUserInteractionEnabled = true
         photo.addGestureRecognizer(TapGesture { [weak self] in self?.onPhoto?() })
+        mark.isHidden = true
+        mark.translatesAutoresizingMaskIntoConstraints = false
+        photo.addSubview(mark)
+        NSLayoutConstraint.activate([
+            mark.topAnchor.constraint(equalTo: photo.topAnchor), mark.bottomAnchor.constraint(equalTo: photo.bottomAnchor),
+            mark.leadingAnchor.constraint(equalTo: photo.leadingAnchor), mark.trailingAnchor.constraint(equalTo: photo.trailingAnchor),
+        ])
         photoW = photo.widthAnchor.constraint(equalToConstant: 200)
         photoW.priority = UILayoutPriority(999)
         photoH = photo.heightAnchor.constraint(equalToConstant: 150)
@@ -1935,7 +2014,8 @@ final class BubbleCell: UITableViewCell {
             }
         } else { quote.isHidden = true }
         let f = m.obj("file")
-        let image = isImage(m)
+        let video = isVideo(m)
+        let image = isImage(m) || video
         photo.isHidden = !image
         content.layoutMargins = image ? UIEdgeInsets(top: 4, left: 4, bottom: 7, right: 4) : UIEdgeInsets(top: 9, left: 15, bottom: 7, right: 14)
         inner.layoutMargins = image ? UIEdgeInsets(top: 0, left: 11, bottom: 0, right: 10) : .zero
@@ -1950,7 +2030,13 @@ final class BubbleCell: UITableViewCell {
             photoW.isActive = true
             photoH.isActive = true
             let id = boundId
-            if let img = Photos.cache.object(forKey: id as NSString) {
+            mark.isHidden = !video
+            mark.length = video && f.int64("duration") > 0 ? Videos.clock(f.int64("duration")) : ""
+            photo.backgroundColor = video ? UIColor(red: 0.06, green: 0.09, blue: 0.13, alpha: 1) : nil
+            if video {
+                // Only the first frame is shown; the video itself is fetched when it is played.
+                photo.image = Photos.thumb(m)
+            } else if let img = Photos.cache.object(forKey: id as NSString) {
                 photo.image = img
             } else {
                 photo.image = Photos.thumb(m)
@@ -1960,6 +2046,8 @@ final class BubbleCell: UITableViewCell {
             photoW.isActive = false
             photoH.isActive = false
             photo.image = nil
+            photo.backgroundColor = nil
+            mark.isHidden = true
         }
         // Explicit wrap widths: the automatic one is the label's previous frame, so a reused
         // cell would wrap this message at the width of the message it showed before.

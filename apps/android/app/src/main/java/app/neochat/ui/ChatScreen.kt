@@ -150,6 +150,8 @@ private class MentionSpan(val name: String) : ClickableSpan() {
 
 fun isImage(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?.optBoolean("image") == true
 
+fun isVideo(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?.optBoolean("video") == true
+
 private fun votesText(n: Int): String {
     val m10 = n % 10
     val m100 = n % 100
@@ -228,13 +230,18 @@ object Photos {
         val deg = rotation(path)
         val (w, h) = if (deg == 90 || deg == 270) o.outHeight to o.outWidth else o.outWidth to o.outHeight
         val src = decode(path, 320) ?: return null
+        return encodeThumb(src)?.let { Triple(it, w, h) }
+    }
+
+    /** Shrinks the picture until its JPEG, as base64, is small enough for the encrypted envelope. */
+    fun encodeThumb(src: Bitmap): String? {
         for (side in intArrayOf(160, 120, 90)) {
             val k = side.toFloat() / maxOf(src.width, src.height)
             val small = Bitmap.createScaledBitmap(src, maxOf(1, (src.width * k).toInt()), maxOf(1, (src.height * k).toInt()), true)
             val out = java.io.ByteArrayOutputStream()
             small.compress(Bitmap.CompressFormat.JPEG, 55, out)
             val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-            if (b64.length <= 12000) return Triple(b64, w, h)
+            if (b64.length <= 12000) return b64
         }
         return null
     }
@@ -675,7 +682,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         val f = m.optJSONObject("file")
         val s = when {
             m.str("kind") == "poll" -> "Опрос: $t"
-            f != null -> (if (isImage(m)) "Фото" else "Файл " + f.str("name")) + if (t.isEmpty()) "" else ": $t"
+            f != null -> (if (isImage(m)) "Фото" else if (isVideo(m)) "Видео" else "Файл " + f.str("name")) + if (t.isEmpty()) "" else ": $t"
             else -> t
         }
         return if (s.length > 120) s.take(119) + "…" else s
@@ -1000,7 +1007,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private val fileMeta = ctx.label("", 12.5f, 400)
         private val fileAction = ImageView(ctx)
         private val text = ctx.label("", 15.5f)
-        private val photo = ImageView(ctx)
+        private val photo = PosterView(ctx)
         private val poll = LinearLayout(ctx)
         private val pollQuestion = ctx.label("", 16f, 700)
         private val pollInfo = ctx.label("", 12.5f)
@@ -1084,7 +1091,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             photo.clipToOutline = true
             photo.contentDescription = "Фото"
             photo.isClickable = true
-            photo.setOnClickListener { openPhoto(m) }
+            photo.setOnClickListener { if (isVideo(m)) openVideo(m) else openPhoto(m) }
             photo.setOnLongClickListener { menu(m, bubble); true }
             fileIcon.setOnClickListener { openFile(m) }
             fileAction.setOnClickListener { openFile(m) }
@@ -1124,7 +1131,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             bubble.isLongClickable = true
             bubble.setOnLongClickListener { menu(m, bubble); true }
             // A tap opens reactions and actions, like a long press; photos open the viewer.
-            bubble.setOnClickListener { tap { if (isImage(m)) openPhoto(m) else menu(m, bubble) } }
+            bubble.setOnClickListener { tap { if (isVideo(m)) openVideo(m) else if (isImage(m)) openPhoto(m) else menu(m, bubble) } }
             setOnClickListener { tap { menu(m, bubble) } }
             setOnLongClickListener { menu(m, bubble); true }
         }
@@ -1187,7 +1194,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 quoteText.text = if (rep.str("kind") == "file") "Файл" else rep.str("text").replace('\n', ' ')
             }
             val f = m.optJSONObject("file")
-            val image = isImage(m)
+            val video = isVideo(m)
+            val image = isImage(m) || video
             file.visibility = if (f != null && !image) VISIBLE else GONE
             photo.visibility = if (image) VISIBLE else GONE
             bubble.setPadding(if (image) dp(4) else dp(15), if (image) dp(4) else dp(9), if (image) dp(4) else dp(14), dp(7))
@@ -1204,9 +1212,20 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 plp.height = maxOf(dp(90), (ih * k).toInt())
                 photo.layoutParams = plp
                 val id = m.str("id")
-                val cached = Photos.full.get(id)
-                photo.setImageBitmap(cached ?: Photos.thumb(m))
-                if (cached == null && Prefs.autoloadPhotos(ctx)) Photos.load(m) { bmp -> if (m.str("id") == id) photo.setImageBitmap(bmp) }
+                val length = if (video && f.optLong("duration") > 0) Videos.clock(f.optLong("duration")) else ""
+                photo.video = video
+                photo.length = length
+                photo.contentDescription = if (video) "Видео" + if (length.isEmpty()) "" else ", $length" else "Фото"
+                if (video) {
+                    // Only the first frame is shown; the video itself is fetched when it is played.
+                    photo.setBackgroundColor(0xFF101722.toInt())
+                    photo.setImageBitmap(Photos.thumb(m))
+                } else {
+                    photo.background = null
+                    val cached = Photos.full.get(id)
+                    photo.setImageBitmap(cached ?: Photos.thumb(m))
+                    if (cached == null && Prefs.autoloadPhotos(ctx)) Photos.load(m) { bmp -> if (m.str("id") == id) photo.setImageBitmap(bmp) }
+                }
             }
             poll.visibility = if (kind == "poll") VISIBLE else GONE
             if (kind == "poll") bindPoll(m, fg, muted)
@@ -1273,7 +1292,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             retry.visibility = if (out && st == "failed") VISIBLE else GONE
             bubble.contentDescription = buildString {
                 append(m.str("sender_name")).append(", ").append(time.text).append(": ")
-                if (image) append("фото. ") else if (f != null) append("файл ").append(f.str("name")).append(". ")
+                if (video) append("видео. ") else if (image) append("фото. ") else if (f != null) append("файл ").append(f.str("name")).append(". ")
                 if (kind == "poll") append("опрос. ")
                 append(body)
                 if (out && statusText(m).isNotEmpty()) append(". ").append(statusText(m))
@@ -1368,6 +1387,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     // ---- photo viewer ----
 
     private var viewer: View? = null
+    private var viewerStop: (() -> Unit)? = null
 
     /** Opens the photo among all pictures of the chat; swiping left and right moves between them. */
     private fun openPhoto(m: JSONObject) {
@@ -1452,8 +1472,127 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private fun closeViewer() {
         val v = viewer ?: return
         viewer = null
+        viewerStop?.invoke()
+        viewerStop = null
         v.animate().cancel()
         v.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { root.removeView(v) }.start()
+    }
+
+    /** Fetches and decrypts the video, then plays it over the chat. */
+    private fun openVideo(m: JSONObject) {
+        if (m.optJSONObject("file")?.optBoolean("downloaded") != true) act.toast("Загружаем видео…")
+        CoreClient.call("download_file", JSONObject().put("message_id", m.str("id"))) { v, e ->
+            if (e != null) return@call act.toast(e.message)
+            showVideo(m, (v as JSONObject).str("path"))
+        }
+    }
+
+    /** The player over the chat: a tap pauses and resumes, the cross or Back closes it. */
+    private fun showVideo(m: JSONObject, path: String) {
+        closeViewer()
+        hideKeyboard()
+        val v = FrameLayout(ctx)
+        v.setBackgroundColor(0xF2040914.toInt())
+        v.isClickable = true
+        v.contentDescription = "Видео. Нажмите, чтобы остановить или продолжить"
+        val player = android.widget.VideoView(ctx)
+        player.keepScreenOn = true
+        v.addView(player, flp(MATCH, MATCH, Gravity.CENTER))
+
+        fun round(icon: Int, label: String, size: Int) = ImageView(ctx).apply {
+            setImageResource(icon)
+            setColorFilter(0xFFFFFFFF.toInt())
+            contentDescription = label
+            val pad = dp((size - 24) / 2)
+            setPadding(pad, pad, pad, pad)
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x66000000) }
+            isClickable = true
+            isFocusable = true
+        }
+        val toggle = round(R.drawable.ic_pause, "Пауза", 44)
+        val seek = android.widget.SeekBar(ctx)
+        seek.progressTintList = android.content.res.ColorStateList.valueOf(Theme.p.accent)
+        seek.thumbTintList = android.content.res.ColorStateList.valueOf(Theme.p.accent)
+        seek.contentDescription = "Перемотка"
+        val time = TextView(ctx)
+        time.setTextColor(0xFFFFFFFF.toInt())
+        time.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        time.typeface = weightFace(500)
+        val total = m.optJSONObject("file")?.optLong("duration") ?: 0L
+        time.text = Videos.clock(0) + " / " + Videos.clock(total)
+        val bar = LinearLayout(ctx)
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.setPadding(dp(6), dp(6), dp(16), dp(6))
+        bar.background = GradientDrawable().apply { setColor(0x80000000.toInt()); cornerRadius = ctx.dpf(28) }
+        bar.addView(toggle, lp(dp(44), dp(44)))
+        bar.addView(seek, lp(0, WRAP, 1f).apply { marginStart = dp(6); marginEnd = dp(10) })
+        bar.addView(time, lp(WRAP, WRAP))
+        v.addView(bar, flp(MATCH, WRAP, Gravity.BOTTOM).apply { setMargins(dp(12), 0, dp(12), column.paddingBottom + dp(14)) })
+        val close = round(R.drawable.ic_close, "Закрыть", 44)
+        close.setOnClickListener { closeViewer() }
+        v.addView(close, flp(dp(44), dp(44), Gravity.TOP or Gravity.END).apply { setMargins(0, column.paddingTop + dp(10), dp(12), 0) })
+
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        var dragging = false
+        var length = 0
+        val tick = object : Runnable {
+            override fun run() {
+                if (!dragging && length > 0) {
+                    seek.progress = player.currentPosition
+                    time.text = Videos.clock(player.currentPosition.toLong()) + " / " + Videos.clock(length.toLong())
+                }
+                handler.postDelayed(this, 250)
+            }
+        }
+        fun playing(on: Boolean) = toggle.apply {
+            setImageResource(if (on) R.drawable.ic_pause else R.drawable.ic_play)
+            contentDescription = if (on) "Пауза" else "Играть"
+        }
+        fun flip() {
+            if (player.isPlaying) {
+                player.pause()
+                playing(false)
+            } else {
+                if (length > 0 && player.currentPosition >= length - 100) player.seekTo(0)
+                player.start()
+                playing(true)
+            }
+        }
+        player.setOnPreparedListener { mp ->
+            length = mp.duration
+            seek.max = length
+            player.start()
+            handler.post(tick)
+        }
+        player.setOnCompletionListener {
+            playing(false)
+            seek.progress = seek.max
+        }
+        player.setOnErrorListener { _, _, _ ->
+            act.toast("Не удалось воспроизвести видео")
+            closeViewer()
+            true
+        }
+        player.setOnClickListener { flip() }
+        toggle.setOnClickListener { flip() }
+        seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                player.seekTo(progress)
+                time.text = Videos.clock(progress.toLong()) + " / " + Videos.clock(length.toLong())
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar) { dragging = true }
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar) { dragging = false }
+        })
+        player.setVideoPath(path)
+        viewerStop = {
+            handler.removeCallbacks(tick)
+            player.stopPlayback()
+        }
+        root.addView(v, flp(MATCH, MATCH))
+        viewer = v
+        v.alpha = 0f
+        v.animate().alpha(1f).setDuration(Theme.ms(180)).start()
     }
 
     /** Opens a link or a person's tag under the finger; any other tap falls through to the bubble. */
@@ -1540,6 +1679,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (android.os.Build.VERSION.SDK_INT < 33) act.toast("Текст скопирован")
         }
         if (isImage(m)) pm.add("Открыть фото") { openPhoto(m) }
+        if (isVideo(m)) pm.add("Открыть видео") { openVideo(m) }
         val postable = ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll")
         if (postable && conv.optBoolean("can_pin")) {
             val on = !m.optBoolean("pinned")
@@ -1686,7 +1826,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         attach.setOnClickListener {
             edit.clearFocus()
             hideKeyboard()
-            val pm = PopupMenu(act, attach).add("Фото") { pickPhotos() }.add("Камера") { takePhoto() }.add("Файл") { pickFile() }
+            val pm = PopupMenu(act, attach).add("Фото") { pickPhotos() }.add("Видео") { pickVideos() }.add("Камера") { takePhoto() }.add("Файл") { pickFile() }
             if (conv.optBoolean("can_polls") && conv.str("kind") != "direct") pm.add("Опрос") { Dialogs.newPoll(act, conversationId) }
             pm.show(above = true)
         }
@@ -1779,7 +1919,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         composerBg.radius = ctx.dpf(24)
         composerBox.invalidate()
         (replyLine.background as GradientDrawable).setColor(Theme.p.accent)
-        val t = m.str("text").replace("\n", " ").ifEmpty { if (isImage(m)) "Фото" else "Файл" }
+        val t = m.str("text").replace("\n", " ").ifEmpty { if (isImage(m)) "Фото" else if (isVideo(m)) "Видео" else "Файл" }
         replyName.text = "Изменение сообщения"
         replyText.text = t
         replyBar.contentDescription = "Изменение сообщения: $t"
@@ -1817,6 +1957,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         if (m != null) {
             val t = when {
                 isImage(m) -> "Фото"
+                isVideo(m) -> "Видео"
                 m.str("kind") == "file" -> "Файл"
                 m.str("kind") == "poll" -> "Опрос: " + m.str("text")
                 else -> m.str("text").replace('\n', ' ')
@@ -1863,12 +2004,18 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
     }
 
-    private fun pickUris(photos: Boolean, got: (List<Pick>) -> Unit) {
-        val intent = if (photos) {
-            if (android.os.Build.VERSION.SDK_INT >= 33) Intent(MediaStore.ACTION_PICK_IMAGES).putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, 10)
-            else Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        } else {
-            Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+    private enum class Kind { PHOTO, VIDEO, FILE }
+
+    private fun pickUris(kind: Kind, got: (List<Pick>) -> Unit) {
+        val intent = when (kind) {
+            Kind.PHOTO ->
+                if (android.os.Build.VERSION.SDK_INT >= 33) Intent(MediaStore.ACTION_PICK_IMAGES).putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, 10)
+                else Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            Kind.VIDEO ->
+                if (android.os.Build.VERSION.SDK_INT >= 33) Intent(MediaStore.ACTION_PICK_IMAGES).setType("video/*").putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, 5)
+                else Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("video/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            Kind.FILE ->
+                Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
         act.startForResult(intent) { code, data ->
             if (code != Activity.RESULT_OK || data == null) return@startForResult
@@ -1879,17 +2026,26 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
     }
 
-    private fun pickPhotos() = pickUris(true) { attach(it, true) }
+    private fun pickPhotos() = pickUris(Kind.PHOTO) { attach(it, true) }
 
-    private fun pickFile() = pickUris(false) { attach(it, false) }
+    private fun pickVideos() = pickUris(Kind.VIDEO) { attach(it, true) }
+
+    private fun pickFile() = pickUris(Kind.FILE) { attach(it, false) }
 
     /** Everything that is about to be sent waits in the attach window: preview, "as a file", caption. */
     private fun attach(picks: List<Pick>, photos: Boolean) {
         if (picks.isEmpty() || composer.visibility != View.VISIBLE) return
         val big = picks.firstOrNull { it.size > 25L * 1024 * 1024 }
-        if (big != null) return act.toast("Файл больше 25 МБ: ${big.name}")
+        if (big != null) return act.toast(if (big.video) "Видео больше 25 МБ: ${big.name}. Обрежьте или сожмите его" else "Файл больше 25 МБ: ${big.name}")
         hideKeyboard()
-        AttachSheet(act, picks, photos, { added -> pickUris(photos && picks.all { it.image }) { added(it) } }) { chosen, asPhotos, caption ->
+        // A video picked as a document still goes as a video unless "as a file" is switched on.
+        val media = photos || picks.all { it.video }
+        val again = when {
+            picks.all { it.video } -> Kind.VIDEO
+            photos && picks.all { it.image } -> Kind.PHOTO
+            else -> Kind.FILE
+        }
+        AttachSheet(act, picks, media, { added -> pickUris(again) { added(it) } }) { chosen, asPhotos, caption ->
             chosen.forEachIndexed { n, p -> sendPick(p, asPhotos, if (n == 0) caption else "") }
         }.show()
     }
@@ -1908,22 +2064,27 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val tmp = File.createTempFile("send", ".bin", dir)
             val copied = runCatching { cr.openInputStream(p.uri)!!.use { i -> tmp.outputStream().use { i.copyTo(it) } } }.isSuccess
             val thumb = if (copied && photo && p.image) Photos.makeThumb(tmp.absolutePath) else null
+            val clip = if (copied && photo && p.video) Videos.info(tmp.absolutePath) else null
             act.runOnUiThread {
                 if (!copied) {
                     tmp.delete()
                     return@runOnUiThread act.toast("Не удалось прочитать файл")
                 }
-                dispatchFile(tmp, p.mime, p.name, thumb, caption)
+                dispatchFile(tmp, p.mime, p.name, thumb, caption, clip)
             }
         }.start()
     }
 
     /** Hands a prepared file to the core and removes it afterwards. */
-    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?, caption: String = "") {
+    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?, caption: String = "", clip: VideoInfo? = null) {
         if (accountId != CoreClient.accountId) { tmp.delete(); return }
         val p = JSONObject().put("_account_id", accountId).put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
         if (caption.isNotEmpty()) p.put("caption", caption)
         if (thumb != null) p.put("thumb", thumb.first).put("width", thumb.second).put("height", thumb.third)
+        if (clip != null) {
+            clip.thumb?.let { p.put("thumb", it) }
+            p.put("width", clip.width).put("height", clip.height).put("duration", clip.durationMs)
+        }
         CoreClient.call("send_file", p) { _, e ->
             tmp.delete()
             if (e != null && accountId == CoreClient.accountId) act.toast(e.message)

@@ -43,6 +43,16 @@ pub struct FileMeta {
     pub w: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub h: Option<u32>,
+    /// Videos: the length in milliseconds. The first frame travels as `thumb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u64>,
+}
+
+impl FileMeta {
+    /// A video sent as a video: it brings a poster or a length. Without them it is an ordinary file.
+    pub fn is_video(&self) -> bool {
+        self.mime.starts_with("video/") && (self.thumb.is_some() || self.duration.is_some())
+    }
 }
 
 /// Thumbnails travel inside the E2EE payload, so they must stay small.
@@ -228,12 +238,14 @@ impl Inner {
             thumb: p["thumb"].as_str().filter(|t| !t.is_empty() && t.len() <= MAX_THUMB_B64).map(str::to_string),
             w: p["width"].as_u64().map(|v| v.min(100_000) as u32),
             h: p["height"].as_u64().map(|v| v.min(100_000) as u32),
+            duration: p["duration"].as_u64().filter(|_| p["mime"].as_str().is_some_and(|m| m.starts_with("video/"))).map(|v| v.min(86_400_000)),
         });
         let photo = pl.file.as_ref().is_some_and(|f| f.thumb.is_some() && f.mime.starts_with("image/"));
+        let video = pl.file.as_ref().is_some_and(FileMeta::is_video);
         pl.text = p["caption"].as_str().map(str::to_string);
         // The sender keeps its own encrypted copy for local viewing.
         std::fs::copy(&enc_path, self.data_dir.join("files").join(format!("{}.enc", pl.mid)))?;
-        let preview = if photo { "🖼 Фото".to_string() } else { format!("📎 {name}") };
+        let preview = if photo { "🖼 Фото".to_string() } else if video { "🎬 Видео".to_string() } else { format!("📎 {name}") };
         self.enqueue(&pl, true, Some(&enc_path), &preview)?;
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         self.emit(json!({"type": "conversations_changed"}));
@@ -668,6 +680,7 @@ impl Inner {
         }
         let pv = match &pl.file {
             Some(f) if f.thumb.is_some() && f.mime.starts_with("image/") => "🖼 Фото".to_string(),
+            Some(f) if f.is_video() => "🎬 Видео".to_string(),
             Some(f) => format!("📎 {}", f.name),
             None if kind == "poll" => format!("📊 {}", pl.text.as_deref().unwrap_or("")),
             None => preview(pl.text.as_deref().unwrap_or("")),

@@ -853,6 +853,52 @@ fn profile_style_reaches_other_people() {
 }
 
 #[test]
+fn video_keeps_poster_and_length() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let (alice, _) = register(&e, &aname);
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let contact = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": contact["user_id"]}))["id"].as_str().unwrap().to_string();
+    bob.call("resolve_contact", json!({"username": aname}));
+    bob.call("open_direct", json!({"user_id": uid(&alice)}));
+
+    let src = std::env::temp_dir().join(format!("nc-e2e-{}.mp4", uuid::Uuid::new_v4()));
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+    let sent = alice.call(
+        "send_file",
+        json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "video/mp4", "name": "clip.mp4",
+               "thumb": "AAAA", "width": 1920, "height": 1080, "duration": 12_345, "caption": "смотри"}),
+    );
+    assert_eq!(sent["file"]["video"], true, "{sent:?}");
+    assert_eq!(sent["file"]["duration"], 12_345);
+    assert_eq!(sent["file"]["image"], false);
+    // Sent "as a file", a video has neither poster nor length and stays an ordinary file.
+    let plain = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "video/mp4", "name": "plain.mp4"}));
+    assert_eq!(plain["file"]["video"], false, "{plain:?}");
+    // A duration without a video type is dropped.
+    let other = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "audio/mpeg", "duration": 5000}));
+    assert!(other["file"]["duration"].is_null() && other["file"]["video"] == false, "{other:?}");
+    alice.sync();
+    bob.sync();
+
+    let got = bob.messages(&cid);
+    let m = got.iter().find(|m| m["file"]["name"] == "clip.mp4").unwrap_or_else(|| panic!("video missing: {got:?}"));
+    assert_eq!(m["file"]["video"], true);
+    assert_eq!(m["file"]["duration"], 12_345);
+    assert_eq!(m["file"]["thumb"], "AAAA");
+    assert_eq!((m["file"]["width"].as_u64(), m["file"]["height"].as_u64()), (Some(1920), Some(1080)));
+    assert_eq!(m["text"], "смотри");
+    // The last message of the chat is the audio file; the video was the one before it.
+    let chats = alice.call("list_conversations", json!({}));
+    assert!(chats.as_array().unwrap().iter().any(|c| c["id"] == cid && c["last_preview"].as_str().unwrap_or("").starts_with("📎")), "{chats:?}");
+    let dl = bob.call("download_file", json!({"message_id": m["id"]}));
+    assert_eq!(std::fs::read(dl["path"].as_str().unwrap()).unwrap(), data);
+}
+
+#[test]
 fn pinned_messages_and_saved_chat() {
     let Some(e) = env() else { return };
     let (an, bn) = (uname("pa"), uname("pb"));
