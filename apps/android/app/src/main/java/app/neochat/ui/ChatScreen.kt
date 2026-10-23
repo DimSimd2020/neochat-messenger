@@ -1399,6 +1399,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                     if (e != null) act.toast(e.message)
                 }
             }
+        if (!ok) pm.add("Повторить расшифровку") { retryDecrypt(m) }
         pm.add("Удалить у себя", danger = true) {
             CoreClient.call("delete_local_message", JSONObject().put("message_id", m.str("id"))) { _, e ->
                 if (e != null) act.toast(e.message)
@@ -1409,6 +1410,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun retry(m: JSONObject) {
         CoreClient.call("retry_message", JSONObject().put("message_id", m.str("id"))) { _, e -> if (e != null) act.toast(e.message) }
+    }
+
+    private fun retryDecrypt(m: JSONObject) {
+        CoreClient.call("retry_decrypt", JSONObject().put("message_id", m.str("id"))) { v, e ->
+            if (e != null) act.toast(e.message)
+            else if ((v as? JSONObject)?.optBoolean("decrypted") != true) act.toast((v as? JSONObject)?.str("message").orEmpty())
+        }
     }
 
     private fun openFile(m: JSONObject) {

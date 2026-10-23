@@ -1,7 +1,9 @@
 //! End-to-end tests against a running NeoChat server.
 //!
-//! Run through `scripts/e2e.sh`, which starts PostgreSQL, the Go server and
-//! passes NEOCHAT_E2E_SERVER.
+//! Registration needs a confirmed mailbox, so run it through the Go test server, which confirms
+//! addresses at example.test: `NEOCHAT_TEST_DATABASE_URL` (a disposable database, it is wiped) and
+//! `NEOCHAT_NATIVE_TEST_COMMAND='["<path to this test binary>", "<test name>"]' go test ./internal/app -run TestNativeEmailFlow`
+//! in `server`; the server address reaches the tests as NEOCHAT_E2E_SERVER.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -77,9 +79,16 @@ impl Client {
 
 fn register(e: &Env, name: &str) -> (Client, String) {
     let c = Client::new();
+    // Registration needs a confirmed mailbox; the test server confirms addresses at example.test by itself.
+    let mail = c.call("registration_email_start", json!({"server": e.server, "email": format!("{name}@example.test")}));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while c.call("registration_email_status", json!({"server": e.server, "ticket": mail["ticket"]}))["verified"] != true {
+        assert!(std::time::Instant::now() < deadline, "the test mailbox did not confirm {name}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let res = c.call(
         "register",
-        json!({"server": e.server, "username": name, "display_name": "Тест", "password": "correct horse battery", "device_name": "test", "platform": "windows"}),
+        json!({"server": e.server, "username": name, "display_name": "Тест", "password": "correct horse battery", "device_name": "test", "platform": "windows", "email_ticket": mail["ticket"]}),
     );
     assert!(res["recovery_code"].as_str().unwrap().len() > 40);
     (c, res["recovery_code"].as_str().unwrap().to_string())
@@ -187,6 +196,96 @@ fn direct_chat_restart_receipts_and_dedupe() {
     bob.core.as_ref().unwrap().inner.db().conn.execute("DELETE FROM kv WHERE k='cursor'", []).unwrap();
     bob.sync();
     assert_eq!(bob.texts(&cid).len(), 3);
+}
+
+/// A message from a device the receiver cannot vouch for becomes a placeholder, but its ciphertext is
+/// kept: once the device is trusted, decryption by hand, on schedule or from the server's feed brings it back.
+#[test]
+fn undecryptable_messages_are_retried() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let bname = uname("bob");
+    let (alice, _) = register(&e, &aname);
+    let (bob, _) = register(&e, &bname);
+    let aid = uid(&alice);
+    // Bob learns Alice's device from her profile; Alice opens the chat.
+    bob.call("resolve_contact", json!({"username": aname}));
+    let contact = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": contact["user_id"]}))["id"].as_str().unwrap().to_string();
+    let identity = |c: &Client| -> Vec<u8> {
+        c.core.as_ref().unwrap().inner.db().conn.query_row("SELECT identity_key FROM known_devices WHERE user_id=?1", [&aid], |r| r.get(0)).unwrap()
+    };
+    let set_identity = |c: &Client, key: &[u8]| {
+        c.core.as_ref().unwrap().inner.db().conn.execute("UPDATE known_devices SET identity_key=?2 WHERE user_id=?1", rusqlite::params![aid, key]).unwrap();
+    };
+    let count = |c: &Client, table: &str| -> i64 {
+        c.core.as_ref().unwrap().inner.db().conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+    };
+    let placeholders = |c: &Client| -> Vec<Value> { c.messages(&cid).into_iter().filter(|m| m["kind"] == "undecryptable").collect() };
+
+    let real = identity(&bob);
+    let wrong = vec![5u8; real.len()];
+
+    // By hand: two messages arrive while Alice's device is not trusted.
+    set_identity(&bob, &wrong);
+    alice.call("send_text", json!({"conversation_id": cid, "text": "one"}));
+    alice.call("send_text", json!({"conversation_id": cid, "text": "two"}));
+    alice.sync();
+    bob.sync();
+    assert_eq!(placeholders(&bob).len(), 2, "{:?}", bob.messages(&cid));
+    assert_eq!(count(&bob, "undecrypted"), 2);
+    let first = placeholders(&bob)[0]["id"].as_str().unwrap().to_string();
+    let again = bob.call("retry_decrypt", json!({"message_id": first}));
+    assert_eq!(again["decrypted"], false, "still untrusted");
+    assert!(again["message"].as_str().unwrap().starts_with("Пока не получилось: "), "the reason is reported: {again}");
+    assert_eq!(placeholders(&bob).len(), 2);
+    set_identity(&bob, &real);
+    assert_eq!(bob.call("retry_decrypt", json!({"message_id": first}))["decrypted"], true);
+    assert_eq!(bob.texts(&cid), vec!["one", "two"], "{:?}", bob.messages(&cid));
+    assert!(placeholders(&bob).is_empty());
+    assert_eq!(count(&bob, "undecrypted"), 0);
+
+    // On schedule: the retry is not due yet, then it is.
+    set_identity(&bob, &wrong);
+    alice.call("send_text", json!({"conversation_id": cid, "text": "three"}));
+    alice.sync();
+    bob.sync();
+    assert_eq!(placeholders(&bob).len(), 1);
+    set_identity(&bob, &real);
+    bob.sync();
+    assert_eq!(placeholders(&bob).len(), 1, "the 20 minutes have not passed");
+    bob.core.as_ref().unwrap().inner.db().conn.execute("UPDATE undecrypted SET next_at=0", []).unwrap();
+    bob.sync();
+    assert!(placeholders(&bob).is_empty(), "{:?}", bob.messages(&cid));
+    assert_eq!(bob.texts(&cid).last().unwrap(), "three");
+
+    // A placeholder from before the queue existed has no ciphertext: the feed supplies it again.
+    set_identity(&bob, &wrong);
+    alice.call("send_text", json!({"conversation_id": cid, "text": "four"}));
+    alice.sync();
+    bob.sync();
+    assert_eq!(placeholders(&bob).len(), 1);
+    {
+        let db = bob.core.as_ref().unwrap().inner.db();
+        db.conn.execute("DELETE FROM undecrypted", []).unwrap();
+        db.conn.execute("DELETE FROM kv WHERE k='undecrypted_backfill'", []).unwrap();
+    }
+    set_identity(&bob, &real);
+    let old = placeholders(&bob)[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(bob.call("retry_decrypt", json!({"message_id": old}))["decrypted"], true);
+    assert_eq!(bob.texts(&cid).last().unwrap(), "four");
+
+    // Deleting a placeholder drops its queue row, and nothing comes back later.
+    set_identity(&bob, &wrong);
+    alice.call("send_text", json!({"conversation_id": cid, "text": "five"}));
+    alice.sync();
+    bob.sync();
+    let gone = placeholders(&bob)[0]["id"].as_str().unwrap().to_string();
+    bob.call("delete_local_message", json!({"message_id": gone}));
+    set_identity(&bob, &real);
+    bob.call("retry_decrypt", json!({"message_id": "none"}));
+    assert_eq!(count(&bob, "undecrypted"), 0);
+    assert!(!bob.texts(&cid).contains(&"five".to_string()));
 }
 
 #[test]

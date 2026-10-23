@@ -10,7 +10,7 @@ use futures::executor::block_on;
 use libsignal_protocol::{
     CiphertextMessage, CiphertextMessageType, GenericSignedPreKey, PreKeySignalMessage, SignalMessage, message_decrypt,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::engine::{Inner, STATE_CONNECTING, STATE_OFFLINE, STATE_ONLINE, s};
@@ -22,6 +22,11 @@ use crate::store::{SignalStore, kv_get_str, kv_set, now_ms};
 pub const SYSTEM_CHAT: &str = "neochat-system";
 const SIGNED_PREKEY_ROTATE_MS: i64 = 7 * 24 * 3600 * 1000;
 const SIGNED_PREKEY_KEEP_MS: i64 = 30 * 24 * 3600 * 1000;
+/// A message that could not be decrypted is tried again every 20 minutes for a day; then only by hand.
+const DECRYPT_RETRY_MS: i64 = 20 * 60 * 1000;
+const DECRYPT_RETRY_MAX: i64 = 72;
+/// The server keeps the event feed for 30 days; an older ciphertext is gone for good.
+const DECRYPT_KEEP_MS: i64 = 30 * 24 * 3600 * 1000;
 
 #[derive(Default)]
 struct CycleStats {
@@ -76,6 +81,12 @@ impl Inner {
             // Outgoing first: a just-typed message should not wait for the incoming feed.
             self.flush_outbox()?;
             let n = self.sync_events()?;
+            // Messages that could not be decrypted get another try when it is due.
+            for r in [self.backfill_undecrypted(), self.retry_undecrypted(false)] {
+                if let Err(e @ Error::Network(_)) = r {
+                    return Err(e);
+                }
+            }
             self.flush_outbox()?;
             // Contacts, pins and preferences from the other own devices.
             if let Err(e @ Error::Network(_)) = self.sync_account_state() {
@@ -139,7 +150,7 @@ impl Inner {
             return Ok(());
         }
         match ev["kind"].as_str().unwrap_or("") {
-            "message" => self.handle_message(ev, stats),
+            "message" => self.handle_message(ev, stats, false),
             "membership" => {
                 let cid = ev["payload"]["conversation_id"].as_str().unwrap_or_default().to_string();
                 match self.fetch_conversation(&cid) {
@@ -264,7 +275,8 @@ impl Inner {
         Ok(())
     }
 
-    fn handle_message(self: &Arc<Self>, ev: &Value, stats: &mut CycleStats) -> Result<()> {
+    /// `retry` runs an event again whose decryption failed: its placeholder is replaced by the message.
+    fn handle_message(self: &Arc<Self>, ev: &Value, stats: &mut CycleStats, retry: bool) -> Result<()> {
         let event_id = s(ev, "event_id")?.to_string();
         let conv = s(ev, "conversation_id")?.to_string();
         let sender = s(ev, "sender_user_id")?.to_string();
@@ -290,8 +302,12 @@ impl Inner {
 
         let mut db = self.db();
         let tx = db.conn.transaction()?;
-        let done: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM processed WHERE event_id=?1)", [&event_id], |r| r.get(0))?;
-        if done {
+        let skip: bool = if retry {
+            !tx.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND kind='undecryptable')", [s(ev, "message_id")?], |r| r.get(0))?
+        } else {
+            tx.query_row("SELECT EXISTS(SELECT 1 FROM processed WHERE event_id=?1)", [&event_id], |r| r.get(0))?
+        };
+        if skip {
             return Ok(());
         }
         let decrypted: Result<Vec<u8>> = (|| {
@@ -324,14 +340,27 @@ impl Inner {
         let payload = payload.map(|p| {
             if crate::groups::may_post(&tx, &conv, &sender, &p.kind) { Some(p) } else { None }
         });
+        if retry && payload.is_ok() {
+            tx.execute("DELETE FROM messages WHERE id=?1 AND kind='undecryptable'", [s(ev, "message_id")?])?;
+            tx.execute("DELETE FROM undecrypted WHERE message_id=?1", [s(ev, "message_id")?])?;
+            changed_conv = true;
+        }
         match payload {
             Ok(None) => {}
+            Err(e) if retry => {
+                tx.execute("UPDATE messages SET error=?2 WHERE id=?1 AND kind='undecryptable'", params![s(ev, "message_id")?, e.to_string()])?;
+            }
             Err(e) => {
-                // Kept as a diagnosable placeholder; the cursor still advances.
+                // Kept as a diagnosable placeholder; the cursor still advances. The event itself is
+                // kept too, so decryption can be tried again.
                 tx.execute(
                     "INSERT OR IGNORE INTO messages(id, conversation_id, sender_user_id, sender_device_id, outgoing, kind, body, status, error, sent_at)
                      VALUES (?1, ?2, ?3, ?4, 0, 'undecryptable', '', 'received', ?5, ?6)",
                     params![s(ev, "message_id")?, conv, sender, sdev, e.to_string(), now],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO undecrypted(message_id, event, next_at, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![s(ev, "message_id")?, ev.to_string(), now + DECRYPT_RETRY_MS, now],
                 )?;
                 changed_conv = true;
             }
@@ -469,6 +498,100 @@ impl Inner {
             self.emit(json!({"type": "notify", "conversation_id": conv, "title": title, "text":if mention { "Вас упомянули" } else { "Новое сообщение" }}));
         }
         Ok(())
+    }
+
+    /// Tries messages again that could not be decrypted: the due ones, or all of them with `force`.
+    /// Oldest first, because a later message may rely on the session an earlier one creates.
+    fn retry_undecrypted(self: &Arc<Self>, force: bool) -> Result<()> {
+        let now = now_ms();
+        let queued: Vec<(String, String)> = {
+            let db = self.db();
+            // Forget rows whose placeholder is gone (deleted by the user, history reset) or whose event the server no longer holds.
+            db.conn.execute(
+                "DELETE FROM undecrypted WHERE created_at < ?1 OR NOT EXISTS(SELECT 1 FROM messages WHERE id=undecrypted.message_id AND kind='undecryptable')",
+                [now - DECRYPT_KEEP_MS],
+            )?;
+            let mut st = db.conn.prepare("SELECT message_id, event FROM undecrypted WHERE ?1 OR next_at <= ?2 ORDER BY created_at, rowid")?;
+            st.query_map(params![force, now], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?
+        };
+        let mut stats = CycleStats::default();
+        for (id, raw) in queued {
+            if let Ok(ev) = serde_json::from_str::<Value>(&raw) {
+                if let Err(e @ Error::Network(_)) = self.handle_message(&ev, &mut stats, true) {
+                    return Err(e);
+                }
+            }
+            // A row that is still there failed again: next try in 20 minutes, after a day only by hand.
+            self.db().conn.execute(
+                "UPDATE undecrypted SET attempts=attempts+1, next_at=CASE WHEN attempts+1>=?2 THEN ?3 ELSE ?4 END WHERE message_id=?1",
+                params![id, DECRYPT_RETRY_MAX, i64::MAX, now_ms() + DECRYPT_RETRY_MS],
+            )?;
+        }
+        for (conv, ids) in std::mem::take(&mut stats.receipts) {
+            self.enqueue_receipt(&conv, "delivered", ids)?;
+        }
+        Ok(())
+    }
+
+    /// Placeholders made before the retry queue existed kept no ciphertext. The server still holds their
+    /// events, so the recent feed is read once more and the matching events are queued.
+    fn backfill_undecrypted(self: &Arc<Self>) -> Result<()> {
+        if kv_get_str(&self.db().conn, "undecrypted_backfill")?.is_some() {
+            return Ok(());
+        }
+        let mut wanted: std::collections::BTreeSet<String> = {
+            let db = self.db();
+            let mut st = db.conn.prepare("SELECT id FROM messages WHERE kind='undecryptable' AND id NOT IN (SELECT message_id FROM undecrypted)")?;
+            st.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?
+        };
+        let cursor = kv_get_str(&self.db().conn, "cursor")?.unwrap_or_default();
+        let head = cursor.split_once('.').and_then(|(inc, n)| Some((inc.to_string(), n.parse::<i64>().ok()?)));
+        if let Some((incarnation, head)) = head.filter(|_| !wanted.is_empty()) {
+            // A window that reaches past the pruned part of the feed is refused: take a shorter one.
+            'window: for back in [5000, 1250, 300, 75] {
+                let mut cur = format!("{incarnation}.{}", (head - back).max(0));
+                loop {
+                    let res = match self.authed("GET", &format!("/v1/sync?cursor={cur}&limit=100"), None) {
+                        Err(e) if e.is_api("cursor_expired") => continue 'window,
+                        Err(e) if e.is_api("sync_reset_required") => break 'window,
+                        r => r?,
+                    };
+                    for ev in res["events"].as_array().cloned().unwrap_or_default() {
+                        let id = ev["message_id"].as_str().unwrap_or_default();
+                        if ev["kind"] == "message" && wanted.remove(id) {
+                            self.db().conn.execute(
+                                "INSERT OR IGNORE INTO undecrypted(message_id, event, next_at, created_at) VALUES (?1, ?2, 0, ?3)",
+                                params![id, ev.to_string(), now_ms()],
+                            )?;
+                        }
+                    }
+                    match res["next_cursor"].as_str() {
+                        Some(next) if res["has_more"].as_bool().unwrap_or(false) && !wanted.is_empty() => cur = next.to_string(),
+                        _ => break 'window,
+                    }
+                }
+            }
+        }
+        kv_set(&self.db().conn, "undecrypted_backfill", b"1")
+    }
+
+    /// "Retry decryption" on a message: everything queued is tried now.
+    pub fn retry_decrypt(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let id = s(p, "message_id")?;
+        let _g = self.cycle_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.backfill_undecrypted()?;
+        self.retry_undecrypted(true)?;
+        // The placeholder is gone once the message is decrypted; otherwise the reason it keeps is shown.
+        let left: Option<Option<String>> =
+            self.db().conn.query_row("SELECT error FROM messages WHERE id=?1 AND kind='undecryptable'", [id], |r| r.get(0)).optional()?;
+        Ok(match left {
+            None => json!({"decrypted": true}),
+            Some(reason) => {
+                let reason: String = reason.unwrap_or_default().chars().take(160).collect();
+                let again = "Попробуем снова через 20 минут";
+                json!({"decrypted": false, "message": if reason.is_empty() { format!("Пока не получилось. {again}") } else { format!("Пока не получилось: {reason}. {again}") }})
+            }
+        })
     }
 
     /// Keeps enough one-time prekeys on the server and rotates the signed prekey.

@@ -159,6 +159,11 @@ impl Db {
             CREATE TABLE IF NOT EXISTS reactions (
                 message_id TEXT NOT NULL, user_id TEXT NOT NULL, emoji TEXT NOT NULL, at INTEGER NOT NULL,
                 PRIMARY KEY (message_id, user_id)
+            );
+            -- Events that could not be decrypted, kept whole so decryption can be tried again.
+            CREATE TABLE IF NOT EXISTS undecrypted (
+                message_id TEXT PRIMARY KEY, event TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, created_at INTEGER NOT NULL
             );",
         )?;
         Ok(Db { conn })

@@ -1725,6 +1725,15 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
                     emit toast(e.message);
             });
         });
+    if (kind == "undecryptable")
+        menu->addAction(QStringLiteral("Повторить расшифровку"), this, [this, m] {
+            Core::instance()->call("retry_decrypt", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &v, const CoreError &e) {
+                if (!e.ok())
+                    emit toast(e.message);
+                else if (!v.toObject().value("decrypted").toBool())
+                    emit toast(v.toObject().value("message").toString());
+            });
+        });
     menu->addAction(QStringLiteral("Удалить у себя"), this, [this, m] {
         Core::instance()->call("delete_local_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
             if (!e.ok())
