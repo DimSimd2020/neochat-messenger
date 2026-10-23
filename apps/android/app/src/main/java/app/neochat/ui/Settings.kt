@@ -120,6 +120,7 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
             slider.setValue(Theme.mode.ordinal, false)
             slider.onChange = { Theme.setMode(ctx, Theme.Mode.entries[it]) }
             addView(slider, lp().apply { setMargins(dp(10), dp(4), dp(10), 0) })
+            addView(nav(R.drawable.ic_palette, "Оформление интерфейса") { Appearance.show(act) })
             val sizes = listOf("Мелкий", "Обычный", "Крупный", "Очень крупный")
             val sizeValue = ctx.label(sizes[prefs.getInt("text_size", 1).coerceIn(0, 3)], 14f, 400, Theme.Role.MUTED)
             addView(nav(R.drawable.ic_chat, "Размер текста в чатах", sizeValue) {

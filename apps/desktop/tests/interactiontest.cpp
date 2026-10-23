@@ -7,6 +7,8 @@
 
 #include <QApplication>
 #include <QAbstractButton>
+#include <QPainter>
+#include <QSettings>
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QDir>
@@ -23,7 +25,16 @@
 class InteractionTest : public QObject {
     Q_OBJECT
 private slots:
-    void initTestCase() { Theme::instance()->init(); }
+    void initTestCase()
+    {
+        // Own settings key: the test saves themes and must not touch the real app settings.
+        QCoreApplication::setOrganizationName("NeoChatTest");
+        QCoreApplication::setApplicationName("NeoChatInteractionTest");
+        QSettings().clear();
+        Theme::instance()->init();
+    }
+
+    void cleanupTestCase() { QSettings().clear(); }
 
     void accountSettingsAndDeviceViewport() {
         QWidget host;
@@ -64,6 +75,144 @@ private slots:
         shot("multi-account-devices");
         Sheet::closeAll(&host);
         QTest::qWait(250);
+    }
+
+    void appearanceThemesAreStoredAndChosen() {
+        auto *theme = Theme::instance();
+        QCOMPARE(theme->appearance(), QStringLiteral("ocean"));
+        QVERIFY(Theme::darkBase(QColor("#101A2E")));
+        QVERIFY(!Theme::darkBase(QColor("#E9F0FC")));
+        // Unknown ids and empty slots never become the active theme.
+        theme->setAppearance(QStringLiteral("custom0"));
+        theme->setAppearance(QStringLiteral("nonsense"));
+        QCOMPARE(theme->appearance(), QStringLiteral("ocean"));
+        CustomTheme mine;
+        mine.name = QStringLiteral("Мята");
+        mine.base = QColor("#0E2A24");
+        mine.spots = {Spot{{0.8, 0.2}, QColor("#2FBF9B")}, Spot{{0.1, 0.9}, QColor("#3B6FD8")}};
+        theme->saveCustom(1, mine);
+        QCOMPARE(theme->appearance(), QStringLiteral("custom1"));
+        const CustomTheme back = theme->custom(1);
+        QCOMPARE(back.name, mine.name);
+        QCOMPARE(back.base, mine.base);
+        QCOMPARE(back.spots.size(), 2);
+        QCOMPARE(back.spots[0].color, QColor("#2FBF9B"));
+        QVERIFY(theme->isDark());
+        QVERIFY(!theme->custom(0).valid());
+        // A light base turns the whole interface light, whatever the day/night mode says.
+        mine.base = QColor("#F4F0E6");
+        theme->saveCustom(1, mine);
+        QVERIFY(!theme->isDark());
+        theme->deleteCustom(1);
+        QVERIFY(!theme->custom(1).valid());
+        QCOMPARE(theme->appearance(), QStringLiteral("ocean"));
+        // A blob that exists on one side only grows out of the blob on the other side.
+        const Palette two = Palette::dark();
+        const Palette five = theme->paletteFor(QStringLiteral("sunset"), true);
+        QCOMPARE(Palette::mix(two, five, 0).spots[1].color.rgb(), two.spots[1].color.rgb());
+        QCOMPARE(Palette::mix(two, five, 1).spots[0].color.rgb(), five.spots[0].color.rgb());
+        QVERIFY(Palette::mix(two, five, 0.5).spots[3].color.alpha() == 0);
+    }
+
+    void appearanceSheetCreatesEditsAndDeletes() {
+        QWidget host;
+        host.resize(973, 742);
+        host.show();
+        DialogHost h;
+        h.host = &host;
+        h.toast = [](const QString &) {};
+        auto shot = [&](const QString &name) {
+            const QString dir = qEnvironmentVariable("NEOCHAT_SHOTS");
+            if (dir.isEmpty()) return;
+            QDir().mkpath(dir);
+            host.grab().save(dir + "/" + name + ".png");
+        };
+        auto named = [&](const QString &name) -> QAbstractButton * {
+            for (auto *b : host.findChildren<QAbstractButton *>())
+                if (b->isVisible() && (b->accessibleName() == name || b->text() == name)) return b;
+            return nullptr;
+        };
+        auto *theme = Theme::instance();
+        theme->setAppearance(QStringLiteral("ocean"));
+        dialogs::appearance(h);
+        for (const char *name : {"Океан", "Закат", "Лес", "Сирень"})
+            QTRY_VERIFY(named(QString::fromUtf8(name)));
+        QVERIFY(named(QStringLiteral("Океан"))->isChecked());
+        named(QStringLiteral("Закат"))->click();
+        QCOMPARE(theme->appearance(), QStringLiteral("sunset"));
+        QVERIFY(named(QStringLiteral("Закат"))->isChecked());
+        QVERIFY(!named(QStringLiteral("Океан"))->isChecked());
+        QTest::qWait(500);
+        shot("appearance-list");
+
+        // New theme: the editor opens with the points of the theme on screen.
+        named(QStringLiteral("Новая тема"))->click();
+        QTRY_VERIFY(named(QStringLiteral("Сохранить")));
+        QVERIFY(named(QStringLiteral("Точка 2")));
+        QVERIFY(!named(QStringLiteral("Точка 3")));
+        QWidget *canvas = nullptr;
+        for (auto *w : host.findChildren<QWidget *>())
+            if (w->isVisible() && w->accessibleName().startsWith(QStringLiteral("Фон:"))) canvas = w;
+        QVERIFY(canvas);
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, QPoint(canvas->width() / 2, canvas->height() / 2));
+        QTRY_VERIFY(named(QStringLiteral("Точка 3")));
+        QTest::keyClick(canvas, Qt::Key_Right, Qt::ShiftModifier);
+        auto *name = host.findChild<QLineEdit *>();
+        QVERIFY(name);
+        name->setText(QStringLiteral("Вечер"));
+        QTest::qWait(300);
+        shot("appearance-editor");
+        named(QStringLiteral("Сохранить"))->click();
+        QTRY_COMPARE(theme->appearance(), QStringLiteral("custom0"));
+        const CustomTheme saved = theme->custom(0);
+        QCOMPARE(saved.name, QStringLiteral("Вечер"));
+        QCOMPARE(saved.spots.size(), 3);
+        QVERIFY(qAbs(saved.spots[2].pos.x() - 0.55) < 0.02);
+
+        // The page now lists it; deleting needs a second click and returns to the ocean.
+        QTRY_VERIFY(named(QStringLiteral("Вечер")));
+        QVERIFY(named(QStringLiteral("Вечер"))->isChecked());
+        QTest::qWait(500);
+        shot("appearance-list-custom");
+        auto *remove = named(QStringLiteral("Удалить"));
+        QVERIFY(remove);
+        remove->click();
+        QVERIFY(theme->custom(0).valid());
+        named(QStringLiteral("Точно?"))->click();
+        QTRY_VERIFY(!theme->custom(0).valid());
+        QCOMPARE(theme->appearance(), QStringLiteral("ocean"));
+        Sheet::closeAll(&host);
+        QTest::qWait(250);
+    }
+
+    void presetBackdropsPaint() {
+        const QString dir = qEnvironmentVariable("NEOCHAT_SHOTS");
+        if (dir.isEmpty()) QSKIP("no shots directory");
+        QDir().mkpath(dir);
+        QImage sheet(4 * 310 + 10, 2 * 530 + 10, QImage::Format_ARGB32);
+        sheet.fill(Qt::black);
+        QPainter p(&sheet);
+        p.setRenderHint(QPainter::Antialiasing);
+        int col = 0;
+        for (const auto &preset : Theme::presets()) {
+            for (int row = 0; row < 2; ++row) {
+                const Palette c = Theme::instance()->paletteFor(QString::fromLatin1(preset.id), row == 0);
+                const QRectF r(10 + col * 310, 10 + row * 530, 300, 520);
+                Theme::paintBackdropIn(p, r, r, c);
+                p.setPen(Qt::NoPen);
+                p.setBrush(c.raised);
+                p.drawRoundedRect(r.adjusted(24, 60, -24, -400), 16, 16);
+                p.setBrush(c.surface);
+                p.drawRoundedRect(r.adjusted(24, 150, -90, -330), 16, 16);
+                p.setBrush(c.outgoing);
+                p.drawRoundedRect(r.adjusted(100, 230, -24, -260), 16, 16);
+                p.setPen(c.text);
+                p.drawText(r.adjusted(34, 60, -34, -400), Qt::AlignVCenter, QString::fromUtf8(preset.name) + (row == 0 ? " · ночь" : " · день"));
+            }
+            ++col;
+        }
+        p.end();
+        sheet.save(dir + "/presets.png");
     }
 
     void pasteImageAndSeveralFiles() {
