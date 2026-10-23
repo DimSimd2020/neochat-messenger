@@ -1304,6 +1304,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 Core.shared.call("delete_everywhere", ["message_id": m.str("id")]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
             })
         }
+        if !ok { acts.append(MenuAction(title: "Повторить расшифровку", icon: "arrow.clockwise") { [weak self] in self?.retryDecrypt(m) }) }
         acts.append(MenuAction(title: "Удалить у себя", icon: "trash", destructive: true) { [weak self] in
             Core.shared.call("delete_local_message", ["message_id": m.str("id")]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
         })
@@ -1357,6 +1358,15 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     private func retry(_ m: JSON) {
         Core.shared.call("retry_message", ["message_id": m.str("id")]) { [weak self] r in if case .failure(let e) = r { self?.toast(e.message) } }
+    }
+
+    private func retryDecrypt(_ m: JSON) {
+        Core.shared.call("retry_decrypt", ["message_id": m.str("id")]) { [weak self] r in
+            switch r {
+            case .failure(let e): self?.toast(e.message)
+            case .success(let v): if (v as? JSON)?.bool("decrypted") != true { self?.toast((v as? JSON)?.str("message") ?? "") }
+            }
+        }
     }
 
     private func decrypt(_ m: JSON, _ then: @escaping (URL) -> Void) {

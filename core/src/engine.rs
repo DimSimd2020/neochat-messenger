@@ -337,6 +337,7 @@ impl Inner {
             "send_text" => self.send_text(p),
             "send_file" => self.send_file(p),
             "retry_message" => self.retry_message(p),
+            "retry_decrypt" => self.retry_decrypt(p),
             "delete_local_message" => self.delete_local_message(p),
             "delete_everywhere" => self.delete_everywhere(p),
             "edit_message" => self.edit_message(p),
@@ -403,7 +404,7 @@ impl Inner {
         // Used only before creating a fresh identity on this installation.
         conn.execute_batch(
             "DELETE FROM kv WHERE k<>'history_owner'; DELETE FROM sessions; DELETE FROM identities; DELETE FROM prekeys; DELETE FROM signed_prekeys;
-             DELETE FROM kyber_prekeys; DELETE FROM kyber_used; DELETE FROM known_devices; DELETE FROM outbox; DELETE FROM processed;",
+             DELETE FROM kyber_prekeys; DELETE FROM kyber_used; DELETE FROM known_devices; DELETE FROM outbox; DELETE FROM processed; DELETE FROM undecrypted;",
         )?;
         Ok(())
     }
