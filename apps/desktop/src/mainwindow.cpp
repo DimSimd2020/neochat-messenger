@@ -751,7 +751,7 @@ void MainWindow::checkUpdate(bool manual)
         }
         if (!v.toObject().value("available").toBool()) {
             if (manual)
-                toast(QStringLiteral("Установлена последняя версия ") + QStringLiteral(NEOCHAT_VERSION));
+                toast(QStringLiteral("Установлена последняя версия ") + QStringLiteral(NEOCHAT_VERSION_LABEL));
             return;
         }
         if (manual)
@@ -759,8 +759,10 @@ void MainWindow::checkUpdate(bool manual)
         Core::instance()->call("download_update", p, this, [this](const QJsonValue &v, const CoreError &e) {
             if (!e.ok())
                 return;
-            m_updatePath = v.toObject().value("path").toString();
-            m_updateBar->set(QStringLiteral("Обновление %1 готово к установке").arg(v.toObject().value("version").toString()),
+            const QJsonObject o = v.toObject();
+            const QString tag = o.value("tag").toString();
+            m_updatePath = o.value("path").toString();
+            m_updateBar->set(QStringLiteral("Обновление %1%2 готово к установке").arg(o.value("version").toString(), tag.isEmpty() ? QString() : QLatin1Char(' ') + tag),
                              QStringLiteral("Перезапустить"));
         });
     });

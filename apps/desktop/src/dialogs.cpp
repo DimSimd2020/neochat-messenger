@@ -1067,7 +1067,7 @@ void settings(const DialogHost &h)
         menu->popup(channel->mapToGlobal(QPoint(0, channel->height())));
     });
     sheet->body()->addWidget(channel);
-    auto *update = new ui::Button(QStringLiteral("Проверить обновления · версия ") + QStringLiteral(NEOCHAT_VERSION), ui::Button::Secondary);
+    auto *update = new ui::Button(QStringLiteral("Проверить обновления · версия ") + QStringLiteral(NEOCHAT_VERSION_LABEL), ui::Button::Secondary);
     QObject::connect(update, &QAbstractButton::clicked, sheet, [=] {
         if (h.checkUpdate)
             h.checkUpdate();
