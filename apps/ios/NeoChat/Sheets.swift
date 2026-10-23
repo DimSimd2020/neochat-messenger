@@ -513,6 +513,7 @@ final class SettingsViewController: SheetViewController {
         }, for: .touchUpInside)
         section("Оформление", [
             padded(theme),
+            NavRow("paintpalette", "Оформление интерфейса") { [weak self] in self?.push(AppearanceViewController()) },
             size,
             SwitchRow("face.smiling", "Крупные эмодзи без текста", on: Prefs.bigEmoji) { Prefs.set("big_emoji", $0) },
             SwitchRow("figure.walk", "Уменьшить анимацию", on: UserDefaults.standard.bool(forKey: "reduce_motion")) { Prefs.set("reduce_motion", $0) },

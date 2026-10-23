@@ -879,6 +879,12 @@ void graphicsSettings(const DialogHost &h)
         Theme::instance()->setMode(Theme::Mode(v));
     });
     sheet->body()->addWidget(slider);
+    auto *look = new ui::Button(QStringLiteral("Оформление интерфейса"), ui::Button::Secondary);
+    QObject::connect(look, &QAbstractButton::clicked, sheet, [=] {
+        sheet->close();
+        appearance(h);
+    });
+    sheet->body()->addWidget(look);
 
     sheet->body()->addSpacing(4);
     sheet->body()->addWidget(new ui::Label(QStringLiteral("Размер текста"), 15, QFont::DemiBold));
@@ -897,6 +903,11 @@ void graphicsSettings(const DialogHost &h)
     });
     sheet->body()->addLayout(sizes);
     sheet->open();
+}
+
+void graphics(const DialogHost &h)
+{
+    graphicsSettings(h);
 }
 
 // Account-wide: stored on the server and applied on every device.

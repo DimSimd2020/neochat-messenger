@@ -31,6 +31,9 @@ void newChat(const DialogHost &h);
 void devices(const DialogHost &h);
 void accounts(const DialogHost &h);
 void settings(const DialogHost &h);
+void graphics(const DialogHost &h);
+// Built-in themes, the user's own, and the editor with gradient points.
+void appearance(const DialogHost &h);
 void whatsNew(const DialogHost &h);
 void profile(const DialogHost &h);
 void editProfile(const DialogHost &h);

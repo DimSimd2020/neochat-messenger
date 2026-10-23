@@ -8,11 +8,9 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.ColorFilter
-import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
-import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -601,21 +599,9 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
     }
 }
 
-/** Static background: linear gradient with two soft radial spots (no motion). */
+/** Static background: linear gradient with soft radial spots (no motion). */
 class BackgroundView(ctx: Context) : View(ctx), Themed {
-    private val paint = Paint()
-
-    override fun onDraw(c: Canvas) {
-        val p = Theme.p
-        val w = width.toFloat()
-        val h = height.toFloat()
-        paint.shader = LinearGradient(0f, 0f, w * 0.35f, h, intArrayOf(p.bg0, p.bg1, p.bg2), floatArrayOf(0f, 0.56f, 1f), Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w, h, paint)
-        paint.shader = RadialGradient(w, 0f, maxOf(w, h) * 0.7f, intArrayOf(p.spotTop, p.spotTop and 0x00FFFFFF), null, Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w, h, paint)
-        paint.shader = RadialGradient(-w * 0.35f, h * 0.95f, maxOf(w, h) * 0.75f, intArrayOf(p.spotBottom, p.spotBottom and 0x00FFFFFF), null, Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w, h, paint)
-    }
+    override fun onDraw(c: Canvas) = Backdrop.draw(c, width.toFloat(), height.toFloat(), Theme.p)
 
     override fun applyTheme() = invalidate()
 }
