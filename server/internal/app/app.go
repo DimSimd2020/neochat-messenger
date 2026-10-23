@@ -72,6 +72,8 @@ func (s *Server) routes() {
 
 	m.HandleFunc("GET /v1/app/manifest", s.handleUpdateManifest)
 	m.HandleFunc("GET /v1/app/files/{name}", s.handleUpdateFile)
+	m.HandleFunc("GET /v1/app/alpha/manifest", s.authed(s.handleAlphaManifest))
+	m.HandleFunc("GET /v1/app/alpha/files/{name}", s.authed(s.handleAlphaFile))
 
 	m.HandleFunc("POST /v1/accounts", s.handleRegister)
 	m.HandleFunc("POST /v1/accounts/email", s.handleRegistrationEmail)

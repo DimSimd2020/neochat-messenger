@@ -2,10 +2,16 @@
 
     python infra/publish-update.py 0.6.7.2 "Что нового" beta
     python infra/publish-update.py 0.6.8 "Что нового" stable
+    python infra/publish-update.py 0.6.9.5 "Диагностика звонка" alpha
 
 The third argument is the channel (stable by default). stable replaces `platforms`,
 which is what every client without a channel still reads. beta only fills
 `channels.beta` and leaves the stable entries alone.
+
+alpha takes dist/NeoChat-<version>-alpha-{x64.msi,android.apk,ios-unsigned.ipa}, tags the
+entries "alpha" and writes them to updates/alpha/ with its own signed manifest. The server
+gives that directory only to accounts in the alpha_testers table (migration 0013); the
+public manifest and files are not touched. Builds for it are not released from git.
 
 The manifest is signed with the offline Ed25519 key (NEOCHAT_UPDATE_KEY, default
 E:/dev/keys/update-signing.key); the core accepts only manifests signed by it.
@@ -50,16 +56,18 @@ def current_manifest():
     return json.loads(r.stdout)
 
 
-def entries(version):
+def entries(version, tag=''):
     built = {}
     paths = []
     for platform, suffix in FILES.items():
-        p = ROOT / 'dist' / f'NeoChat-{version}{suffix}'
+        p = ROOT / 'dist' / f'NeoChat-{version}{"-" + tag if tag else ""}{suffix}'
         if not p.exists():
             print(f'нет {p.name}, {platform} пропущен')
             continue
         data = p.read_bytes()
         built[platform] = {'version': version, 'file': p.name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+        if tag:
+            built[platform]['tag'] = tag
         paths.append(p)
     return built, paths
 
@@ -74,15 +82,59 @@ def referenced(manifest):
     return names
 
 
+def publish_alpha(version, notes, key):
+    built, paths = entries(version, 'alpha')
+    if not paths:
+        sys.exit('нечего публиковать')
+    r = subprocess.run(['ssh', HOST, 'sudo', 'cat', '/var/lib/neochat/updates/alpha/manifest.json'], capture_output=True)
+    current = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+    alpha = dict((current.get('channels') or {}).get('alpha') or {})
+    alpha.update(built)
+    manifest = {'notes': notes, 'channels': {'alpha': alpha}}
+    body = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode()
+    keep = [e['file'] for e in alpha.values()]
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / 'manifest.json').write_bytes(body)
+        (Path(tmp) / 'manifest.sig').write_bytes(key.sign(body))
+        subprocess.run(['ssh', HOST, 'rm -rf /tmp/neochat-update && mkdir /tmp/neochat-update'], check=True)
+        subprocess.run(['scp', '-q', *map(str, paths), str(Path(tmp) / 'manifest.json'), str(Path(tmp) / 'manifest.sig'), f'{HOST}:/tmp/neochat-update/'], check=True)
+    # Same order as the public channel: files first, the manifest last.
+    remote = '''set -euo pipefail
+D=/var/lib/neochat/updates
+backup=$1
+shift
+install -d -m 755 /var/backups/neochat-releases
+tar -czf "/var/backups/neochat-releases/$backup" -C /var/lib/neochat updates
+install -d -m 755 -o neochat -g neochat "$D" "$D/alpha"
+shopt -s nullglob
+for f in /tmp/neochat-update/NeoChat-*; do install -m 644 -o neochat -g neochat "$f" "$D/alpha/"; done
+install -m 644 -o neochat -g neochat /tmp/neochat-update/manifest.sig "$D/alpha/manifest.sig.new"
+install -m 644 -o neochat -g neochat /tmp/neochat-update/manifest.json "$D/alpha/manifest.json.new"
+mv "$D/alpha/manifest.sig.new" "$D/alpha/manifest.sig"
+mv "$D/alpha/manifest.json.new" "$D/alpha/manifest.json"
+cd "$D/alpha"
+for f in NeoChat-*; do
+  keep=0
+  for k in "$@"; do [ "$f" = "$k" ] && keep=1; done
+  [ "$keep" = 1 ] || rm -f "$f"
+done
+rm -rf /tmp/neochat-update'''
+    subprocess.run(['ssh', HOST, 'sudo', 'bash', '-s', '--', f'updates-before-{version}-alpha.tar.gz', *keep], input=remote.encode(), check=True)
+    print(f'опубликовано: {version} канал alpha (только для alpha_testers)')
+    print('alpha: ' + ', '.join(f'{k} {v["version"]}' for k, v in sorted(alpha.items())))
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     version = sys.argv[1]
     notes = sys.argv[2] if len(sys.argv) > 2 else ''
     channel = sys.argv[3] if len(sys.argv) > 3 else 'stable'
-    if channel not in ('stable', 'beta'):
-        sys.exit('канал: stable или beta')
+    if channel not in ('stable', 'beta', 'alpha'):
+        sys.exit('канал: stable, beta или alpha')
     key = Ed25519PrivateKey.from_private_bytes(Path(os.environ.get('NEOCHAT_UPDATE_KEY', 'E:/dev/keys/update-signing.key')).read_bytes())
+    if channel == 'alpha':
+        return publish_alpha(version, notes, key)
     built, paths = entries(version)
     if not paths:
         sys.exit('нечего публиковать')
