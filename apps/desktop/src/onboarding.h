@@ -26,6 +26,7 @@ public:
 
 signals:
     void finished();
+    void chooseAccount();
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -58,6 +59,7 @@ private:
     ui::Button *m_switch;
     ui::Button *m_forgot;
     ui::Button *m_recover;
+    ui::Button *m_accounts;
     // recovery code page
     ui::Label *m_recoveryCode;
     ui::Toggle *m_saved;

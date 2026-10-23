@@ -52,8 +52,9 @@ object PushRegistration {
         if (Looper.myLooper() != Looper.getMainLooper()) { main.post { sync(ctx.applicationContext) }; return }
         if (busy || FirebaseApp.getApps(ctx).isEmpty()) return
         busy = true
-        CoreClient.call("status") { value, _ ->
-            val loggedIn = (value as? JSONObject)?.optBoolean("logged_in") == true
+        CoreClient.call("list_accounts") { value, _ ->
+            val accounts = value as? org.json.JSONArray
+            val loggedIn = accounts != null && (0 until accounts.length()).any { accounts.optJSONObject(it)?.optBoolean("logged_in") == true }
             if (!loggedIn) registered = ""
             // Enabling FID auto-init reads the installation synchronously inside the SDK.
             // Core callbacks run on the main thread, so both SDK calls need a worker.
@@ -68,10 +69,12 @@ object PushRegistration {
 
     fun onRegistered(ctx: Context, installationId: String) {
         if (Looper.myLooper() != Looper.getMainLooper()) { main.post { onRegistered(ctx.applicationContext, installationId) }; return }
-        CoreClient.call("status") { value, _ ->
-            val status = value as? JSONObject
-            if (status?.optBoolean("logged_in") != true) { registered = ""; return@call }
-            val key = status.optString("device_id") + ":" + installationId
+        CoreClient.call("list_accounts") { value, _ ->
+            val accounts = value as? org.json.JSONArray ?: return@call
+            val devices = (0 until accounts.length()).mapNotNull { accounts.optJSONObject(it) }
+                .filter { it.optBoolean("logged_in") }.map { it.optString("device_id") }.sorted()
+            if (devices.isEmpty()) { registered = ""; return@call }
+            val key = devices.joinToString(":") + ":" + installationId
             if (registered == key) return@call
             CoreClient.call("set_push_token", JSONObject().put("provider", "fcm").put("token", installationId)) { _, error ->
                 if (error == null) {

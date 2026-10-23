@@ -78,6 +78,31 @@ final class OnboardingUITests: XCTestCase {
             shot("06-open-chat-failed")
             return XCTFail("chat did not open after channel creation")
         }
+        let back = app.buttons["Вернуться к чатам"]
+        let profile = app.buttons["chatProfile"]
+        let more = app.buttons["Действия чата"]
+        XCTAssertTrue(back.isHittable)
+        XCTAssertTrue(profile.isHittable)
+        XCTAssertTrue(more.isHittable)
+        XCTAssertGreaterThanOrEqual(back.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(profile.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(more.frame.width, 44)
+        XCTAssertLessThanOrEqual(back.frame.maxX, profile.frame.minX)
+        XCTAssertLessThanOrEqual(profile.frame.maxX, more.frame.minX)
+        XCTAssertFalse(app.buttons["Аудиозвонок"].exists, "Channels must not offer direct calls")
+        XCTAssertFalse(app.buttons["Видеозвонок"].exists)
+        profile.tap()
+        XCTAssertTrue(app.navigationBars["Сведения"].waitForExistence(timeout: 5))
+        app.buttons["Закрыть"].tap()
+        more.tap()
+        app.buttons["Сведения"].tap()
+        XCTAssertTrue(app.navigationBars["Сведения"].waitForExistence(timeout: 5))
+        app.buttons["Закрыть"].tap()
+        shot("06-chat-header")
+        back.tap()
+        XCTAssertTrue(app.buttons["Новый чат"].waitForExistence(timeout: 5))
+        app.tables.cells.firstMatch.tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
         input.tap()
         input.typeText("черновик")
         // Exercise back navigation with the keyboard up, then repeat it after reopening.

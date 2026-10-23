@@ -163,11 +163,17 @@ var emailPage = template.Must(template.New("email").Parse(emailPageHTML))
 
 type emailPageData struct {
 	Title, Message, Token, Address, Nonce string
+	FirebaseCode                          string
 	Logo                                  template.URL
 	Success                               bool
 }
 
 func (s *Server) handleEmailConfirm(w http.ResponseWriter, r *http.Request) {
+	s.emailConfirm(w, r, "")
+}
+
+func (s *Server) emailConfirm(w http.ResponseWriter, r *http.Request, firebaseCode string) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	nonce := randomToken()
@@ -202,34 +208,44 @@ func (s *Server) handleEmailConfirm(w http.ResponseWriter, r *http.Request) {
 		data.Message = "Привяжем этот адрес к вашему аккаунту @" + nickname + "."
 	}
 	data.Token = token
+	data.FirebaseCode = firebaseCode
 	if r.Method == http.MethodPost {
-		err = s.inTx(r.Context(), func(tx pgx.Tx) error {
-			var consumed, confirmed bool
-			if err := tx.QueryRow(r.Context(), `SELECT consumed_at IS NOT NULL,confirmed_at IS NOT NULL FROM email_links WHERE id=$1 AND expires_at>now() FOR UPDATE`, id).Scan(&consumed, &confirmed); err != nil {
+		if firebaseCode != "" {
+			var address string
+			address, err = s.cfg.Email.CompleteAction(r.Context(), "verifyEmail", firebaseCode)
+			if err == nil && address != email {
+				err = errBadRequest
+			}
+		}
+		if err == nil {
+			err = s.inTx(r.Context(), func(tx pgx.Tx) error {
+				var consumed, confirmed bool
+				if err := tx.QueryRow(r.Context(), `SELECT consumed_at IS NOT NULL,confirmed_at IS NOT NULL FROM email_links WHERE id=$1 AND expires_at>now() FOR UPDATE`, id).Scan(&consumed, &confirmed); err != nil {
+					return err
+				}
+				if consumed {
+					return errBadRequest
+				}
+				if owner != nil {
+					var active bool
+					if err := tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM devices WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL)`, device, owner).Scan(&active); err != nil {
+						return err
+					}
+					if !active {
+						return errBadRequest
+					}
+					result, err := tx.Exec(r.Context(), `UPDATE users SET email=$2,email_verified_at=now() WHERE id=$1 AND email IS NULL`, owner, email)
+					if err != nil {
+						return err
+					}
+					if result.RowsAffected() != 1 {
+						return errBadRequest
+					}
+				}
+				_, err := tx.Exec(r.Context(), `UPDATE email_links SET confirmed_at=now(),consumed_at=CASE WHEN user_id IS NULL THEN NULL ELSE now() END WHERE id=$1`, id)
 				return err
-			}
-			if consumed {
-				return errBadRequest
-			}
-			if owner != nil {
-				var active bool
-				if err := tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM devices WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL)`, device, owner).Scan(&active); err != nil {
-					return err
-				}
-				if !active {
-					return errBadRequest
-				}
-				result, err := tx.Exec(r.Context(), `UPDATE users SET email=$2,email_verified_at=now() WHERE id=$1 AND email IS NULL`, owner, email)
-				if err != nil {
-					return err
-				}
-				if result.RowsAffected() != 1 {
-					return errBadRequest
-				}
-			}
-			_, err := tx.Exec(r.Context(), `UPDATE email_links SET confirmed_at=now(),consumed_at=CASE WHEN user_id IS NULL THEN NULL ELSE now() END WHERE id=$1`, id)
-			return err
-		})
+			})
+		}
 		data.Token = ""
 		if err != nil {
 			data.Title = "Не удалось привязать почту"

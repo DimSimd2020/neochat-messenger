@@ -99,6 +99,7 @@ private:
     QVariantAnimation m_searchAnim;
     QJsonObject m_current;
     QString m_connection = "connecting";
+    QString m_pendingConversation;
     bool m_sidebarHidden = false;
     bool m_onePane = false;
     bool m_listMode = true; // one-pane: list shown instead of the conversation

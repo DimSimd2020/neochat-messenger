@@ -262,6 +262,7 @@ private fun dayKey(ms: Long) = Calendar.getInstance().run { timeInMillis = ms; g
 
 /** One conversation: header capsule, history, composer. */
 class ChatScreen(private val act: MainActivity, val conversationId: String) : Screen {
+    private val accountId = CoreClient.accountId
     private val ctx: Context = act
     private val root = FrameLayout(ctx)
     override val view: View = root
@@ -1744,12 +1745,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     /** Hands a prepared file to the core and removes it afterwards. */
     private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?, caption: String = "") {
-        val p = JSONObject().put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
+        if (accountId != CoreClient.accountId) { tmp.delete(); return }
+        val p = JSONObject().put("_account_id", accountId).put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
         if (caption.isNotEmpty()) p.put("caption", caption)
         if (thumb != null) p.put("thumb", thumb.first).put("width", thumb.second).put("height", thumb.third)
         CoreClient.call("send_file", p) { _, e ->
             tmp.delete()
-            if (e != null) act.toast(e.message)
+            if (e != null && accountId == CoreClient.accountId) act.toast(e.message)
         }
     }
 
@@ -1774,7 +1776,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     private fun saveDraft() {
-        CoreClient.call("set_draft", JSONObject().put("conversation_id", conversationId).put("text", if (editing != null) savedDraft else edit.text.toString()))
+        CoreClient.call("set_draft", JSONObject().put("_account_id", accountId).put("conversation_id", conversationId).put("text", if (editing != null) savedDraft else edit.text.toString()))
     }
 
     override fun applyInsets(top: Int, bottom: Int, ime: Int) {

@@ -101,6 +101,10 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     brand->addWidget(new ui::Label(QStringLiteral("NeoChat"), 24, QFont::Bold));
     brand->addStretch(1);
     lay->addLayout(brand);
+    m_accounts = new ui::Button(QStringLiteral("Сменить аккаунт"), ui::Button::Flat);
+    m_accounts->hide();
+    lay->addWidget(m_accounts);
+    connect(m_accounts, &QAbstractButton::clicked, this, &Onboarding::chooseAccount);
 
     m_pages = new QStackedWidget;
     lay->addWidget(m_pages);
@@ -228,13 +232,26 @@ void Onboarding::paintEvent(QPaintEvent *)
 
 void Onboarding::start(const QJsonObject &status)
 {
+    Core::instance()->call("list_accounts", {}, this, [this](const QJsonValue &v, const CoreError &) {
+        m_accounts->setVisible(v.toArray().size() > 1);
+    });
     m_pages->setCurrentIndex(0);
+    m_poll->stop();
+    m_qrActive = false;
+    m_qr->setRows({});
+    m_password->edit()->clear();
+    m_username->setText(status.value("username").toString());
+    m_code->edit()->clear();
+    m_resetToken->edit()->clear();
+    m_name->edit()->clear();
+    m_recoveryCode->clear();
+    m_emailTicket.clear();
+    m_email->setText(QStringLiteral("Подтвердить электронную почту"));
     m_hasKeys = status.value("has_device_keys").toBool();
-    if (!status.value("username").toString().isEmpty())
-        m_username->setText(status.value("username").toString());
     m_loginCode->hide();
     m_loginCode->edit()->clear();
-    setMode(Login);
+    m_mode = Login;
+    setBusy(false);
 }
 
 // The QR code starts by itself on a new computer; with a saved sign-in it waits for a click.

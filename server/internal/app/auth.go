@@ -47,7 +47,9 @@ type prekeyIn struct {
 }
 
 type deviceIn struct {
+	replacesPrimary     bool
 	DeviceID            string     `json:"device_id"`
+	InstallationID      string     `json:"installation_id,omitempty"`
 	Name                string     `json:"name"`
 	Platform            string     `json:"platform"`
 	RegistrationID      int32      `json:"registration_id"`
@@ -80,6 +82,8 @@ func validateDevice(d *deviceIn) error {
 	switch {
 	case !isUUID(d.DeviceID):
 		return bad("device_id")
+	case d.InstallationID != "" && !validInstallationID(d.InstallationID):
+		return bad("installation_id")
 	case len(d.Name) == 0 || len(d.Name) > 64:
 		return bad("name")
 	case d.Platform != "windows" && d.Platform != "linux" && d.Platform != "macos" && d.Platform != "android" && d.Platform != "ios":
@@ -211,11 +215,11 @@ func newSession(ctx context.Context, tx pgx.Tx, userID, deviceID, family string)
 
 func insertDevice(ctx context.Context, tx pgx.Tx, userID string, d *deviceIn, primary bool) error {
 	_, err := tx.Exec(ctx, `INSERT INTO devices(id, user_id, name, platform, is_primary, registration_id, identity_key, auth_key,
-		signed_prekey_id, signed_prekey, signed_prekey_sig, kyber_prekey_id, kyber_prekey, kyber_prekey_sig)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		signed_prekey_id, signed_prekey, signed_prekey_sig, kyber_prekey_id, kyber_prekey, kyber_prekey_sig, installation_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULLIF($15,''))`,
 		d.DeviceID, userID, d.Name, d.Platform, primary, d.RegistrationID, d.IdentityKey, d.AuthKey,
 		int64(d.SignedPrekey.ID), d.SignedPrekey.PublicKey, d.SignedPrekey.Signature,
-		int64(d.KyberPrekey.ID), d.KyberPrekey.PublicKey, d.KyberPrekey.Signature)
+		int64(d.KyberPrekey.ID), d.KyberPrekey.PublicKey, d.KyberPrekey.Signature, d.InstallationID)
 	if isUniqueViolation(err) {
 		return errf(409, "device_exists", "Устройство уже зарегистрировано")
 	}

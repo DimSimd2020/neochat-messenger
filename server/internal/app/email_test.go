@@ -25,9 +25,23 @@ func fixtureEmailTicket(t *testing.T, s *Server) string {
 }
 
 type testMailbox struct {
-	mu    sync.Mutex
-	links []string
-	fail  bool
+	mu          sync.Mutex
+	links       []string
+	fail        bool
+	reset       bool
+	actionEmail string
+}
+
+func (m *testMailbox) SendPasswordReset(ctx context.Context, email, link string) error {
+	m.reset = true
+	return m.SendVerification(ctx, email, link)
+}
+
+func (m *testMailbox) CompleteAction(_ context.Context, mode, code string) (string, error) {
+	if code != mode+"-valid" {
+		return "", errors.New("invalid test action")
+	}
+	return m.actionEmail, nil
 }
 
 func (m *testMailbox) SendVerification(_ context.Context, _ string, link string) error {

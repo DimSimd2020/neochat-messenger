@@ -60,7 +60,7 @@ func main() {
 		if err != nil {
 			fatal(log, "FCM configuration", err)
 		}
-		email, err := app.NewFirebaseEmailSender(ctx, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), os.Getenv("NEOCHAT_FIREBASE_API_KEY"))
+		email, err := app.NewFirebaseEmailSender(ctx, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), os.Getenv("NEOCHAT_FIREBASE_API_KEY"), os.Getenv("NEOCHAT_FIREBASE_CUSTOM_ACTIONS") == "1")
 		if err != nil {
 			fatal(log, "email configuration", err)
 		}

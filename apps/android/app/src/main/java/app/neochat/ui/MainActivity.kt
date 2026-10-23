@@ -77,9 +77,8 @@ class MainActivity : Activity(), Sheet.Host {
         Theme.init(this, root)
         Prefs.applySecure(this)
         CoreClient.addListener(listener)
-        pendingConversation = intent?.getStringExtra("conversation_id")
         rememberTestServer(this, intent)
-        start()
+        if (!openNotification(intent)) start()
     }
 
     override fun onDestroy() {
@@ -90,8 +89,21 @@ class MainActivity : Activity(), Sheet.Host {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val cid = intent.getStringExtra("conversation_id") ?: return
+        openNotification(intent)
+    }
+
+    private fun openNotification(intent: Intent?): Boolean {
+        val cid = intent?.getStringExtra("conversation_id") ?: return false
+        val account = intent.getStringExtra("account_id").orEmpty()
+        if (account.isNotEmpty() && account != CoreClient.accountId) {
+            pendingConversation = cid
+            CoreClient.call("switch_account", JSONObject().put("account_id", account)) { _, e ->
+                if (e != null) { pendingConversation = null; toast(e.message); start() }
+            }
+            return true
+        }
         if (home != null) openChat(cid) else pendingConversation = cid
+        return home != null
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -187,7 +199,7 @@ class MainActivity : Activity(), Sheet.Host {
         archive = null
         chat = null
         Notifier.visibleConversation = null
-        RealtimeService.stop(this)
+        RealtimeService.sync(this)
         app.neochat.PushRegistration.sync(this)
         show(OnboardingScreen(this, status) { showMain() }, 0f)
     }
@@ -395,6 +407,22 @@ class MainActivity : Activity(), Sheet.Host {
 
     private fun onEvent(ev: JSONObject) {
         val type = ev.str("type")
+        if (type == "account_notify") return
+        if (type == "account_selected") {
+            slideAnim?.end()
+            current?.onHidden()
+            current = null
+            content.removeAllViews()
+            home = null
+            archive = null
+            chat = null
+            pageHistory.clear()
+            closeOverlays()
+            Notifier.visibleConversation = null
+            Typing.reset()
+            start()
+            return
+        }
         if (type == "auth_required" || type == "device_revoked") {
             if (home == null) return
             if (type == "device_revoked") toast("Это устройство отозвано. Новые сообщения сюда не придут")

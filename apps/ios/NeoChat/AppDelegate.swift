@@ -15,6 +15,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { n in
             guard let ev = n.userInfo as? JSON else { return }
             switch ev.str("type") {
+            case "account_notify": Notifier.post(ev)
             case "notify":
                 Typing.clear(ev.str("conversation_id"))
                 Notifier.post(ev)
@@ -51,7 +52,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         if response.notification.request.content.userInfo["call"] != nil {
             CallManager.shared.resume()
         } else if let cid = response.notification.request.content.userInfo["conversation_id"] as? String {
-            NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": cid])
+            NotificationCenter.default.post(name: .openAccountConversation, object: nil, userInfo: ["id": cid, "account_id": response.notification.request.content.userInfo["account_id"] as? String ?? ""])
         }
         done()
     }
@@ -63,6 +64,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
 
 extension Notification.Name {
     static let openConversation = Notification.Name("NeoChatOpenConversation")
+    static let openAccountConversation = Notification.Name("NeoChatOpenAccountConversation")
 }
 
 /// Local notifications show the conversation title only, never message text.
@@ -71,15 +73,16 @@ enum Notifier {
 
     static func post(_ ev: JSON) {
         let cid = ev.str("conversation_id")
-        if UIApplication.shared.applicationState == .active && cid == visibleConversation { return }
+        let account = ev.str("account_id")
+        if UIApplication.shared.applicationState == .active && account == Core.shared.accountId && cid == visibleConversation { return }
         if !(UserDefaults.standard.object(forKey: "notifications") as? Bool ?? true) { return }
         let c = UNMutableNotificationContent()
         c.title = ev.str("title").isEmpty ? "NeoChat" : ev.str("title")
         c.body = ev.str("text").isEmpty ? "Новое сообщение" : ev.str("text")
         c.sound = .default
-        c.userInfo = ["conversation_id": cid]
-        c.threadIdentifier = cid
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: cid, content: c, trigger: nil))
+        c.userInfo = ["conversation_id": cid, "account_id": account]
+        c.threadIdentifier = account + ":" + cid
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: account + ":" + cid, content: c, trigger: nil))
     }
 }
 
@@ -123,13 +126,36 @@ final class RootViewController: UIViewController {
     private var updateBanner: UIView?
     private var dismissedUpdate = ""
     private var lastUpdateCheck = Date.distantPast
+    private var pendingConversation: String?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.addSubview(BackgroundView(frame: view.bounds))
+        NotificationCenter.default.addObserver(forName: .openAccountConversation, object: nil, queue: .main) { [weak self] n in
+            guard let self, let cid = n.userInfo?["id"] as? String else { return }
+            let account = n.userInfo?["account_id"] as? String ?? ""
+            if account.isEmpty || account == Core.shared.accountId {
+                if self.current is MainTabController {
+                    NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": cid])
+                } else { self.pendingConversation = cid }
+            } else {
+                self.pendingConversation = cid
+                Core.shared.call("switch_account", ["account_id": account]) { [weak self] result in
+                    if case .failure(let e) = result { self?.pendingConversation = nil; self?.topToast(e.message) }
+                }
+            }
+        }
         NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { [weak self] n in
             guard let ev = n.userInfo as? JSON else { return }
             let t = ev.str("type")
+            if t == "account_selected" {
+                Notifier.visibleConversation = nil
+                Typing.reset()
+                if self?.presentedViewController != nil {
+                    self?.dismiss(animated: false) { self?.start() }
+                } else { self?.start() }
+                return
+            }
             if t == "auth_required" || t == "device_revoked", self?.current is MainTabController {
                 if t == "device_revoked" { self?.toast("Это устройство отозвано. Новые сообщения сюда не придут") }
                 self?.start()
@@ -252,6 +278,10 @@ final class RootViewController: UIViewController {
 
     func showMain() {
         show(MainTabController())
+        if let cid = pendingConversation {
+            pendingConversation = nil
+            NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": cid])
+        }
         QuickReaction.load()
         CallReadiness.request(from:self) { [weak self] in guard let self else { return }; WhatsNewViewController.showIfNeeded(from:self) }
     }

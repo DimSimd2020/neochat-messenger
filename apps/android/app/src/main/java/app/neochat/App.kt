@@ -30,7 +30,7 @@ class App : Application() {
         CallNotifications.createChannels(this)
         CoreClient.addListener { ev ->
             when (ev.optString("type")) {
-                "notify" -> Notifier.onNotify(this, ev)
+                "notify", "account_notify" -> Notifier.onNotify(this, ev)
                 "call", "call_media" -> CallManager.onCoreEvent(ev)
                 "connection" -> if (ev.optString("state") == "online") PushRegistration.sync(this)
             }
@@ -61,7 +61,7 @@ class App : Application() {
     fun openCore() {
         if (CoreClient.isOpen) return
         val dir = File(filesDir, "core").apply { mkdirs() }
-        CoreClient.open(dir.absolutePath, DbKey.loadOrCreate(this))
+        CoreClient.open(dir.absolutePath, DbKey.loadOrCreate(this), android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID).orEmpty())
     }
 
     /** Periodic fallback when neither a push nor the background socket has delivered a sync hint. */

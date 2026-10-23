@@ -5,6 +5,7 @@
 //! implements primitives itself and never falls back to plaintext.
 
 mod api;
+mod accounts;
 mod avatar;
 mod backup;
 mod calls;

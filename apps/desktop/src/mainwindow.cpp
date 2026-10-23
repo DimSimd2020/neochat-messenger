@@ -467,6 +467,7 @@ MainWindow::MainWindow()
     m_onboarding = new Onboarding;
     m_stack->addWidget(m_onboarding);
     connect(m_onboarding, &Onboarding::finished, this, &MainWindow::showMain);
+    connect(m_onboarding, &Onboarding::chooseAccount, this, [this] { dialogs::accounts(host()); });
 
     m_main = new Surface;
     auto *row = new QHBoxLayout(m_main);
@@ -818,7 +819,8 @@ void MainWindow::showMain()
     });
     loadQuickReaction(this);
     dialogs::whatsNew(host());
-    const QString last = QSettings().value("window/lastConversation").toString();
+    const QString last = m_pendingConversation.isEmpty() ? QSettings().value("window/lastConversation").toString() : m_pendingConversation;
+    m_pendingConversation.clear();
     if (!last.isEmpty() && m_current.isEmpty()) {
         Core::instance()->call("get_conversation", {{"conversation_id", last}}, this, [this, last](const QJsonValue &, const CoreError &e) {
             if (e.ok() && !m_onePane) {
@@ -890,6 +892,28 @@ void MainWindow::onEvent(const QJsonObject &ev)
     } else if (type == "sync_reset") {
         m_listTimer->start();
         m_messagesTimer->start();
+    } else if (type == "account_selected") {
+        m_composer->clearReply();
+        if (!m_current.isEmpty())
+            Core::instance()->call("set_draft", {{"_account_id", ev.value("previous_account_id")}, {"conversation_id", m_current.value("id")}, {"text", m_composer->text()}});
+        Sheet::closeAll(m_stack);
+        m_panel->resetAccount();
+        Typing::instance()->reset();
+        m_current = {};
+        m_view->setConversation({}, false);
+        m_composer->setDraft({});
+        m_composer->setConversation({});
+        m_files.clear();
+        m_preparingFile = false;
+        m_readPending = false;
+        m_conversation->hide();
+        m_placeholder->show();
+        m_emailBar->set({}, {});
+        m_emailPrompted = false;
+        QSettings().remove("window/lastConversation");
+        start();
+    } else if (type == "account_notify") {
+        notify(ev);
     } else if (type == "auth_required" || type == "device_revoked") {
         if (m_stack->currentWidget() != m_main)
             return;
@@ -1212,7 +1236,7 @@ void MainWindow::sendFiles(const QStringList &paths, bool photos, const QString 
     // The caption belongs to the first file of the set.
     bool first = true;
     for (const auto &path : paths) {
-        QJsonObject item{{"conversation_id", m_current.value("id")}, {"path", path}, {"photo", photos}};
+        QJsonObject item{{"_account_id", Core::instance()->accountId()}, {"conversation_id", m_current.value("id")}, {"path", path}, {"photo", photos}};
         if (first && !caption.isEmpty())
             item["caption"] = caption;
         first = false;
@@ -1230,7 +1254,7 @@ void MainWindow::sendNextFile()
     QThreadPool::globalInstance()->start([guard, file] {
         const QString path = file.value("path").toString();
         const QString type = QMimeDatabase().mimeTypeForFile(path).name();
-        QJsonObject p{{"conversation_id", file.value("conversation_id")}, {"path", path}, {"mime", type}};
+        QJsonObject p{{"_account_id", file.value("_account_id")}, {"conversation_id", file.value("conversation_id")}, {"path", path}, {"mime", type}};
         if (file.contains("caption"))
             p["caption"] = file.value("caption");
         QSize size;
@@ -1242,9 +1266,11 @@ void MainWindow::sendNextFile()
         }
         if (guard) QMetaObject::invokeMethod(guard, [guard, p] {
             if (!guard) return;
-            Core::instance()->call("send_file", p, guard, [guard, path = p.value("path").toString()](const QJsonValue &, const CoreError &e) {
+            const QString account = p.value("_account_id").toString();
+            if (account != Core::instance()->accountId()) { dropPasted(p.value("path").toString()); return; }
+            Core::instance()->call("send_file", p, guard, [guard, account, path = p.value("path").toString()](const QJsonValue &, const CoreError &e) {
                 dropPasted(path);
-                if (!guard) return;
+                if (!guard || account != Core::instance()->accountId()) return;
                 if (!e.ok()) guard->toast(e.message);
                 guard->sendNextFile();
             });
@@ -1271,7 +1297,7 @@ void MainWindow::toast(const QString &text)
 void MainWindow::notify(const QJsonObject &ev)
 {
     const QString cid = ev.value("conversation_id").toString();
-    const bool visible = isActiveWindow() && cid == m_current.value("id").toString() && m_view->atBottom();
+    const bool visible = ev.value("account_id").toString() == Core::instance()->accountId() && isActiveWindow() && cid == m_current.value("id").toString() && m_view->atBottom();
     if (visible) {
         markRead();
         return;
@@ -1286,6 +1312,16 @@ void MainWindow::notify(const QJsonObject &ev)
             showNormal();
             raise();
             activateWindow();
+            const QString account = m_tray->property("account_id").toString();
+            const QString cid = m_tray->property("conversation_id").toString();
+            if (account.isEmpty() || account == Core::instance()->accountId()) {
+                openConversation(cid);
+            } else {
+                m_pendingConversation = cid;
+                Core::instance()->call("switch_account", {{"account_id", account}}, this, [this](const QJsonValue &, const CoreError &e) {
+                    if (!e.ok()) { m_pendingConversation.clear(); toast(e.message); }
+                });
+            }
         });
         connect(m_tray, &QSystemTrayIcon::activated, this, [this] {
             showNormal();
@@ -1295,5 +1331,7 @@ void MainWindow::notify(const QJsonObject &ev)
         m_tray->show();
     }
     // The message text is not shown in system notifications; a missed call names itself.
+    m_tray->setProperty("account_id", ev.value("account_id").toString());
+    m_tray->setProperty("conversation_id", cid);
     m_tray->showMessage(ev.value("title").toString(), ev.value("text").toString(QStringLiteral("Новое сообщение")), QSystemTrayIcon::NoIcon, 4000);
 }

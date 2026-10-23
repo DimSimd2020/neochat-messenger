@@ -15,20 +15,22 @@ import (
 	"google.golang.org/api/option"
 )
 
-// EmailSender delivers a private continueUrl only to the addressed mailbox via Firebase
-// Authentication OOB (VERIFY_EMAIL). Used for registration/link confirmation and for
-// password-reset continueUrl. No SMTP. The app never receives this URL or a Firebase token.
+// EmailSender delivers purpose-specific Firebase mail. NeoChat passwords and keys
+// never go to Firebase; password reset codes only prove access to the mailbox.
 type EmailSender interface {
 	SendVerification(context.Context, string, string) error
+	SendPasswordReset(context.Context, string, string) error
+	CompleteAction(context.Context, string, string) (string, error)
 }
 
 type FirebaseEmailSender struct {
-	auth   *auth.Client
-	apiKey string
-	http   *http.Client
+	auth          *auth.Client
+	apiKey        string
+	http          *http.Client
+	customActions bool
 }
 
-func NewFirebaseEmailSender(ctx context.Context, credentials, apiKey string) (EmailSender, error) {
+func NewFirebaseEmailSender(ctx context.Context, credentials, apiKey string, customActions bool) (EmailSender, error) {
 	if apiKey == "" {
 		return nil, nil
 	}
@@ -40,7 +42,7 @@ func NewFirebaseEmailSender(ctx context.Context, credentials, apiKey string) (Em
 	if err != nil {
 		return nil, errors.New("cannot initialize Firebase email")
 	}
-	return &FirebaseEmailSender{auth: client, apiKey: apiKey, http: &http.Client{Timeout: 10 * time.Second}}, nil
+	return &FirebaseEmailSender{auth: client, apiKey: apiKey, http: &http.Client{Timeout: 10 * time.Second}, customActions: customActions}, nil
 }
 
 func (f *FirebaseEmailSender) call(ctx context.Context, method string, body any, out any) error {
@@ -78,8 +80,7 @@ func (f *FirebaseEmailSender) SendVerification(ctx context.Context, email, conti
 	if err != nil {
 		return errors.New("cannot prepare Firebase email verification")
 	}
-	// Password-reset and re-link reuse this same VERIFY_EMAIL delivery. Firebase
-	// skips OOB for already-verified addresses, so clear the flag before send.
+	// Firebase skips verification delivery for already-verified addresses.
 	// NeoChat ownership is proven by our own link_hash, not by Firebase emailVerified.
 	if user.EmailVerified {
 		if _, err := f.auth.UpdateUser(ctx, user.UID, (&auth.UserToUpdate{}).EmailVerified(false)); err != nil {
@@ -102,4 +103,35 @@ func (f *FirebaseEmailSender) SendVerification(ctx context.Context, email, conti
 		return errors.New("missing Firebase email session")
 	}
 	return f.call(ctx, "sendOobCode", map[string]any{"requestType": "VERIFY_EMAIL", "idToken": session.IDToken, "email": email, "continueUrl": continuation, "canHandleCodeInApp": false}, nil)
+}
+
+func (f *FirebaseEmailSender) SendPasswordReset(ctx context.Context, email, continuation string) error {
+	// Enable only after the project's callback URL points to our handler. The
+	// default Firebase reset page would otherwise ask for an unrelated password.
+	if !f.customActions {
+		return f.SendVerification(ctx, email, continuation)
+	}
+	return f.call(ctx, "sendOobCode", map[string]any{"requestType": "PASSWORD_RESET", "email": email, "continueUrl": continuation, "canHandleCodeInApp": false}, nil)
+}
+
+func (f *FirebaseEmailSender) CompleteAction(ctx context.Context, mode, code string) (string, error) {
+	var info struct {
+		Email string `json:"email"`
+		Type  string `json:"requestType"`
+	}
+	// Without newPassword this validates any OOB code without changing an account.
+	if err := f.call(ctx, "resetPassword", map[string]string{"oobCode": code}, &info); err != nil {
+		return "", err
+	}
+	if (mode == "verifyEmail" && info.Type != "VERIFY_EMAIL") || (mode == "resetPassword" && info.Type != "PASSWORD_RESET") || (mode != "verifyEmail" && mode != "resetPassword") {
+		return "", errors.New("Firebase email action purpose mismatch")
+	}
+	if mode == "verifyEmail" {
+		if err := f.call(ctx, "update", map[string]string{"oobCode": code}, nil); err != nil {
+			return "", err
+		}
+	}
+	// The NeoChat one-time token is consumed by our password-reset endpoint.
+	// Never set a Firebase password for the service record.
+	return normalizeEmail(info.Email)
 }

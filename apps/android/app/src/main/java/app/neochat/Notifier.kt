@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import app.neochat.ui.MainActivity
+import app.neochat.core.CoreClient
 import org.json.JSONObject
 
 /** System notifications show the conversation title only, never message text (a missed call says so). */
@@ -19,14 +20,17 @@ object Notifier {
     fun onNotify(ctx: Context, ev: JSONObject) {
         val app = ctx.applicationContext as App
         val cid = ev.optString("conversation_id")
-        if (app.inForeground && cid == visibleConversation) return
+        val account = ev.optString("account_id")
+        val notificationId = "$account:$cid".hashCode()
+        if (app.inForeground && account == CoreClient.accountId && cid == visibleConversation) return
         if (!ctx.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("notifications", true)) return
         if (Build.VERSION.SDK_INT >= 33 &&
             ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
         val open = PendingIntent.getActivity(
-            ctx, cid.hashCode(),
+            ctx, notificationId,
             Intent(ctx, MainActivity::class.java).putExtra("conversation_id", cid)
+                .putExtra("account_id", account)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -40,6 +44,6 @@ object Notifier {
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .build()
-        ctx.getSystemService(NotificationManager::class.java).notify(cid.hashCode(), n)
+        ctx.getSystemService(NotificationManager::class.java).notify(notificationId, n)
     }
 }

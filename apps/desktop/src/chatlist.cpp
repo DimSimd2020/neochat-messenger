@@ -610,6 +610,24 @@ void ChatPanel::paintEvent(QPaintEvent *)
     p.fillRect(QRect(width() - 1, 0, 1, height()), Theme::p().border);
 }
 
+void ChatPanel::resetAccount()
+{
+    ++m_generation;
+    m_archived.clear();
+    m_mainRows.clear();
+    m_checked.clear();
+    m_selected.clear();
+    m_selecting = false;
+    m_selectBar->hide();
+    m_search->edit()->clear();
+    m_archive = false;
+    m_title->setText(QStringLiteral("Сообщения"));
+    m_title->setAccessibleName(m_title->text());
+    m_back->hide();
+    m_compose->show();
+    apply({}, false);
+}
+
 void ChatPanel::reload()
 {
     const int gen = ++m_generation;

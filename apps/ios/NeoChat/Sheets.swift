@@ -364,6 +364,48 @@ final class DevicesViewController: SheetViewController {
     }
 }
 
+final class AccountsViewController: SheetViewController {
+    private var selecting = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Сменить аккаунт"
+        Core.shared.call("list_accounts") { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let e): self.toast(e.message)
+            case .success(let value):
+                for a in value as? [JSON] ?? [] {
+                    let name = a.str("display_name").isEmpty ? "Новый аккаунт" : a.str("display_name")
+                    let sub = [a.str("username").isEmpty ? "" : "@" + a.str("username"),
+                               a.bool("current") ? "Текущий" : "",
+                               a.bool("logged_in") ? "" : "Требуется вход"].filter { !$0.isEmpty }.joined(separator: " · ")
+                    self.stack.addArrangedSubview(NavRow("person.crop.circle", name, value: sub) { [weak self] in
+                        self?.select("switch_account", ["account_id": a.str("account_id")])
+                    })
+                }
+                self.muted("Остальные аккаунты остаются подключёнными. Их переписка и ключи хранятся отдельно.")
+                let add = PillButton("Добавить аккаунт", primary: false)
+                add.addAction(UIAction { [weak self] _ in self?.select("add_account") }, for: .touchUpInside)
+                self.stack.addArrangedSubview(add)
+            }
+        }
+    }
+
+    private func select(_ method: String, _ params: JSON = [:]) {
+        guard !selecting else { return }
+        selecting = true
+        Core.shared.call(method, params) { [weak self] result in
+            guard let self else { return }
+            self.selecting = false
+            switch result {
+            case .failure(let e): self.toast(e.message)
+            case .success: self.dismiss(animated: !Theme.reducedMotion)
+            }
+        }
+    }
+}
+
 final class SettingsViewController: SheetViewController {
     private var showLastSeen = true
     private var twoFactor = false
@@ -393,6 +435,7 @@ final class SettingsViewController: SheetViewController {
                 guard let self else { return }
                 ContactQr.scan(from: self)
             },
+            NavRow("person.2", "Сменить аккаунт") { [weak self] in self?.push(AccountsViewController()) },
             NavRow("laptopcomputer.and.iphone", "Устройства") { [weak self] in self?.push(DevicesViewController()) },
         ])
 

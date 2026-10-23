@@ -227,6 +227,7 @@ final class ComposerTextView: UITextView {
 final class ChatViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UITextViewDelegate, UIDocumentPickerDelegate, QLPreviewControllerDataSource,
     PHPickerViewControllerDelegate, UIPopoverPresentationControllerDelegate {
     let conversationId: String
+    private let accountId = Core.shared.accountId
     private var conv: JSON = [:]
     private var messages: [JSON] = []
     private var items: [Item] = []
@@ -253,6 +254,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private let titleLabel = label("", 17, .semibold)
     private let subLabel = label("", 12, color: Theme.muted)
     private let titleBox = UIStackView()
+    private let header = UIStackView()
+    private let headerAvatar = AvatarView(size: 40)
+    private let profileButton = UIControl()
     private var baseSub = ""
     private var peerOnline = false
     private var presenceTimer: Timer?
@@ -274,7 +278,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private var heights: [String: CGFloat] = [:]
     private var pendingBottom = false
     private let callButton = UIButton(type: .system)
-    private var callItem: UIBarButtonItem?
+    private let videoCallButton = UIButton(type: .system)
 
     init(conversationId: String) {
         self.conversationId = conversationId
@@ -320,80 +324,17 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         goneLabel.textAlignment = .center
         goneLabel.isHidden = true
 
-        titleLabel.numberOfLines = 1
-        subLabel.numberOfLines = 1
-        titleBox.addArrangedSubview(titleLabel)
-        titleBox.addArrangedSubview(subLabel)
-        titleBox.axis = .vertical
-        titleBox.alignment = .center
-        titleBox.isAccessibilityElement = true
-        titleBox.accessibilityTraits = .header
-        // Glass capsule header over a clear bar, like the Android chat header.
-        let cap = UIView()
-        cap.glass(21)
-        cap.addGestureRecognizer(TapGesture { [weak self] in self?.openProfile() })
-        cap.accessibilityTraits = .button
-        titleBox.translatesAutoresizingMaskIntoConstraints = false
-        cap.addSubview(titleBox)
-        NSLayoutConstraint.activate([
-            titleBox.topAnchor.constraint(equalTo: cap.topAnchor, constant: 4),
-            titleBox.bottomAnchor.constraint(equalTo: cap.bottomAnchor, constant: -4),
-            titleBox.leadingAnchor.constraint(equalTo: cap.leadingAnchor, constant: 18),
-            titleBox.trailingAnchor.constraint(equalTo: cap.trailingAnchor, constant: -18),
-            cap.widthAnchor.constraint(lessThanOrEqualToConstant: 260),
-        ])
-        navigationItem.titleView = cap
-        let clear = UINavigationBarAppearance()
-        clear.configureWithTransparentBackground()
-        navigationItem.standardAppearance = clear
-        navigationItem.scrollEdgeAppearance = clear
-        let info = UIButton(type: .system)
-        info.glass(20)
-        info.setImage(UIImage(systemName: "info", withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)), for: .normal)
-        info.tintColor = Theme.accent
-        info.accessibilityLabel = "Сведения"
-        info.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([info.widthAnchor.constraint(equalToConstant: 40), info.heightAnchor.constraint(equalToConstant: 40)])
-        info.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            self.openProfile()
-        }, for: .touchUpInside)
-        navigationItem.rightBarButtonItem = UIBarButtonItem(customView: info)
-        navigationItem.rightBarButtonItems = [navigationItem.rightBarButtonItem!, UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: UIMenu(children: [
-            UIAction(title: "Очистить чат…", image: UIImage(systemName: "trash.slash"), attributes: .destructive) { [weak self] _ in
-                guard let self else { return }
-                confirmClearConversation(self) { [weak self] in
-                    guard let self else { return }
-                    Core.shared.call("clear_conversation", ["conversation_id": self.conversationId]) { [weak self] r in
-                        if case .failure(let e) = r { self?.toast(e.message) }
-                    }
-                }
-            },
-        ]))]
-        navigationItem.rightBarButtonItems?.last?.accessibilityLabel = "Действия чата"
-        // Calls: direct chats only; the menu offers voice or video.
-        callButton.glass(20)
-        callButton.setImage(UIImage(systemName: "phone.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)), for: .normal)
-        callButton.tintColor = Theme.accent
-        callButton.accessibilityLabel = "Позвонить"
-        callButton.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([callButton.widthAnchor.constraint(equalToConstant: 40), callButton.heightAnchor.constraint(equalToConstant: 40)])
-        callButton.menu = UIMenu(children: [
-            UIAction(title: "Аудиозвонок", image: UIImage(systemName: "phone")) { [weak self] _ in self?.startCall(video: false) },
-            UIAction(title: "Видеозвонок", image: UIImage(systemName: "video")) { [weak self] _ in self?.startCall(video: true) },
-        ])
-        callButton.showsMenuAsPrimaryAction = true
-        callItem = UIBarButtonItem(customView: callButton)
+        buildHeader()
 
-        let stack = UIStackView(arrangedSubviews: [notice, table, composer, goneLabel])
+        let stack = UIStackView(arrangedSubviews: [header, notice, table, composer, goneLabel])
         stack.axis = .vertical
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -10),
             stack.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
         ])
         NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { [weak self] n in
@@ -424,6 +365,94 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         buildJump()
         refreshConversation(first: true)
         load(older: false)
+    }
+
+    private func buildHeader() {
+        header.axis = .horizontal
+        header.alignment = .center
+        header.glass(30)
+        header.isLayoutMarginsRelativeArrangement = true
+        header.layoutMargins = UIEdgeInsets(top: 6, left: 4, bottom: 6, right: 4)
+        header.accessibilityIdentifier = "chatHeader"
+
+        let back = UIButton(type: .system)
+        back.setImage(UIImage(systemName: "chevron.backward"), for: .normal)
+        back.accessibilityLabel = "Вернуться к чатам"
+        back.addAction(UIAction { [weak self] _ in
+            self?.navigationController?.popViewController(animated: !Theme.reducedMotion)
+        }, for: .touchUpInside)
+        header.addArrangedSubview(back)
+
+        titleLabel.numberOfLines = 1
+        subLabel.numberOfLines = 1
+        for text in [titleLabel, subLabel] {
+            text.textAlignment = .left
+            text.lineBreakMode = .byTruncatingTail
+            text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        titleBox.axis = .vertical
+        titleBox.spacing = 2
+        titleBox.addArrangedSubview(titleLabel)
+        titleBox.addArrangedSubview(subLabel)
+        let who = UIStackView(arrangedSubviews: [headerAvatar, titleBox])
+        who.alignment = .center
+        who.spacing = 10
+        who.isUserInteractionEnabled = false
+        who.translatesAutoresizingMaskIntoConstraints = false
+        profileButton.addSubview(who)
+        profileButton.isAccessibilityElement = true
+        profileButton.accessibilityTraits = [.button, .header]
+        profileButton.accessibilityIdentifier = "chatProfile"
+        profileButton.accessibilityHint = "Открывает сведения о собеседнике или чате"
+        profileButton.addAction(UIAction { [weak self] _ in self?.openProfile() }, for: .touchUpInside)
+        profileButton.springPress()
+        NSLayoutConstraint.activate([
+            who.leadingAnchor.constraint(equalTo: profileButton.leadingAnchor),
+            who.trailingAnchor.constraint(equalTo: profileButton.trailingAnchor),
+            who.topAnchor.constraint(equalTo: profileButton.topAnchor, constant: 2),
+            who.bottomAnchor.constraint(equalTo: profileButton.bottomAnchor, constant: -2),
+            profileButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 48),
+        ])
+        header.addArrangedSubview(profileButton)
+
+        callButton.setImage(UIImage(systemName: "phone"), for: .normal)
+        callButton.accessibilityLabel = "Аудиозвонок"
+        callButton.addAction(UIAction { [weak self] _ in self?.startCall(video: false) }, for: .touchUpInside)
+        videoCallButton.setImage(UIImage(systemName: "video"), for: .normal)
+        videoCallButton.accessibilityLabel = "Видеозвонок"
+        videoCallButton.addAction(UIAction { [weak self] _ in self?.startCall(video: true) }, for: .touchUpInside)
+        for button in [callButton, videoCallButton] {
+            button.isHidden = true
+            header.addArrangedSubview(button)
+        }
+
+        let more = UIButton(type: .system)
+        more.setImage(UIImage(systemName: "ellipsis"), for: .normal)
+        more.accessibilityLabel = "Действия чата"
+        more.menu = UIMenu(children: [
+            UIAction(title: "Сведения", image: UIImage(systemName: "info.circle")) { [weak self] _ in self?.openProfile() },
+            UIAction(title: "Очистить чат…", image: UIImage(systemName: "trash.slash"), attributes: .destructive) { [weak self] _ in
+                guard let self else { return }
+                confirmClearConversation(self) { [weak self] in
+                    guard let self else { return }
+                    Core.shared.call("clear_conversation", ["conversation_id": self.conversationId]) { [weak self] r in
+                        if case .failure(let e) = r { self?.toast(e.message) }
+                    }
+                }
+            },
+        ])
+        more.showsMenuAsPrimaryAction = true
+        header.addArrangedSubview(more)
+        for button in [back, callButton, videoCallButton, more] {
+            button.tintColor = Theme.accent
+            button.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 20, weight: .medium), forImageIn: .normal)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            // A hidden arranged button has a required zero width from UIStackView.
+            let width = button.widthAnchor.constraint(equalToConstant: 44)
+            width.priority = .defaultHigh
+            NSLayoutConstraint.activate([width, button.heightAnchor.constraint(equalToConstant: 44)])
+            button.springPress()
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -503,7 +532,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         if Notifier.visibleConversation == conversationId { Notifier.visibleConversation = nil }
         presenceTimer?.invalidate()
         presenceTimer = nil
-        Core.shared.call("set_draft", ["conversation_id": conversationId, "text": editTarget != nil ? savedDraft : (input.text ?? "")])
+        Core.shared.call("set_draft", ["_account_id": accountId, "conversation_id": conversationId, "text": editTarget != nil ? savedDraft : (input.text ?? "")])
     }
 
     private func scheduleReload() {
@@ -884,7 +913,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?, caption: String = "") {
-        var p: JSON = ["conversation_id": conversationId, "path": url.path, "mime": mime, "name": name]
+        guard accountId == Core.shared.accountId else { try? FileManager.default.removeItem(at: url); return }
+        var p: JSON = ["_account_id": accountId, "conversation_id": conversationId, "path": url.path, "mime": mime, "name": name]
         if !caption.isEmpty { p["caption"] = caption }
         if let t = thumb {
             p["thumb"] = t.0
@@ -893,7 +923,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
         Core.shared.call("send_file", p) { [weak self] r in
             try? FileManager.default.removeItem(at: url)
-            if case .failure(let e) = r { self?.toast(e.message) }
+            if self?.accountId == Core.shared.accountId, case .failure(let e) = r { self?.toast(e.message) }
         }
     }
 
@@ -957,6 +987,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) + (c.int("online_count") > 0 ? ", \(c.int("online_count")) в сети" : "") : channel ? memberCount(c.int("member_count"), channel: true)
                 : seen.isEmpty ? handle : seen
             self.titleLabel.text = c.str("title")
+            let peer = c.str("peer_user_id")
+            self.headerAvatar.set(c.str("title"), seed: peer.isEmpty ? self.conversationId : peer, avatar: c.str("avatar_path"))
+            self.headerAvatar.online = self.peerOnline
             self.updateSubtitle()
             if first { self.refreshPresence() }
             let gone = c.bool("left") || c.bool("archived") || system
@@ -985,12 +1018,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     private func updateCallButton(gone: Bool) {
-        guard let callItem, var items = navigationItem.rightBarButtonItems else { return }
         let callable = conv.str("kind") == "direct" && !gone && !conv.str("peer_user_id").isEmpty
-        let shown = items.contains { $0 === callItem }
-        if callable == shown { return }
-        if callable { items.append(callItem) } else { items.removeAll { $0 === callItem } }
-        navigationItem.setRightBarButtonItems(items, animated: false)
+        callButton.isHidden = !callable
+        videoCallButton.isHidden = !callable
     }
 
     private func openProfile() {
@@ -1009,7 +1039,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         let typing = Typing.text(conversationId, group: conv.str("kind") != "direct")
         subLabel.text = typing ?? baseSub
         subLabel.textColor = typing != nil || peerOnline ? Theme.accent : Theme.muted
-        titleBox.accessibilityLabel = (titleLabel.text ?? "") + ", " + (subLabel.text ?? "")
+        profileButton.accessibilityLabel = (titleLabel.text ?? "") + ", " + (subLabel.text ?? "")
     }
 
     /// The peer of a direct chat, or the other members of a group.

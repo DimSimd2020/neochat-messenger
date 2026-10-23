@@ -117,7 +117,7 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	continuation := strings.TrimRight(s.cfg.EmailBaseURL, "/") + "/v1/accounts/password-reset/confirm?t=" + url.QueryEscape(link)
-	if err := s.cfg.Email.SendVerification(r.Context(), email, continuation); err != nil {
+	if err := s.cfg.Email.SendPasswordReset(r.Context(), email, continuation); err != nil {
 		_, _ = s.db.Exec(r.Context(), `DELETE FROM password_resets WHERE id=$1`, id)
 		s.log.Error("password reset mail", "err", err)
 		return
@@ -165,13 +165,13 @@ func (s *Server) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
 	nonce := randomToken()
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'nonce-"+nonce+"'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'nonce-"+nonce+"'; script-src 'nonce-"+nonce+"'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	token := r.URL.Query().Get("t")
 	data := passwordResetPageData{
-		Title: "Ссылка больше не действует",
+		Title:   "Ссылка больше не действует",
 		Message: "Срок ссылки истёк или пароль уже сменён. Вернитесь в NeoChat и запросите сброс снова.",
-		Nonce: nonce,
-		Logo:  template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(emailLogo)),
+		Nonce:   nonce,
+		Logo:    template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(emailLogo)),
 	}
 	if len(token) != 43 {
 		w.WriteHeader(400)
@@ -187,7 +187,7 @@ func (s *Server) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	data.Title = "Сброс пароля"
-	data.Message = "Откройте NeoChat → «Забыли пароль?» и введите код ниже вместе с новым паролем. Аккаунт, ключи и переписка на ваших устройствах сохраняются."
+	data.Message = "Доступ к почте подтверждён. Скопируйте код и вернитесь в NeoChat → «Забыли пароль?», чтобы задать новый пароль."
 	data.Address = email
 	data.Token = token
 	_ = passwordResetPage.Execute(w, data)

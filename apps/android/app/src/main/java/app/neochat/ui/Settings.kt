@@ -66,10 +66,14 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
             addView(nav(R.drawable.ic_profile, "Изменить профиль") { editProfile() })
             addView(nav(R.drawable.ic_qr, "Мой QR-код") { Qr.showMine(act) })
             addView(nav(R.drawable.ic_person_add, "Добавить по QR-коду") { Qr.scanContact(act) })
+            addView(nav(R.drawable.ic_profile, "Сменить аккаунт") { Dialogs.accounts(act) })
             addView(nav(R.drawable.ic_devices, "Устройства") { Dialogs.devices(act) })
         }
         } else {
-            section("Аккаунт").addView(nav(R.drawable.ic_devices, "Устройства") { Dialogs.devices(act) })
+            section("Аккаунт").apply {
+                addView(nav(R.drawable.ic_profile, "Сменить аккаунт") { Dialogs.accounts(act) })
+                addView(nav(R.drawable.ic_devices, "Устройства") { Dialogs.devices(act) })
+            }
         }
 
         section("Конфиденциальность").apply {

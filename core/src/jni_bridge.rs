@@ -8,7 +8,7 @@ use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jlong, jstring};
 use serde_json::{Value, json};
 
-use crate::engine::Core;
+use crate::accounts::Core;
 use crate::ffi::wrap;
 
 fn read(env: &mut JNIEnv, s: &JString) -> String {

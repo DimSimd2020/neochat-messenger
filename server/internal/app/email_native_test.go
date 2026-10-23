@@ -16,6 +16,11 @@ import (
 // verification email; the HTTP API, one-time proof and crypto remain real.
 type nativeMailbox struct{ server *Server }
 
+func (m nativeMailbox) SendPasswordReset(context.Context, string, string) error { return errBadRequest }
+func (m nativeMailbox) CompleteAction(context.Context, string, string) (string, error) {
+	return "", errBadRequest
+}
+
 func (m nativeMailbox) SendVerification(ctx context.Context, email, link string) error {
 	if !strings.HasSuffix(email, "@example.test") {
 		return errBadRequest

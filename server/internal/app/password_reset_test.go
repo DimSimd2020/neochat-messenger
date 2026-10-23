@@ -59,6 +59,9 @@ func TestPasswordResetAuthOnly(t *testing.T) {
 		t.Fatalf("reset request by nick: %d %v", st, body)
 	}
 	link := mailbox.latest()
+	if !mailbox.reset {
+		t.Fatal("password reset used verification email template")
+	}
 	if !strings.Contains(link, "/v1/accounts/password-reset/confirm?t=") {
 		t.Fatal("reset mail did not use password-reset continueUrl")
 	}

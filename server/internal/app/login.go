@@ -58,9 +58,11 @@ func platformName(p string) string {
 // returns the password-sealed account key backup with a short-lived start token.
 func (s *Server) handleNewDeviceStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Code     string `json:"code"`
+		Username       string `json:"username"`
+		Password       string `json:"password"`
+		Code           string `json:"code"`
+		InstallationID string `json:"installation_id"`
+		Platform       string `json:"platform"`
 	}
 	if err := readJSON(w, r, 8<<10, &req); err != nil {
 		s.fail(w, r, err)
@@ -100,6 +102,18 @@ func (s *Server) handleNewDeviceStart(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, invalid)
 		return
 	}
+	previous := installationLink{ID: req.InstallationID, Platform: req.Platform}
+	if req.InstallationID != "" {
+		if !validInstallationID(req.InstallationID) {
+			s.fail(w, r, errBadRequest)
+			return
+		}
+		err = s.db.QueryRow(r.Context(), `SELECT id FROM devices WHERE user_id=$1 AND platform=$2 AND installation_id=$3 AND revoked_at IS NULL`, userID, req.Platform, req.InstallationID).Scan(&previous.Replaces)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			s.fail(w, r, err)
+			return
+		}
+	}
 	if len(backup) == 0 {
 		s.fail(w, r, errf(409, "no_backup", "Для этого аккаунта нет копии ключей. Войдите по QR-коду с другого устройства"))
 		return
@@ -109,7 +123,7 @@ func (s *Server) handleNewDeviceStart(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if n >= maxDevices {
+	if n >= maxDevices && previous.Replaces == "" {
 		s.fail(w, r, errDeviceLimit())
 		return
 	}
@@ -121,14 +135,16 @@ func (s *Server) handleNewDeviceStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	id, token := newUUID(), randomToken()
-	if _, err := s.db.Exec(r.Context(), `INSERT INTO device_links(id, kind, user_id, secret_hash, device, expires_at) VALUES ($1,'start',$2,$3,'{}',$4)`,
-		id, userID, tokenHash(token), time.Now().Add(linkTTL)); err != nil {
+	metadata, _ := json.Marshal(previous)
+	if _, err := s.db.Exec(r.Context(), `INSERT INTO device_links(id, kind, user_id, secret_hash, device, expires_at) VALUES ($1,'start',$2,$3,$4,$5)`,
+		id, userID, tokenHash(token), metadata, time.Now().Add(linkTTL)); err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{
 		"user_id": userID, "start_token": id + "." + token, "key_backup": backup, "account_identity_key": accountKey,
-		"roster": map[string]any{"revision": fmt.Sprint(rosterRev), "blob": blob, "signature": sig},
+		"replace_device_id": previous.Replaces,
+		"roster":            map[string]any{"revision": fmt.Sprint(rosterRev), "blob": blob, "signature": sig},
 	})
 }
 
@@ -193,18 +209,26 @@ func (s *Server) handleNewDeviceFinish(w http.ResponseWriter, r *http.Request) {
 	linkID, token, _ := strings.Cut(req.StartToken, ".")
 	var out tokensOut
 	var notify []string
+	var previous installationLink
 	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
 		var userID string
 		var hash []byte
-		err := tx.QueryRow(r.Context(), `DELETE FROM device_links WHERE id=$1 AND kind='start' AND expires_at>now() RETURNING user_id, secret_hash`, nullUUID(linkID)).
-			Scan(&userID, &hash)
+		var metadata []byte
+		err := tx.QueryRow(r.Context(), `DELETE FROM device_links WHERE id=$1 AND kind='start' AND expires_at>now() RETURNING user_id, secret_hash, device`, nullUUID(linkID)).
+			Scan(&userID, &hash, &metadata)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && subtle.ConstantTimeCompare(hash, tokenHash(token)) != 1) {
 			return errf(401, "start_expired", "Вход занял слишком много времени. Повторите")
 		}
 		if err != nil {
 			return err
 		}
-		if notify, err = s.addDevice(r, tx, userID, &req.Device, &req.Roster); err != nil {
+		if err := json.Unmarshal(metadata, &previous); err != nil {
+			return err
+		}
+		if err := replaceInstallation(r, tx, userID, &req.Device, previous); err != nil {
+			return err
+		}
+		if notify, err = s.addDevice(r, tx, userID, &req.Device, &req.Roster, previous.Replaces != ""); err != nil {
 			return err
 		}
 		out, _, err = newSession(r.Context(), tx, userID, req.Device.DeviceID, "")
@@ -215,11 +239,14 @@ func (s *Server) handleNewDeviceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.notify(notify)
+	if previous.Replaces != "" {
+		s.hub.disconnect(previous.Replaces)
+	}
 	writeJSON(w, 200, out)
 }
 
 // addDevice publishes the roster that lists the new device and tells the account's other devices.
-func (s *Server) addDevice(r *http.Request, tx pgx.Tx, userID string, d *deviceIn, ro *rosterIn) ([]string, error) {
+func (s *Server) addDevice(r *http.Request, tx pgx.Tx, userID string, d *deviceIn, ro *rosterIn, reinstalled bool) ([]string, error) {
 	if _, err := tx.Exec(r.Context(), `SELECT 1 FROM users WHERE id=$1 FOR UPDATE`, userID); err != nil {
 		return nil, err
 	}
@@ -233,10 +260,14 @@ func (s *Server) addDevice(r *http.Request, tx pgx.Tx, userID string, d *deviceI
 	if err := updateRoster(r, tx, userID, ro); err != nil {
 		return nil, err
 	}
-	if err := insertDevice(r.Context(), tx, userID, d, false); err != nil {
+	if err := insertDevice(r.Context(), tx, userID, d, d.replacesPrimary); err != nil {
 		return nil, err
 	}
-	own, err := notifyOwn(r.Context(), tx, userID, "", fmt.Sprintf("Вход на новом устройстве: %s (%s). Если это не вы, отзовите его в настройках и смените пароль.", d.Name, platformName(d.Platform)))
+	label := "Вход на новом устройстве"
+	if reinstalled {
+		label = "Повторный вход после переустановки"
+	}
+	own, err := notifyOwn(r.Context(), tx, userID, "", fmt.Sprintf("%s: %s (%s). Если это не вы, отзовите его в настройках и смените пароль.", label, d.Name, platformName(d.Platform)))
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +365,15 @@ func (s *Server) handleQRDevice(w http.ResponseWriter, r *http.Request, a *authC
 	}
 	var d deviceIn
 	json.Unmarshal(dev, &d)
-	writeJSON(w, 200, map[string]any{"device_id": d.DeviceID, "name": d.Name, "platform": d.Platform, "identity_key": d.IdentityKey, "auth_key": d.AuthKey})
+	var previous string
+	if d.InstallationID != "" {
+		err := s.db.QueryRow(r.Context(), `SELECT id FROM devices WHERE user_id=$1 AND platform=$2 AND installation_id=$3 AND revoked_at IS NULL`, a.UserID, d.Platform, d.InstallationID).Scan(&previous)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	writeJSON(w, 200, map[string]any{"device_id": d.DeviceID, "name": d.Name, "platform": d.Platform, "identity_key": d.IdentityKey, "auth_key": d.AuthKey, "replace_device_id": previous})
 }
 
 func (s *Server) handleQRApprove(w http.ResponseWriter, r *http.Request, a *authCtx) {
@@ -351,6 +390,7 @@ func (s *Server) handleQRApprove(w http.ResponseWriter, r *http.Request, a *auth
 		return
 	}
 	var notify []string
+	var previous string
 	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
 		var dev []byte
 		err := tx.QueryRow(r.Context(), `SELECT device FROM device_links WHERE id=$1 AND kind='qr' AND approved_at IS NULL AND expires_at>now() FOR UPDATE`,
@@ -365,7 +405,16 @@ func (s *Server) handleQRApprove(w http.ResponseWriter, r *http.Request, a *auth
 		if err := json.Unmarshal(dev, &d); err != nil {
 			return err
 		}
-		if notify, err = s.addDevice(r, tx, a.UserID, &d, &body.Roster); err != nil {
+		if d.InstallationID != "" {
+			err := tx.QueryRow(r.Context(), `SELECT id FROM devices WHERE user_id=$1 AND platform=$2 AND installation_id=$3 AND revoked_at IS NULL`, a.UserID, d.Platform, d.InstallationID).Scan(&previous)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
+		if err := replaceInstallation(r, tx, a.UserID, &d, installationLink{ID: d.InstallationID, Platform: d.Platform, Replaces: previous}); err != nil {
+			return err
+		}
+		if notify, err = s.addDevice(r, tx, a.UserID, &d, &body.Roster, previous != ""); err != nil {
 			return err
 		}
 		_, err = tx.Exec(r.Context(), `UPDATE device_links SET approved_at=now(), user_id=$2, sealed=$3 WHERE id=$1`, r.PathValue("id"), a.UserID, body.Sealed)
@@ -376,6 +425,9 @@ func (s *Server) handleQRApprove(w http.ResponseWriter, r *http.Request, a *auth
 		return
 	}
 	s.hub.notify(notify)
+	if previous != "" {
+		s.hub.disconnect(previous)
+	}
 	w.WriteHeader(204)
 }
 
