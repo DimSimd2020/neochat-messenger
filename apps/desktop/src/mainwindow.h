@@ -17,6 +17,7 @@ class Rail;
 class SlideBox;
 class ConversationHeader;
 class NoticeBar;
+class PinBar;
 namespace dialogs {
 class Page;
 }
@@ -83,6 +84,7 @@ private:
     QWidget *m_placeholder;
     ConversationHeader *m_header;
     NoticeBar *m_notice;
+    PinBar *m_pinBar = nullptr;
     NoticeBar *m_updateBar;
     NoticeBar *m_emailBar;
     bool m_emailPrompted = false;

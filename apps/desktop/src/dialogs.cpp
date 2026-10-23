@@ -553,10 +553,12 @@ void newChat(const DialogHost &h)
     auto *group = new ui::Button(QStringLiteral("Группа"), ui::Button::Flat);
     auto *channel = new ui::Button(QStringLiteral("Канал"), ui::Button::Flat);
     auto *addContact = new ui::Button(QStringLiteral("Новый контакт"), ui::Button::Flat);
+    auto *saved = new ui::Button(QStringLiteral("Избранное"), ui::Button::Flat);
     modeBar->addWidget(direct);
     modeBar->addWidget(group);
     modeBar->addWidget(channel);
     modeBar->addStretch();
+    modeBar->addWidget(saved);
     modeBar->addWidget(addContact);
     sheet->body()->addLayout(modeBar);
     auto *title = new ui::TextField(QStringLiteral("Название группы"));
@@ -648,6 +650,14 @@ void newChat(const DialogHost &h)
     QObject::connect(group, &QAbstractButton::clicked, sheet, [=] { setMode(1); });
     QObject::connect(channel, &QAbstractButton::clicked, sheet, [=] { setMode(2); });
     QObject::connect(addContact, &QAbstractButton::clicked, sheet, [=] { newContact(h, [=] { (*reload)(); }); });
+    QObject::connect(saved, &QAbstractButton::clicked, sheet, [=] {
+        Core::instance()->call("open_saved", {}, sheet, [=](const QJsonValue &cv, const CoreError &ce) {
+            if (!ce.ok())
+                return fail(h, ce);
+            sheet->close();
+            h.openChat(cv.toObject().value("id").toString());
+        });
+    });
     QObject::connect(search->edit(), &QLineEdit::textChanged, sheet, [=] { (*reload)(); });
     QObject::connect(create, &QAbstractButton::clicked, sheet, [=] {
         if (title->text().trimmed().isEmpty())

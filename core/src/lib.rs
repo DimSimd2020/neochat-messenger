@@ -17,6 +17,7 @@ mod groups;
 mod markdown;
 mod keys;
 mod outbox;
+mod pins;
 mod profiles;
 mod mentions;
 mod service;

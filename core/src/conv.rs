@@ -358,7 +358,7 @@ impl Inner {
         let row = db
             .conn
             .query_row(
-                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags, in_archive, pinned, avatar, muted FROM conversations WHERE id=?1",
+                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags, in_archive, pinned, avatar, muted, saved FROM conversations WHERE id=?1",
                 [id],
                 |r| {
                     Ok((
@@ -380,12 +380,13 @@ impl Inner {
                         r.get::<_, i64>(15)?,
                         r.get::<_, String>(16)?,
                         r.get::<_, String>(17)?,
+                        r.get::<_, i64>(18)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| Error::Invalid("Беседа не найдена".into()))?;
-        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags, in_archive, pinned, group_avatar, muted) = row;
+        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags, in_archive, pinned, group_avatar, muted, saved) = row;
         drop(db);
         let rights = self.rights(&id)?;
         let db = self.db();
@@ -424,6 +425,8 @@ impl Inner {
         }
         let display = if kind == "direct" {
             members_out.iter().find(|m| m["me"] == false).and_then(|m| m["display_name"].as_str()).unwrap_or("Диалог").to_string()
+        } else if saved == 1 {
+            "Избранное".to_string()
         } else if title.is_empty() && kind == "channel" {
             "Канал".to_string()
         } else if title.is_empty() {
@@ -478,6 +481,9 @@ impl Inner {
             "can_send": active && muted_me == 0 && rights.can_post(&me),
             "can_post": rights.can_post(&me),
             "muted": muted_me,
+            "saved": saved == 1,
+            "can_pin": active && (kind == "direct" || rights.is_admin(&me)),
+            "pin_count": db.conn.query_row("SELECT count(*) FROM messages WHERE conversation_id=?1 AND pinned_at>0", [&id], |r| r.get::<_, i64>(0))?,
             "can_media": active && muted_me == 0 && rights.can_media(&me),
             "can_polls": active && muted_me == 0 && rights.can_polls(&me),
             "can_edit_info": rights.can_info(&me),

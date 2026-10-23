@@ -150,6 +150,9 @@ impl Db {
             "ALTER TABLE messages ADD COLUMN mentioned INTEGER NOT NULL DEFAULT 0",
             // Muted members of a group, as {user_id: until} (Unix ms, -1 = without an end), from the server.
             "ALTER TABLE conversations ADD COLUMN muted TEXT NOT NULL DEFAULT '{}'",
+            // Pin time of a pinned message (0 = not pinned); 1 on the notes chat flag of a conversation.
+            "ALTER TABLE messages ADD COLUMN pinned_at INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE conversations ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(sql, []);
         }

@@ -801,6 +801,82 @@ fn group_service_lines_and_mute() {
 }
 
 #[test]
+fn pinned_messages_and_saved_chat() {
+    let Some(e) = env() else { return };
+    let (an, bn) = (uname("pa"), uname("pb"));
+    let (alice, _) = register(&e, &an);
+    let (bob, _) = register(&e, &bn);
+    let alice2 = Client::new();
+    alice2.call("login", json!({"server": e.server, "username": an, "password": "correct horse battery", "device_name": "phone", "platform": "android"}));
+    alice.sync();
+    alice2.sync();
+    let b = alice.call("resolve_contact", json!({"username": bn}))["user_id"].as_str().unwrap().to_string();
+    let cid = alice.call("open_direct", json!({"user_id": b}))["id"].as_str().unwrap().to_string();
+    bob.call("resolve_contact", json!({"username": an}));
+    bob.call("open_direct", json!({"user_id": uid(&alice)}));
+
+    // Direct chat: either side pins; several pins, newest first, and unpinning one keeps the other.
+    let m1 = alice.call("send_text", json!({"conversation_id": cid, "text": "первое"}))["id"].as_str().unwrap().to_string();
+    let m2 = alice.call("send_text", json!({"conversation_id": cid, "text": "второе"}))["id"].as_str().unwrap().to_string();
+    alice.sync();
+    bob.sync();
+    alice2.sync();
+    bob.call("pin_message", json!({"message_id": m1, "on": true}));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    alice.call("pin_message", json!({"message_id": m2, "on": true}));
+    bob.sync();
+    alice.sync();
+    bob.sync();
+    alice.sync();
+    alice2.sync();
+    for c in [&alice, &bob, &alice2] {
+        let pins = c.call("list_pins", json!({"conversation_id": cid}));
+        let ids: Vec<&str> = pins.as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec![m2.as_str(), m1.as_str()], "{pins}");
+        assert_eq!(c.call("get_conversation", json!({"conversation_id": cid}))["pin_count"], 2);
+    }
+    alice.call("pin_message", json!({"message_id": m2, "on": false}));
+    alice.sync();
+    bob.sync();
+    let left = bob.call("list_pins", json!({"conversation_id": cid}));
+    assert_eq!(left.as_array().unwrap().len(), 1);
+    assert_eq!(left[0]["id"], m1.as_str());
+    assert_eq!(left[0]["pinned"], true);
+
+    // Group: members cannot pin; an admin's pin reaches everyone.
+    let gid = alice.call("create_group", json!({"title": "Закрепы", "member_ids": [b]}))["id"].as_str().unwrap().to_string();
+    let gm = alice.call("send_text", json!({"conversation_id": gid, "text": "правила"}))["id"].as_str().unwrap().to_string();
+    alice.sync();
+    bob.sync();
+    assert!(bob.try_call("pin_message", json!({"message_id": gm, "on": true})).is_err());
+    alice.call("pin_message", json!({"message_id": gm, "on": true}));
+    alice.sync();
+    bob.sync();
+    assert_eq!(bob.call("list_pins", json!({"conversation_id": gid}))[0]["id"], gm.as_str());
+
+    // Saved messages: created once, shared with the other device, takes copies of messages.
+    let saved = alice.call("open_saved", json!({}));
+    let sid = saved["id"].as_str().unwrap().to_string();
+    assert_eq!(saved["title"], "Избранное");
+    assert_eq!(saved["saved"], true);
+    assert_eq!(alice.call("open_saved", json!({}))["id"], sid.as_str());
+    alice.call("save_message", json!({"message_id": gm}));
+    alice.call("send_text", json!({"conversation_id": sid, "text": "заметка"}));
+    alice.sync();
+    alice2.sync();
+    alice2.sync();
+    let on2 = alice2.call("get_conversation", json!({"conversation_id": sid}));
+    assert_eq!(on2["saved"], true, "{on2}");
+    assert_eq!(on2["title"], "Избранное");
+    assert_eq!(alice2.call("open_saved", json!({}))["id"], sid.as_str());
+    assert_eq!(alice2.texts(&sid), vec!["правила", "заметка"]);
+    assert_eq!(alice.messages(&sid)[0]["fwd"]["name"].as_str().is_some(), true);
+    // Nobody else sees it.
+    bob.sync();
+    assert!(bob.try_call("get_conversation", json!({"conversation_id": sid})).is_err());
+}
+
+#[test]
 fn reactions_bio_presence_typing_qr_archive_pins_lock() {
     let Some(e) = env() else { return };
     if std::env::var("NEOCHAT_E2E_LIVE").is_err() {

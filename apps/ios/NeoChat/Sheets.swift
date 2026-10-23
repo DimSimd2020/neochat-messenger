@@ -194,6 +194,7 @@ final class NewChatViewController: SheetViewController {
     private let aboutField = Field("Описание (необязательно)")
     private let list = UIStackView()
     private let create = PillButton("Создать группу")
+    private var savedRow: UIView?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -201,6 +202,22 @@ final class NewChatViewController: SheetViewController {
         mode.selectedSegmentIndex = 0
         mode.addAction(UIAction { [weak self] _ in self?.setMode(self?.mode.selectedSegmentIndex ?? 0) }, for: .valueChanged)
         stack.addArrangedSubview(mode)
+        // Notes to myself sit above the contacts of a direct chat.
+        let saved = personRow("Избранное", "Заметки для себя", seed: "saved") { [weak self] in
+            Core.shared.call("open_saved") { r in
+                switch r {
+                case .failure(let e): self?.toast(e.message)
+                case .success(let v):
+                    let id = (v as? JSON)?.str("id") ?? ""
+                    self?.dismiss(animated: !Theme.reducedMotion) {
+                        NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": id])
+                    }
+                }
+            }
+        }
+        saved.layer.cornerRadius = 20
+        savedRow = saved
+        stack.addArrangedSubview(saved)
         let addContact = LinkButton("Новый контакт")
         addContact.contentHorizontalAlignment = .leading
         addContact.addAction(UIAction { [weak self] _ in
@@ -231,6 +248,7 @@ final class NewChatViewController: SheetViewController {
         titleField.isHidden = !group
         aboutField.isHidden = !group
         create.isHidden = !group
+        savedRow?.isHidden = group
         updateCreate()
         reload()
     }

@@ -472,7 +472,7 @@ impl Inner {
                         stats.calls.push(crate::calls::Signal { sender: sender.clone(), sdev: sdev.clone(), conv: conv.clone(), ts: p.ts, body });
                     }
                 }
-                "group_update" | "poll_vote" | "poll_close" | "reaction" | "edit" => {
+                "group_update" | "poll_vote" | "poll_close" | "reaction" | "edit" | "pin" => {
                     if let Some(g) = p.group.clone() {
                         control = Some((p.kind.clone(), g));
                     }
@@ -494,9 +494,10 @@ impl Inner {
                 "group_update" => self.apply_group_update(&conv, &sender, &g),
                 "reaction" => self.apply_reaction(&conv, &sender, &g),
                 "edit" => Self::apply_edit(&self.db().conn, &conv, &sender, &g, now_ms()),
+                "pin" => Self::apply_pin(&self.db().conn, &conv, &sender, &g, now_ms()),
                 _ => self.apply_poll_control(&conv, &sender, &kind, &g),
             };
-            changed_conv |= applied.unwrap_or(false) && matches!(kind.as_str(), "group_update" | "edit");
+            changed_conv |= applied.unwrap_or(false) && matches!(kind.as_str(), "group_update" | "edit" | "pin");
         }
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         if changed_conv {

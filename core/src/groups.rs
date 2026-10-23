@@ -360,6 +360,14 @@ impl Inner {
                 }
             }
         }
+        // The notes chat: a channel of one, flagged by its owner from another of the owner's devices.
+        if g["saved"] == true && r.kind == "channel" && r.owner.as_deref() == Some(sender) && self.me()?.0 == sender {
+            let alone: bool = self.db().conn.query_row("SELECT json_array_length(members)=1 FROM conversations WHERE id=?1", [conv], |x| x.get(0))?;
+            if alone {
+                self.db().conn.execute("UPDATE conversations SET saved=1 WHERE id=?1", [conv])?;
+                changed = true;
+            }
+        }
         if r.is_admin(sender) {
             if let Some(tags) = g["tags"].as_object() {
                 for (u, t) in tags.iter().take(256) {

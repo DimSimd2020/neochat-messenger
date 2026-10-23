@@ -705,6 +705,8 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     const bool checked = checking && view->isChecked(m.value("id").toString());
     if (checked)
         p->fillRect(QRectF(0, 0, width, opt.rect.height()), QColor(c.accent.red(), c.accent.green(), c.accent.blue(), 22));
+    if (const qreal f = view ? view->flashOf(m.value("id").toString()) : 0; f > 0)
+        p->fillRect(QRectF(0, 0, width, opt.rect.height()), QColor(c.accent.red(), c.accent.green(), c.accent.blue(), int(60 * f)));
 
     if (it->appearAt >= 0) {
         const qreal t = qBound(0.0, (clockMs() - it->appearAt) / kAppearMs, 1.0);
@@ -1010,6 +1012,12 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
             if ((it.appearAt >= 0 && now - it.appearAt < kAppearMs) || (it.reactAt >= 0 && now - it.reactAt < 180))
                 running = true;
         }
+        if (!m_flashId.isEmpty()) {
+            if (now - m_flashAt < 1600)
+                running = true;
+            else
+                m_flashId.clear();
+        }
         if (!running)
             m_anim.stop();
     });
@@ -1073,6 +1081,8 @@ void MessageView::setConversation(const QString &id, bool group)
     m_searching = false;
     m_newBelow = 0;
     m_jump->hide();
+    m_jumpId.clear();
+    m_flashId.clear();
     ++m_generation;
     m_loading = false;
     m_model->clear();
@@ -1114,7 +1124,44 @@ void MessageView::load(bool older)
         if (older && page.size() < 50)
             m_hasMore = false;
         applyPage(page, older);
+        if (!m_jumpId.isEmpty()) {
+            const QString id = m_jumpId;
+            m_jumpId.clear();
+            jumpToMessage(id);
+        }
     });
+}
+
+void MessageView::jumpToMessage(const QString &id)
+{
+    if (m_searching || id.isEmpty())
+        return;
+    for (int i = 0; i < m_model->rowCount(); ++i) {
+        const MessageItem &it = m_model->item(i);
+        if (!it.isDate && it.msg.value("id").toString() == id) {
+            m_jumpId.clear();
+            scrollTo(m_model->index(i, 0), QAbstractItemView::PositionAtCenter);
+            m_flashId = id;
+            m_flashAt = clockMs();
+            m_anim.start();
+            viewport()->update();
+            return;
+        }
+    }
+    if (!m_hasMore) {
+        emit toast(QStringLiteral("Сообщение не найдено в истории"));
+        return;
+    }
+    m_jumpId = id;
+    load(true);
+}
+
+qreal MessageView::flashOf(const QString &id) const
+{
+    if (m_flashId.isEmpty() || m_flashId != id)
+        return 0;
+    const qreal t = (clockMs() - m_flashAt) / 1600.0;
+    return t >= 1 ? 0 : (t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85);
 }
 
 void MessageView::applyPage(const QList<QJsonObject> &page, bool older)
@@ -1726,6 +1773,21 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
             Core::instance()->call("close_poll", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
                 if (!e.ok())
                     emit toast(e.message);
+            });
+        });
+    if (m_canPin && (kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed") {
+        const bool pinned = m.value("pinned").toBool();
+        menu->addAction(pinned ? QStringLiteral("Открепить") : QStringLiteral("Закрепить"), this, [this, m, pinned] {
+            Core::instance()->call("pin_message", {{"message_id", m.value("id")}, {"on", !pinned}}, this, [this](const QJsonValue &, const CoreError &e) {
+                if (!e.ok())
+                    emit toast(e.message);
+            });
+        });
+    }
+    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed")
+        menu->addAction(QStringLiteral("В избранное"), this, [this, m] {
+            Core::instance()->call("save_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
+                emit toast(e.ok() ? QStringLiteral("Добавлено в избранное") : e.message);
             });
         });
     if (kind == "file") {

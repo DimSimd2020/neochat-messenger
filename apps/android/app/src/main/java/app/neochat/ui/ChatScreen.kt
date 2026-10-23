@@ -281,6 +281,15 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val notice = LinearLayout(ctx)
     private val noticeText = ctx.label("", 14f, 400, Theme.Role.WARNING)
     private val noticeAction = ctx.label("Сверить код", 14f, 600, Theme.Role.ACCENT)
+    // Pinned messages: the bar shows one at a time, a tap goes to it and on to the next older one.
+    private val pinBar = LinearLayout(ctx)
+    private val pinHead = ctx.label("", 12.5f, 600, Theme.Role.ACCENT)
+    private val pinText = ctx.label("", 14f, 400)
+    private val pinList = IconButton(ctx, R.drawable.ic_more, "Все закреплённые", 40)
+    private val pinOff = IconButton(ctx, R.drawable.ic_close, "Открепить", 40)
+    private var pins: List<JSONObject> = emptyList()
+    private var pinIndex = 0
+    private var jumpId: String? = null
 
     // history
     private val list = RecyclerView(ctx)
@@ -344,6 +353,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         column.addView(searchWrap, lp().apply { setMargins(dp(12), dp(8), dp(12), 0) })
         buildNotice()
         column.addView(notice, lp().apply { setMargins(dp(12), dp(8), dp(12), 0) })
+        buildPinBar()
+        column.addView(pinBar, lp().apply { setMargins(dp(12), dp(8), dp(12), 0) })
 
         list.layoutManager = layout
         list.adapter = adapter
@@ -505,7 +516,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val channel = conv.str("kind") == "channel"
             baseSubtitle = when (conv.str("kind")) {
                 "group" -> memberCount(conv.optInt("member_count")) + conv.optInt("online_count").takeIf { it > 0 }?.let { ", $it в сети" }.orEmpty()
-                "channel" -> memberCount(conv.optInt("member_count"), true)
+                "channel" -> if (conv.optBoolean("saved")) "Заметки для себя" else memberCount(conv.optInt("member_count"), true)
                 else -> conv.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }
                     ?: members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
             }
@@ -538,6 +549,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             noticeText.text = n ?: ""
             noticeAction.visibility = if ((conv.optJSONArray("key_changed_users")?.length() ?: 0) > 0) View.VISIBLE else View.GONE
             expand(notice, !n.isNullOrEmpty())
+            refreshPins()
             if (first) {
                 val d = conv.str("draft")
                 if (d.isNotEmpty()) {
@@ -620,6 +632,112 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
     }
 
+    // ---- pinned messages ----
+
+    private fun buildPinBar() {
+        pinBar.gravity = Gravity.CENTER_VERTICAL
+        pinBar.background = GlassDrawable(ctx, GlassDrawable.Kind.NONE, ctx.dpf(20)).apply { rim = true }
+        pinBar.setPadding(dp(14), dp(4), dp(4), dp(4))
+        pinBar.isClickable = true
+        pinBar.isFocusable = true
+        pinBar.addView(TintedIcon(ctx, R.drawable.ic_pin, Theme.Role.ACCENT), lp(dp(20), dp(20)).apply { marginEnd = dp(10) })
+        val texts = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        pinHead.maxLines = 1
+        pinHead.ellipsize = TextUtils.TruncateAt.END
+        pinText.maxLines = 1
+        pinText.ellipsize = TextUtils.TruncateAt.END
+        texts.addView(pinHead)
+        texts.addView(pinText, lp().apply { topMargin = dp(2) })
+        pinBar.addView(texts, lp(0, WRAP, 1f))
+        pinBar.addView(pinList, lp(dp(40), dp(40)))
+        pinBar.addView(pinOff, lp(dp(40), dp(40)))
+        pinBar.setOnClickListener {
+            val m = pins.getOrNull(pinIndex) ?: return@setOnClickListener
+            pinIndex = (pinIndex + 1) % pins.size
+            showPins()
+            jumpTo(m.str("id"))
+        }
+        pinList.setOnClickListener {
+            val pm = PopupMenu(act, pinList)
+            for (m in pins) pm.add(pinPreview(m)) { jumpTo(m.str("id")) }
+            pm.show()
+        }
+        pinOff.setOnClickListener {
+            val m = pins.getOrNull(pinIndex) ?: return@setOnClickListener
+            CoreClient.call("pin_message", JSONObject().put("message_id", m.str("id")).put("on", false)) { _, e -> if (e != null) act.toast(e.message) }
+        }
+        pinBar.visibility = View.GONE
+    }
+
+    private fun pinPreview(m: JSONObject): String {
+        val t = m.str("text").replace('\n', ' ')
+        val f = m.optJSONObject("file")
+        val s = when {
+            m.str("kind") == "poll" -> "Опрос: $t"
+            f != null -> (if (isImage(m)) "Фото" else "Файл " + f.str("name")) + if (t.isEmpty()) "" else ": $t"
+            else -> t
+        }
+        return if (s.length > 120) s.take(119) + "…" else s
+    }
+
+    private fun refreshPins() {
+        if (conv.optInt("pin_count") == 0) {
+            pins = emptyList()
+            pinIndex = 0
+            return showPins()
+        }
+        CoreClient.call("list_pins", JSONObject().put("conversation_id", conversationId)) { v, e ->
+            if (e != null) return@call
+            val next = (v as? JSONArray)?.objects() ?: emptyList()
+            if (next.size != pins.size) pinIndex = 0
+            pins = next
+            if (pinIndex >= pins.size) pinIndex = 0
+            showPins()
+        }
+    }
+
+    private fun showPins() {
+        val m = pins.getOrNull(pinIndex)
+        if (m != null) {
+            pinHead.text = if (pins.size > 1) "Закреплённое сообщение · ${pinIndex + 1} из ${pins.size}" else "Закреплённое сообщение"
+            pinText.text = pinPreview(m)
+            pinBar.contentDescription = "${pinHead.text}: ${pinText.text}. Нажмите, чтобы перейти к сообщению"
+        }
+        pinList.visibility = if (pins.size > 1) View.VISIBLE else View.GONE
+        pinOff.visibility = if (conv.optBoolean("can_pin")) View.VISIBLE else View.GONE
+        expand(pinBar, m != null)
+    }
+
+    /** Scrolls to a message, paging older history in until it is loaded. */
+    private fun jumpTo(id: String) {
+        if (searching || id.isEmpty()) return
+        val pos = adapter.positionOf(id)
+        if (pos >= 0) {
+            jumpId = null
+            showJump(false)
+            layout.scrollToPositionWithOffset(pos, list.height / 3)
+            list.postDelayed({ flash(id) }, 80)
+            return
+        }
+        if (!hasMore) return act.toast("Сообщение не найдено в истории")
+        jumpId = id
+        load(true)
+    }
+
+    /** A short pulse on the message that was jumped to. */
+    private fun flash(id: String) {
+        if (Theme.reducedMotion) return
+        val v = list.findViewHolderForAdapterPosition(adapter.positionOf(id))?.itemView ?: return
+        v.animate().cancel()
+        v.animate().alpha(0.35f).setDuration(220).withEndAction { v.animate().alpha(1f).setDuration(380).start() }.start()
+    }
+
+    private fun savedCopy(m: JSONObject) {
+        CoreClient.call("save_message", JSONObject().put("message_id", m.str("id"))) { _, e ->
+            act.toast(if (e != null) e.message else "Сохранено в избранное")
+        }
+    }
+
     private fun load(older: Boolean) {
         if (searching) return
         if (older && (loading || !hasMore)) return
@@ -634,7 +752,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         CoreClient.call("list_messages", p) { v, e ->
             if (g != gen) return@call
             loading = false
-            if (e != null) return@call act.toast(e.message)
+            if (e != null) {
+                jumpId = null
+                return@call act.toast(e.message)
+            }
             val page = (v as? JSONArray)?.objects() ?: emptyList()
             if (older && page.size < 50) hasMore = false
             apply(page, older)
@@ -665,6 +786,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         adapter.setItems(build(messages))
         if (older) {
             layout.scrollToPositionWithOffset(anchorPos + (adapter.itemCount - before), anchorTop)
+            jumpId?.let { jumpTo(it) }
             return
         }
         val newMsgs = page.filter { it.str("id") in appended }
@@ -753,6 +875,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
 
         private fun key(x: Any) = if (x is Item) "m:" + x.m.str("id") else "d:$x"
+
+        fun positionOf(id: String) = items.indexOfFirst { it is Item && it.m.str("id") == id }
 
         override fun getItemViewType(position: Int): Int {
             val it = items[position]
@@ -1410,6 +1534,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (android.os.Build.VERSION.SDK_INT < 33) act.toast("Текст скопирован")
         }
         if (isImage(m)) pm.add("Открыть фото") { openPhoto(m) }
+        val postable = ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll")
+        if (postable && conv.optBoolean("can_pin")) {
+            val on = !m.optBoolean("pinned")
+            pm.add(if (on) "Закрепить" else "Открепить") {
+                CoreClient.call("pin_message", JSONObject().put("message_id", m.str("id")).put("on", on)) { _, e -> if (e != null) act.toast(e.message) }
+            }
+        }
+        if (postable && !conv.optBoolean("saved")) pm.add("В избранное") { savedCopy(m) }
         if (!gone && m.optBoolean("outgoing") && m.str("status") in setOf("sent", "delivered", "read") && m.str("kind") in setOf("text", "file"))
             pm.add("Изменить") { setEdit(m) }
         if (m.str("kind") == "poll" && m.optBoolean("outgoing") && m.optJSONObject("poll")?.optBoolean("closed") != true) pm.add("Завершить опрос") {

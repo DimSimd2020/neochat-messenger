@@ -80,6 +80,10 @@ func isImage(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.boo
 /// Links found by the core's markdown parser.
 func links(_ m: JSON) -> [String] { m.arr("spans").compactMap { $0["link"] as? String } }
 
+private extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
 extension UILabel {
     /// The @name under `point`, when the finger is actually on that glyph.
     func mentionName(at point: CGPoint) -> String? {
@@ -243,6 +247,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private let table = UITableView(frame: .zero, style: .plain)
     private let notice = UIStackView()
     private let noticeText = label("", 14, color: Theme.warning)
+    // Pinned messages: the bar shows one at a time, a tap goes to it and on to the next older one.
+    private let pinBar = UIStackView()
+    private let pinTap = UIControl()
+    private let pinHead = label("", 12.5, .semibold, color: Theme.accent)
+    private let pinText = label("", 14)
+    private let pinList = UIButton(type: .system)
+    private let pinOff = UIButton(type: .system)
+    private var pins: [JSON] = []
+    private var pinIndex = 0
+    private var jumpId: String?
     private let composer = UIView()
     private let attach = UIButton(type: .system)
     private let input = ComposerTextView()
@@ -323,13 +337,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         notice.addArrangedSubview(verify)
         notice.isHidden = true
 
+        buildPinBar()
         buildComposer()
         goneLabel.textAlignment = .center
         goneLabel.isHidden = true
 
         buildHeader()
 
-        let stack = UIStackView(arrangedSubviews: [header, notice, table, composer, goneLabel])
+        let stack = UIStackView(arrangedSubviews: [header, notice, pinBar, table, composer, goneLabel])
         stack.axis = .vertical
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -963,6 +978,132 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { pendingPick = nil }
 
+    // MARK: pinned messages
+
+    private func buildPinBar() {
+        pinBar.axis = .horizontal
+        pinBar.spacing = 4
+        pinBar.alignment = .center
+        pinBar.glass(20)
+        pinBar.isLayoutMarginsRelativeArrangement = true
+        pinBar.layoutMargins = UIEdgeInsets(top: 2, left: 14, bottom: 2, right: 2)
+        let icon = UIImageView(image: UIImage(systemName: "pin.fill"))
+        icon.tintColor = Theme.accent
+        icon.contentMode = .scaleAspectFit
+        icon.isAccessibilityElement = false
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        pinBar.addArrangedSubview(icon)
+        pinHead.numberOfLines = 1
+        pinText.numberOfLines = 1
+        let texts = UIStackView(arrangedSubviews: [pinHead, pinText])
+        texts.axis = .vertical
+        texts.spacing = 2
+        texts.isUserInteractionEnabled = false
+        texts.translatesAutoresizingMaskIntoConstraints = false
+        pinTap.addSubview(texts)
+        pinTap.isAccessibilityElement = true
+        pinTap.accessibilityTraits = .button
+        pinTap.accessibilityHint = "Переходит к сообщению"
+        NSLayoutConstraint.activate([
+            texts.leadingAnchor.constraint(equalTo: pinTap.leadingAnchor, constant: 8),
+            texts.trailingAnchor.constraint(equalTo: pinTap.trailingAnchor),
+            texts.centerYAnchor.constraint(equalTo: pinTap.centerYAnchor),
+            pinTap.heightAnchor.constraint(greaterThanOrEqualToConstant: 48),
+        ])
+        pinTap.addAction(UIAction { [weak self] _ in
+            guard let self, let m = self.pins[safe: self.pinIndex] else { return }
+            self.pinIndex = (self.pinIndex + 1) % self.pins.count
+            self.showPins()
+            self.jumpTo(m.str("id"))
+        }, for: .touchUpInside)
+        pinBar.addArrangedSubview(pinTap)
+        pinList.setImage(UIImage(systemName: "list.bullet"), for: .normal)
+        pinList.accessibilityLabel = "Все закреплённые"
+        pinList.showsMenuAsPrimaryAction = true
+        pinOff.setImage(UIImage(systemName: "xmark"), for: .normal)
+        pinOff.accessibilityLabel = "Открепить"
+        pinOff.addAction(UIAction { [weak self] _ in
+            guard let self, let m = self.pins[safe: self.pinIndex] else { return }
+            Core.shared.call("pin_message", ["message_id": m.str("id"), "on": false]) { [weak self] r in
+                if case .failure(let e) = r { self?.toast(e.message) }
+            }
+        }, for: .touchUpInside)
+        for button in [pinList, pinOff] {
+            button.tintColor = Theme.accent
+            button.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 16, weight: .medium), forImageIn: .normal)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            let width = button.widthAnchor.constraint(equalToConstant: 44)
+            width.priority = .defaultHigh
+            NSLayoutConstraint.activate([width, button.heightAnchor.constraint(equalToConstant: 44)])
+            button.springPress()
+            pinBar.addArrangedSubview(button)
+        }
+        pinBar.isHidden = true
+    }
+
+    private func pinPreview(_ m: JSON) -> String {
+        let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
+        let s: String
+        if m.str("kind") == "poll" { s = "Опрос: " + t }
+        else if let f = m.obj("file") { s = (isImage(m) ? "Фото" : "Файл " + f.str("name")) + (t.isEmpty ? "" : ": " + t) }
+        else { s = t }
+        return s.count > 120 ? String(s.prefix(119)) + "…" : s
+    }
+
+    private func refreshPins() {
+        if conv.int("pin_count") == 0 {
+            pins = []
+            pinIndex = 0
+            return showPins()
+        }
+        Core.shared.call("list_pins", ["conversation_id": conversationId]) { [weak self] r in
+            guard let self, case .success(let v) = r else { return }
+            let next = v as? [JSON] ?? []
+            if next.count != self.pins.count { self.pinIndex = 0 }
+            self.pins = next
+            if self.pinIndex >= next.count { self.pinIndex = 0 }
+            self.showPins()
+        }
+    }
+
+    private func showPins() {
+        let m = pins[safe: pinIndex]
+        if let m {
+            pinHead.text = pins.count > 1 ? "Закреплённое сообщение · \(pinIndex + 1) из \(pins.count)" : "Закреплённое сообщение"
+            pinText.text = pinPreview(m)
+            pinTap.accessibilityLabel = (pinHead.text ?? "") + ": " + (pinText.text ?? "")
+            pinList.menu = UIMenu(children: pins.map { p in
+                UIAction(title: pinPreview(p)) { [weak self] _ in self?.jumpTo(p.str("id")) }
+            })
+        }
+        pinList.isHidden = pins.count < 2
+        pinOff.isHidden = !conv.bool("can_pin")
+        if pinBar.isHidden != (m == nil) { Theme.animate(0.18) { self.pinBar.isHidden = m == nil } }
+    }
+
+    /// Scrolls to a message, paging older history in until it is loaded.
+    private func jumpTo(_ id: String) {
+        guard !id.isEmpty else { return }
+        let row = items.firstIndex { if case .msg(let m, _, _) = $0 { return m.str("id") == id } else { return false } }
+        if let row {
+            jumpId = nil
+            table.scrollToRow(at: IndexPath(row: row, section: 0), at: .middle, animated: !Theme.reducedMotion)
+            DispatchQueue.main.asyncAfter(deadline: .now() + (Theme.reducedMotion ? 0 : 0.35)) { [weak self] in self?.flash(row) }
+            return
+        }
+        if !hasMore { return toast("Сообщение не найдено в истории") }
+        jumpId = id
+        load(older: true)
+    }
+
+    /// A short pulse on the message that was jumped to.
+    private func flash(_ row: Int) {
+        guard !Theme.reducedMotion, let c = table.cellForRow(at: IndexPath(row: row, section: 0)) else { return }
+        UIView.animate(withDuration: 0.22, animations: { c.contentView.alpha = 0.35 }) { _ in
+            UIView.animate(withDuration: 0.38) { c.contentView.alpha = 1 }
+        }
+    }
+
     // MARK: data
 
     private func refreshConversation(first: Bool) {
@@ -989,7 +1130,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             let handle = members.first { !$0.bool("me") }.map { "@" + $0.str("username") } ?? ""
             let seen = c.obj("presence")?.str("text") ?? ""
             self.peerOnline = c.obj("presence")?.bool("online") ?? false
-            self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) + (c.int("online_count") > 0 ? ", \(c.int("online_count")) в сети" : "") : channel ? memberCount(c.int("member_count"), channel: true)
+            self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) + (c.int("online_count") > 0 ? ", \(c.int("online_count")) в сети" : "") : channel ? (c.bool("saved") ? "Заметки для себя" : memberCount(c.int("member_count"), channel: true))
                 : seen.isEmpty ? handle : seen
             self.titleLabel.text = c.str("title")
             let peer = c.str("peer_user_id")
@@ -1017,6 +1158,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.noticeText.text = n
             self.notice.arrangedSubviews.last?.isHidden = !keyChanged
             if self.notice.isHidden != (n?.isEmpty ?? true) { Theme.animate(0.18) { self.notice.isHidden = n?.isEmpty ?? true } }
+            self.refreshPins()
             if first, !c.str("draft").isEmpty {
                 self.input.text = c.str("draft")
                 self.textViewDidChange(self.input)
@@ -1084,7 +1226,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             guard let self, generation == self.historyGeneration else { return }
             self.loading = false
             switch r {
-            case .failure(let e): self.toast(e.message)
+            case .failure(let e):
+                self.jumpId = nil
+                self.toast(e.message)
             case .success(let v):
                 let page = v as? [JSON] ?? []
                 if older && page.count < 50 { self.hasMore = false }
@@ -1122,6 +1266,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         table.layoutIfNeeded()
         if older {
             table.contentOffset.y = oldOffset + (table.contentSize.height - oldHeight)
+            if let id = jumpId { jumpTo(id) }
             return
         }
         let own = page.contains { appended.contains($0.str("id")) && $0.bool("outgoing") }
@@ -1280,6 +1425,20 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             if let u = URL(string: l) { acts.append(MenuAction(title: "Открыть ссылку: " + (u.host ?? l), icon: "safari") { UIApplication.shared.open(u) }) }
         }
         if isImage(m) { acts.append(MenuAction(title: "Открыть фото", icon: "photo") { [weak self] in self?.openPhoto(m) }) }
+        let postable = ok && m.str("status") != "failed" && ["text", "file", "poll"].contains(m.str("kind"))
+        if postable && conv.bool("can_pin") {
+            let on = !m.bool("pinned")
+            acts.append(MenuAction(title: on ? "Закрепить" : "Открепить", icon: on ? "pin" : "pin.slash") { [weak self] in
+                Core.shared.call("pin_message", ["message_id": m.str("id"), "on": on]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
+            })
+        }
+        if postable && !conv.bool("saved") {
+            acts.append(MenuAction(title: "В избранное", icon: "bookmark") { [weak self] in
+                Core.shared.call("save_message", ["message_id": m.str("id")]) { r in
+                    if case .failure(let e) = r { self?.toast(e.message) } else { self?.toast("Сохранено в избранное") }
+                }
+            })
+        }
         if !composer.isHidden && m.bool("outgoing") && ["sent", "delivered", "read"].contains(m.str("status")) && ["text", "file"].contains(m.str("kind")) {
             acts.append(MenuAction(title: "Изменить", icon: "pencil") { [weak self] in self?.setEdit(m) })
         }

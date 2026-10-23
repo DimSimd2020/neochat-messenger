@@ -212,6 +212,19 @@ object Dialogs {
         s.add(about, 10)
         val search = SearchBox(ctx, "Поиск контактов")
         s.add(search, 10)
+        // Notes to myself sit above the contacts of a direct chat.
+        val savedRow = ListRow(ctx, 44)
+        savedRow.avatar.set("Избранное", "saved", "")
+        savedRow.title.text = "Избранное"
+        savedRow.subtitle.text = "Заметки для себя"
+        savedRow.setOnClickListener {
+            CoreClient.call("open_saved", JSONObject()) { cv, ce ->
+                if (ce != null) return@call act.toast(ce.message)
+                s.dismiss()
+                act.openChat((cv as JSONObject).str("id"))
+            }
+        }
+        s.add(savedRow, 6)
         val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         s.add(rows, 6)
         val empty = ctx.label("Контактов пока нет. Добавьте человека по имени пользователя.", 14f, 400, Theme.Role.MUTED)
@@ -269,6 +282,7 @@ object Dialogs {
             chn.isSelected = mode == 2
             title.setLabel(if (channel) "Название канала" else "Название группы")
             title.visibility = if (group) View.VISIBLE else View.GONE
+            savedRow.visibility = if (group) View.GONE else View.VISIBLE
             about.visibility = if (group) View.VISIBLE else View.GONE
             create.visibility = if (group) View.VISIBLE else View.GONE
             create.setText(createText())
