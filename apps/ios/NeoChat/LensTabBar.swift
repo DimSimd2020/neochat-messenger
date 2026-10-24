@@ -27,6 +27,10 @@ final class LensTabBar: UIView {
     private var downX: CGFloat = 0
     private var dragging = false
     private var near = 0
+    private var pullLink: CADisplayLink?
+    /// Points per second the strip is carried along while the lens is held at its edge; negative goes back.
+    private var pullSpeed: CGFloat = 0
+    private var fingerInWindow = CGPoint.zero
 
     init(items: [(title: String, icon: String)], textOnly: Bool = false, equalWidth: Bool = true) {
         titles = items.map { $0.title }
@@ -110,6 +114,7 @@ final class LensTabBar: UIView {
         if bounds.width > 0 {
             if animated { slide.to(center(i)); sizing.to(itemWidth(i)) }
             else { slide.snap(center(i)); sizing.snap(itemWidth(i)) }
+            reveal(i)
         }
     }
 
@@ -124,7 +129,9 @@ final class LensTabBar: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let x = touches.first?.location(in: self).x else { return }
+        guard let touch = touches.first else { return }
+        let x = touch.location(in: self).x
+        fingerInWindow = touch.location(in: nil)
         downX = x
         dragging = false
         near = selected
@@ -133,7 +140,13 @@ final class LensTabBar: UIView {
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let x = touches.first?.location(in: self).x else { return }
+        guard let touch = touches.first else { return }
+        fingerInWindow = touch.location(in: nil)
+        track(touch.location(in: self).x)
+    }
+
+    /// The finger is at `x` in the bar's own coordinates.
+    private func track(_ x: CGFloat) {
         if !dragging && abs(x - downX) > 8 { dragging = true }
         follow(x)
         let n = nearest(x)
@@ -141,6 +154,58 @@ final class LensTabBar: UIView {
             near = n
             Haptics.select()
         }
+        edgePull(x)
+    }
+
+    /// The scroll view that carries a strip longer than the screen, if this is one.
+    private var scroller: UIScrollView? {
+        var v = superview
+        while let s = v {
+            if let scroll = s as? UIScrollView, scroll.contentSize.width > scroll.bounds.width + 1 { return scroll }
+            v = s.superview
+        }
+        return nil
+    }
+
+    /// Holding the lens near the edge of the strip carries the strip along, so the next item,
+    /// which is out of sight, comes under the finger.
+    private func edgePull(_ x: CGFloat) {
+        guard dragging, let scroll = scroller else { return stopPull() }
+        let zone: CGFloat = 56
+        let seen = convert(CGPoint(x: x, y: 0), to: scroll).x - scroll.bounds.minX
+        let into = seen < zone ? seen - zone : max(0, seen - (scroll.bounds.width - zone))
+        pullSpeed = max(-1, min(1, into / zone)) * 640
+        if pullSpeed == 0 { return stopPull() }
+        guard pullLink == nil else { return }
+        let l = CADisplayLink(target: Puller(self), selector: #selector(Puller.tick(_:)))
+        l.add(to: .main, forMode: .common)
+        pullLink = l
+    }
+
+    private func stopPull() {
+        pullLink?.invalidate()
+        pullLink = nil
+        pullSpeed = 0
+    }
+
+    fileprivate func pullStep(_ link: CADisplayLink) {
+        guard let scroll = scroller, pullSpeed != 0 else { return stopPull() }
+        let dt = min(1.0 / 20, link.targetTimestamp - link.timestamp)
+        let inset = scroll.adjustedContentInset
+        let low = -inset.left
+        let high = max(low, scroll.contentSize.width - scroll.bounds.width + inset.right)
+        let x = min(high, max(low, scroll.contentOffset.x + pullSpeed * CGFloat(dt)))
+        guard x != scroll.contentOffset.x else { return }
+        scroll.setContentOffset(CGPoint(x: x, y: scroll.contentOffset.y), animated: false)
+        // The finger has not moved on the screen, but the strip under it has.
+        track(convert(fingerInWindow, from: nil).x)
+    }
+
+    /// Keeps the chosen item in view, with a margin, when the strip is longer than the screen.
+    private func reveal(_ i: Int) {
+        guard let scroll = scroller else { return }
+        let rect = CGRect(x: center(i) - itemWidth(i) / 2 - 16, y: 0, width: itemWidth(i) + 32, height: 1)
+        scroll.scrollRectToVisible(convert(rect, to: scroll), animated: !Theme.reducedMotion)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -159,12 +224,14 @@ final class LensTabBar: UIView {
 
     private func land(_ i: Int) {
         dragging = false
+        stopPull()
         if i != near { Haptics.select() }
         slide.response = 0.42
         slide.damping = 0.7
         slide.to(center(i))
         sizing.to(itemWidth(i))
         lifting.to(0)
+        reveal(i)
         if i != selected {
             mark(i)
             onSelect?(i)
@@ -263,6 +330,19 @@ final class LensTabBar: UIView {
         b.resolvedColor(with: traitCollection).getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
         let k = min(1, max(0, t))
         return UIColor(red: r1 + (r2 - r1) * k, green: g1 + (g2 - g1) * k, blue: b1 + (b2 - b1) * k, alpha: a1 + (a2 - a1) * k)
+    }
+}
+
+/// The display link keeps its target alive; this indirection lets the bar go.
+private final class Puller: NSObject {
+    weak var bar: LensTabBar?
+    init(_ b: LensTabBar) {
+        bar = b
+        super.init()
+    }
+    @objc func tick(_ l: CADisplayLink) {
+        guard let b = bar else { return l.invalidate() }
+        b.pullStep(l)
     }
 }
 
