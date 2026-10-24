@@ -370,6 +370,7 @@ class ListViewController: UITableViewController, UISearchResultsUpdating {
 class ChatListViewController: ListViewController {
     private var selectedChats: [String: JSON] = [:]
     private var savedItems: [UIBarButtonItem]?
+    private var doneButton: UIButton?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -386,7 +387,10 @@ class ChatListViewController: ListViewController {
             savedItems = navigationItem.rightBarButtonItems
             setEditing(true, animated: !Theme.reducedMotion)
             search.searchBar.isUserInteractionEnabled = false
-            navigationItem.rightBarButtonItems = [UIBarButtonItem(title: "Готово", primaryAction: UIAction { [weak self] _ in self?.endSelection() })]
+            let done = glassBarButton(title: "Готово", label: "Готово")
+            done.addAction(UIAction { [weak self] _ in self?.endSelection() }, for: .touchUpInside)
+            doneButton = done
+            navigationItem.rightBarButtonItems = [UIBarButtonItem(customView: GlassPill.group([done]))]
             toolbarItems = [
                 selectionButton("archivebox", "Архивировать", "set_archived", "archived"),
                 UIBarButtonItem(systemItem: .flexibleSpace),
@@ -424,7 +428,7 @@ class ChatListViewController: ListViewController {
     private func run(_ chats: [JSON], _ method: String, _ key: String, _ value: Bool) {
         var archived: [String] = []
         tableView.isUserInteractionEnabled = false
-        navigationItem.rightBarButtonItems?.forEach { $0.isEnabled = false }
+        doneButton?.isEnabled = false
         toolbarItems?.forEach { $0.isEnabled = false }
         func next(_ i: Int) {
             if i == chats.count {
@@ -441,7 +445,7 @@ class ChatListViewController: ListViewController {
                 if case .failure(let e) = r {
                     self.tableView.isUserInteractionEnabled = true
                     self.toast(e.message)
-                    self.navigationItem.rightBarButtonItems?.forEach { $0.isEnabled = true }
+                    self.doneButton?.isEnabled = true
                     self.toolbarItems?.forEach { $0.isEnabled = true }
                     return
                 }
@@ -612,14 +616,12 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
             self?.filter = i
             self?.applyFilter()
         }
-        // Bar items lay custom views out with Auto Layout: without constraints the logo stretched wide.
-        let logo = UIImageView(image: UIImage(named: "Logo"))
-        logo.contentMode = .scaleAspectFit
-        logo.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([logo.widthAnchor.constraint(equalToConstant: 28), logo.heightAnchor.constraint(equalToConstant: 28)])
-        navigationItem.leftBarButtonItem = UIBarButtonItem(customView: logo)
+        // The name and the actions are glass capsules over the page, not one slab: the list shows between them.
+        navigationItem.leftBarButtonItem = UIBarButtonItem(customView: GlassPill.brand())
         logoItem = navigationItem.leftBarButtonItem
         navigationItem.title = "NeoChat"
+        navigationItem.largeTitleDisplayMode = .never
+        navigationItem.titleView = UIView()
         updateBarItems()
         archiveButton.addAction(UIAction { [weak self] _ in
             guard let self else { return }
@@ -642,22 +644,23 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
     }
 
     private func updateBarItems() {
-        let compose = UIBarButtonItem(image: UIImage(systemName: "square.and.pencil"), primaryAction: UIAction { [weak self] action in
-            (action.sender as? UIBarButtonItem)?.play(.wiggle)
+        let compose = glassBarButton(symbol: "square.and.pencil", label: "Новый чат")
+        compose.addAction(UIAction { [weak self, weak compose] _ in
+            compose?.imageView?.play(.wiggle)
             self?.presentSheet(NewChatViewController())
-        })
-        compose.accessibilityLabel = "Новый чат"
+        }, for: .touchUpInside)
         let sorts = chatSorts.map { k, name in
             UIAction(title: name, state: k == Prefs.chatSort ? .on : .off) { [weak self] _ in
                 Prefs.set("chat_sort", k)
                 self?.updateBarItems()
             }
         }
-        let sort = UIBarButtonItem(image: UIImage(systemName: "arrow.up.arrow.down"), menu: UIMenu(title: "Сортировка чатов", children: sorts))
-        sort.accessibilityLabel = "Сортировка чатов"
-        let select = UIBarButtonItem(image: UIImage(systemName: "checkmark.circle"), primaryAction: UIAction { [weak self] _ in self?.beginSelection() })
-        select.accessibilityLabel = "Выбрать чаты"
-        navigationItem.rightBarButtonItems = [compose, sort, select]
+        let sort = glassBarButton(symbol: "arrow.up.arrow.down", label: "Сортировка чатов")
+        sort.menu = UIMenu(title: "Сортировка чатов", children: sorts)
+        sort.showsMenuAsPrimaryAction = true
+        let select = glassBarButton(symbol: "checkmark.circle", label: "Выбрать чаты")
+        select.addAction(UIAction { [weak self] _ in self?.beginSelection() }, for: .touchUpInside)
+        navigationItem.rightBarButtonItem = UIBarButtonItem(customView: GlassPill.group([compose, sort, select]))
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -777,8 +780,10 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
     }
 
     private func updateArchiveChrome() {
-        navigationItem.leftBarButtonItem = archiveShown ? UIBarButtonItem(image: UIImage(systemName: "chevron.left"), primaryAction: UIAction { [weak self] _ in self?.setArchiveShown(false) }) : logoItem
-        if archiveShown { navigationItem.leftBarButtonItem?.accessibilityLabel = "Скрыть архив" }
+        guard archiveShown else { navigationItem.leftBarButtonItem = logoItem; return }
+        let back = glassBarButton(symbol: "chevron.left", label: "Скрыть архив")
+        back.addAction(UIAction { [weak self] _ in self?.setArchiveShown(false) }, for: .touchUpInside)
+        navigationItem.leftBarButtonItem = UIBarButtonItem(customView: GlassPill.group([back]))
     }
 
     @objc private func hideArchiveBySwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
@@ -853,21 +858,16 @@ final class ContactsViewController: ListViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         search.searchBar.placeholder = "Поиск контактов"
-        navigationItem.rightBarButtonItems = [
-            UIBarButtonItem(image: UIImage(systemName: "person.badge.plus"), primaryAction: UIAction { [weak self] _ in
-                self?.presentSheet(NewContactViewController())
-            }),
-            UIBarButtonItem(image: UIImage(systemName: "qrcode.viewfinder"), primaryAction: UIAction { [weak self] _ in
-                guard let self else { return }
-                ContactQr.scan(from: self)
-            }),
-            UIBarButtonItem(image: UIImage(systemName: "phone.arrow.up.right"), primaryAction: UIAction { [weak self] _ in
-                self?.presentSheet(RecentCallsViewController())
-            }),
-        ]
-        navigationItem.rightBarButtonItems?[0].accessibilityLabel = "Новый контакт"
-        navigationItem.rightBarButtonItems?[1].accessibilityLabel = "Добавить по QR-коду"
-        navigationItem.rightBarButtonItems?[2].accessibilityLabel = "Недавние звонки"
+        let add = glassBarButton(symbol: "person.badge.plus", label: "Новый контакт")
+        add.addAction(UIAction { [weak self] _ in self?.presentSheet(NewContactViewController()) }, for: .touchUpInside)
+        let scan = glassBarButton(symbol: "qrcode.viewfinder", label: "Добавить по QR-коду")
+        scan.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            ContactQr.scan(from: self)
+        }, for: .touchUpInside)
+        let calls = glassBarButton(symbol: "phone.arrow.up.right", label: "Недавние звонки")
+        calls.addAction(UIAction { [weak self] _ in self?.presentSheet(RecentCallsViewController()) }, for: .touchUpInside)
+        navigationItem.rightBarButtonItem = UIBarButtonItem(customView: GlassPill.group([add, scan, calls]))
         updateSortMenu()
     }
 
@@ -879,8 +879,10 @@ final class ContactsViewController: ListViewController {
                 self?.reload()
             }
         }
-        navigationItem.leftBarButtonItem = UIBarButtonItem(title: sorts.first { $0.0 == sort }?.1, menu: UIMenu(title: "Сортировать по", children: items))
-        navigationItem.leftBarButtonItem?.accessibilityLabel = "Сортировать по"
+        let button = glassBarButton(title: sorts.first { $0.0 == sort }?.1 ?? "", chevron: true, label: "Сортировать по")
+        button.menu = UIMenu(title: "Сортировать по", children: items)
+        button.showsMenuAsPrimaryAction = true
+        navigationItem.leftBarButtonItem = UIBarButtonItem(customView: GlassPill.group([button]))
     }
 
     override func reacts(to t: String) -> Bool { ["contacts_changed", "identity_changed"].contains(t) }

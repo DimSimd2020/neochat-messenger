@@ -54,6 +54,8 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         root.addView(BackgroundView(act), flp(MATCH, MATCH))
         val column = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
         col.setPadding(0,0,0,dp(28))
+        // On the home tab the page scrolls under the glass bar.
+        scroll.clipToPadding = false
         coverBox.addView(avatar,FrameLayout.LayoutParams(dp(112),dp(112),Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(94) })
         if (userId != null) {
             val back = IconButton(act,R.drawable.ic_back,"Назад",glass = true).apply { setOnClickListener { act.closePage() } }

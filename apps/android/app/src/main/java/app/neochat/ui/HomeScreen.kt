@@ -16,7 +16,9 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.animation.AnimationUtils
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -30,6 +32,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 fun formatListTime(ms: Long): String {
     if (ms <= 0) return ""
@@ -154,7 +157,13 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private val ctx: Context = act
     private val root = FrameLayout(ctx)
     override val view: View = root
+    /** What the glass of the header and of the bar looks through: the pages, down to the edge of the screen. */
+    private val stage = BackdropSource(ctx)
     private val column = LinearLayout(ctx)
+    private val headerSpace = View(ctx)
+    private val header = FrameLayout(ctx)
+    private val brandPill = LinearLayout(ctx)
+    private val actionsPill = LinearLayout(ctx)
     private val status = ctx.label("", 13.5f, 400, Theme.Role.WARNING)
     private val emailReminder = PillButton(ctx, "Привяжите электронную почту", primary = false)
     private var emailPrompted = false
@@ -202,8 +211,11 @@ class HomeScreen(private val act: MainActivity) : Screen {
     init {
         column.orientation = LinearLayout.VERTICAL
         root.addView(BackgroundView(ctx), FrameLayout.LayoutParams(MATCH, MATCH))
-        root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
-        column.addView(header(), lp())
+        root.addView(stage, FrameLayout.LayoutParams(MATCH, MATCH))
+        // The profile has no room kept for the header: its cover begins at the top of the screen and shows through the glass.
+        stage.addView(profilePage, FrameLayout.LayoutParams(MATCH, MATCH))
+        stage.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
+        column.addView(headerSpace, lp(MATCH, dp(HEADER)))
         emailReminder.visibility = View.GONE
         emailReminder.setOnClickListener { showEmailBinding(act) }
         column.addView(emailReminder,lp().apply { setMargins(dp(20),0,dp(20),dp(8)) })
@@ -213,11 +225,15 @@ class HomeScreen(private val act: MainActivity) : Screen {
         column.addView(sections, lp(MATCH, 0, 1f))
         buildChats()
         buildContacts()
-        for ((i, p) in listOf(chatsPage, contactsPage, profilePage).withIndex()) {
+        for ((i, p) in listOf(chatsPage, contactsPage).withIndex()) {
             sections.addView(p, FrameLayout.LayoutParams(MATCH, MATCH))
             p.visibility = if (i == 0) View.VISIBLE else View.GONE
         }
+        profilePage.visibility = View.GONE
+        buildHeader()
+        root.addView(header, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
         root.addView(nav, FrameLayout.LayoutParams(dp(292 + 2 * BottomNav.ROOM_X), dp(56 + 2 * BottomNav.ROOM_Y), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+        nav.blurBehind(stage)
         nav.onSelect = { selectTab(it) }
         reloadChats(false)
         reloadContacts(false)
@@ -227,15 +243,23 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     private fun dp(v: Int) = ctx.dp(v)
 
-    private fun header(): View {
-        val h = LinearLayout(ctx)
-        h.gravity = Gravity.CENTER_VERTICAL
-        h.setPadding(dp(20), dp(12), dp(12), dp(12))
-        h.addView(ImageView(ctx).apply { setImageResource(R.drawable.logo); importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, lp(dp(30), dp(30)))
-        h.addView(ctx.label("NeoChat", 26f, 700).apply { heading() }, lp(0, WRAP, 1f).apply { marginStart = dp(12) })
-        val compose = IconButton(ctx, R.drawable.ic_compose, "Новый чат", glass = true)
+    /**
+     * Two glass capsules float over the content, the name of the app and the actions. Nothing
+     * fills the strip between them, so a page below, the cover of a profile for one, reaches the
+     * top of the screen and shows through the glass.
+     */
+    private fun buildHeader() {
+        brandPill.gravity = Gravity.CENTER_VERTICAL
+        brandPill.setPadding(dp(14), 0, dp(20), 0)
+        brandPill.background = capsule(brandPill)
+        brandPill.addView(ImageView(ctx).apply { setImageResource(R.drawable.logo); importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, lp(dp(28), dp(28)))
+        brandPill.addView(ctx.label("NeoChat", 22f, 700).apply { heading() }, lp(WRAP, WRAP).apply { marginStart = dp(10) })
+        header.addView(brandPill, FrameLayout.LayoutParams(WRAP, dp(48), Gravity.TOP or Gravity.START).apply { marginStart = dp(12) })
+        actionsPill.gravity = Gravity.CENTER_VERTICAL
+        actionsPill.background = capsule(actionsPill)
+        val compose = IconButton(ctx, R.drawable.ic_compose, "Новый чат")
         compose.setOnClickListener { Dialogs.newChat(act) }
-        h.addView(compose)
+        actionsPill.addView(compose, lp(dp(48), dp(48)))
         val more = IconButton(ctx, R.drawable.ic_more, "Меню")
         more.setOnClickListener {
             PopupMenu(act, more)
@@ -245,8 +269,13 @@ class HomeScreen(private val act: MainActivity) : Screen {
                 .add("Устройства") { Dialogs.devices(act) }
                 .show()
         }
-        h.addView(more, lp(dp(48), dp(48)).apply { marginStart = dp(4) })
-        return h
+        actionsPill.addView(more, lp(dp(48), dp(48)))
+        header.addView(actionsPill, FrameLayout.LayoutParams(WRAP, dp(48), Gravity.TOP or Gravity.END).apply { marginEnd = dp(12) })
+    }
+
+    private fun capsule(host: View) = GlassDrawable(ctx, radius = ctx.dpf(24)).also {
+        it.backdrop = BackdropBlur(stage)
+        stage.watch(host)
     }
 
     private fun list(rv: RecyclerView, adapter: RowAdapter) {
@@ -599,7 +628,11 @@ class HomeScreen(private val act: MainActivity) : Screen {
     }
 
     override fun applyInsets(top: Int, bottom: Int, ime: Int) {
-        column.setPadding(0, top, 0, 0)
+        headerSpace.layoutParams = headerSpace.layoutParams.apply { height = top + dp(HEADER) }
+        for (pill in listOf(brandPill, actionsPill)) (pill.layoutParams as FrameLayout.LayoutParams).topMargin = top + dp(8)
+        header.requestLayout()
+        // The cover of the profile reaches under the status bar, as on its own page.
+        settingsPage.applyInsets(top, 0, 0)
         (nav.layoutParams as FrameLayout.LayoutParams).bottomMargin = bottom + dp(8) - dp(BottomNav.ROOM_Y)
         nav.requestLayout()
         val listPad = bottom + dp(80)
@@ -658,6 +691,8 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     companion object {
         val SORTS = listOf("name-asc" to "Имя А–Я", "name-desc" to "Имя Я–А", "recent" to "Дата добавления")
+        /** Height of the header below the status bar, dp: a 48 dp capsule and 8 dp above and below it. */
+        const val HEADER = 64
     }
 }
 
@@ -714,8 +749,42 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
     private val hops = List(count) { Spring(0.38f, 0.42f) { _ -> invalidate() } }
     private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
     private var downX = 0f
+    private var downY = 0f
     private var dragging = false
     private var near = 0
+    // The strip this bar scrolls in (the profile tabs), if any: its edges pull the lens along.
+    private val strip get() = parent as? HorizontalScrollView
+    private var held = false
+    private var fingerX = 0f
+    private var pulledAt = 0L
+    private val edge = IntArray(2)
+
+    /** While the lens is held near an edge of the strip, the strip scrolls and the lens stays under the finger. */
+    private val pull = object : Runnable {
+        override fun run() {
+            val sv = strip
+            if (sv == null || !held) return
+            val now = AnimationUtils.currentAnimationTimeMillis()
+            val dt = (now - pulledAt).coerceIn(0L, 50L) / 1000f
+            pulledAt = now
+            if (dragging) {
+                sv.getLocationOnScreen(edge)
+                val x = fingerX - edge[0]
+                val zone = dpf(64)
+                val push = when {
+                    x < zone -> x.coerceAtLeast(0f) / zone - 1f
+                    x > sv.width - zone -> 1f - (sv.width - x).coerceAtLeast(0f) / zone
+                    else -> 0f
+                }
+                if (push != 0f) {
+                    sv.scrollBy((push * dpf(600) * dt).roundToInt(), 0)
+                    getLocationOnScreen(edge)
+                    track(fingerX - edge[0])
+                }
+            }
+            postOnAnimation(this)
+        }
+    }
 
     init {
         orientation = HORIZONTAL
@@ -745,6 +814,29 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
         slide.damping = 0.72f
         if (animated) { slide.to(center(i)); sizing.to(itemWidth(i)) }
         else { slide.snap(center(i)); sizing.snap(itemWidth(i)) }
+        if (animated && isLaidOut) reveal(i)
+    }
+
+    /** The bar looks through [source], blurred. */
+    fun blurBehind(source: BackdropSource) {
+        bar.backdrop = BackdropBlur(source)
+        bar.host = this
+        source.watch(this)
+    }
+
+    /** Scrolls the strip this bar lies in, if any, just far enough to show item [i] whole. */
+    private fun reveal(i: Int) {
+        val sv = strip ?: return
+        val item = getChildAt(i)
+        val margin = dp(12)
+        val left = item.left - sv.scrollX
+        val right = item.right - sv.scrollX
+        val dx = when {
+            left < margin -> left - margin
+            right > sv.width - margin -> right - (sv.width - margin)
+            else -> 0
+        }
+        if (dx != 0) sv.smoothScrollBy(dx, 0)
     }
 
     private fun choose(i: Int) {
@@ -785,20 +877,33 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
             MotionEvent.ACTION_DOWN -> {
                 if (!onBar(e.x, e.y)) return false
                 downX = e.x
+                downY = e.y
+                fingerX = e.rawX
                 dragging = false
                 near = selected
-                parent.requestDisallowInterceptTouchEvent(!textOnly || equalWidth)
+                // The lens keeps the finger, also inside a scrolling strip; the strip moves when the lens reaches its edge.
+                parent.requestDisallowInterceptTouchEvent(true)
+                if (strip != null) {
+                    held = true
+                    pulledAt = AnimationUtils.currentAnimationTimeMillis()
+                    postOnAnimation(pull)
+                }
                 lifting.to(1f)
                 follow(e.x)
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!dragging && kotlin.math.abs(e.x - downX) > slop) dragging = true
-                follow(e.x)
-                val n = nearest(e.x)
-                if (dragging && n != near) {
-                    near = n
-                    Haptics.select(this)
+                fingerX = e.rawX
+                if (!dragging) {
+                    val dx = kotlin.math.abs(e.x - downX)
+                    val dy = kotlin.math.abs(e.y - downY)
+                    // A mostly vertical gesture on the strip belongs to the page it lies in.
+                    if (strip != null && dy > slop && dy > dx) parent.requestDisallowInterceptTouchEvent(false)
+                    else if (dx > slop) {
+                        dragging = true
+                        parent.requestDisallowInterceptTouchEvent(true)
+                    }
                 }
+                track(e.x)
             }
             MotionEvent.ACTION_UP -> land(nearest(e.x))
             MotionEvent.ACTION_CANCEL -> land(selected)
@@ -806,16 +911,38 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
         return true
     }
 
+    /** Follows the finger and ticks when it passes from one item to the next. */
+    private fun track(x: Float) {
+        follow(x)
+        val n = nearest(x)
+        if (dragging && n != near) {
+            near = n
+            Haptics.select(this)
+        }
+    }
+
     /** The lifted lens trails the finger a little, which reads as weight. */
     private fun follow(x: Float) {
         slide.response = if (dragging) 0.16f else 0.22f
         slide.damping = 0.86f
         slide.to(x.coerceIn(center(0), center(count - 1)))
-        sizing.to(itemWidth(nearest(x)))
+        sizing.to(widthAt(x))
+    }
+
+    /** Width of the item under [x], eased toward the next one so the lens does not jump at the border of two items. */
+    private fun widthAt(x: Float): Float {
+        for (i in 0 until count - 1) {
+            val a = center(i)
+            val b = center(i + 1)
+            if (x < b) return itemWidth(i) + (itemWidth(i + 1) - itemWidth(i)) * (if (b > a) ((x - a) / (b - a)).coerceIn(0f, 1f) else 0f)
+        }
+        return itemWidth(count - 1)
     }
 
     private fun land(i: Int) {
         dragging = false
+        held = false
+        removeCallbacks(pull)
         parent.requestDisallowInterceptTouchEvent(false)
         if (i != near) Haptics.select(this)
         slide.response = 0.42f
@@ -827,6 +954,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
             mark(i)
             onSelect?.invoke(i)
         }
+        reveal(i)
     }
 
     override fun onDraw(c: Canvas) {
