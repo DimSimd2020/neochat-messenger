@@ -15,8 +15,6 @@
 #include <QStandardPaths>
 #include <QTranslator>
 
-#include <windows.h>
-
 namespace {
 
 // A start-up message in the app's own style (before the main window exists).
@@ -89,8 +87,6 @@ int main(int argc, char *argv[])
 
     const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     QDir().mkpath(dataDir);
-    // Where neocall.dll writes the call diagnostics of this build.
-    SetEnvironmentVariableW(L"NEOCALL_LOG_DIR", QDir::toNativeSeparators(dataDir + "/logs").toStdWString().c_str());
     // One running copy per Windows user: two processes must not share the database.
     QLockFile lock(dataDir + "/neochat.lock");
     lock.setStaleLockTime(0);

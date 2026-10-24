@@ -4,7 +4,6 @@
 
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -83,9 +82,6 @@ int main(int argc, char **argv) {
     }, 15);
     ok = ok && a.connected && b.connected;
     std::printf("connected: %s\n", ok ? "yes" : "no");
-    // --hold N keeps the call up for N seconds, to read the diagnostics log.
-    for (int i = 1; i + 1 < argc; ++i)
-        if (!std::strcmp(argv[i], "--hold") && ok) std::this_thread::sleep_for(std::chrono::seconds(std::atoi(argv[i + 1])));
     neocall_set_mic(a.call, 0);
     neocall_destroy(a.call);
     neocall_destroy(b.call);
