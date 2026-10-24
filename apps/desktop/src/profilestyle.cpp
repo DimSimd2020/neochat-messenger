@@ -1,6 +1,7 @@
 #include "profilestyle.h"
 #include "theme.h"
 #include "widgets.h"
+#include <QImage>
 #include <QPainter>
 #include <QPainterPath>
 #include <QRegularExpression>
@@ -81,14 +82,18 @@ QList<QColor> colors(const QString &header, const QString &userId)
 Cover::Cover(const QString &name, const QString &seed, const QString &avatarPath, int size, QWidget *parent)
     : QWidget(parent), m_name(name), m_seed(seed), m_path(avatarPath), m_colors(colors({}, seed)), m_size(size), m_band(qRound(size * 1.25))
 {
-    setFixedHeight(m_band + m_size / 2 + 4);
-    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_column = new QVBoxLayout(this);
+    m_column->setContentsMargins(0, 0, 0, 16);
+    // The room the avatar takes; the rest of the page follows below it.
+    m_column->addSpacing(m_band + m_size / 2 + 4);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
 }
 
 void Cover::setColors(const QList<QColor> &c)
 {
     m_colors = c;
+    m_cache = QPixmap();
     update();
 }
 
@@ -108,26 +113,50 @@ void Cover::place()
 
 void Cover::resizeEvent(QResizeEvent *)
 {
+    m_cache = QPixmap();
     place();
+}
+
+// The gradient with its soft light, then a vertical mask that is opaque at the top and clear at the bottom,
+// eased like a smoothstep so no edge shows where it ends.
+void Cover::render()
+{
+    const qreal dpr = devicePixelRatioF();
+    QImage img((size() * dpr).expandedTo(QSize(1, 1)), QImage::Format_ARGB32_Premultiplied);
+    img.setDevicePixelRatio(dpr);
+    img.fill(Qt::transparent);
+    QPainter q(&img);
+    q.setRenderHint(QPainter::Antialiasing);
+    const QRectF all(0, 0, width(), height());
+    QPainterPath path;
+    path.addRoundedRect(all, 22, 22);
+    q.setClipPath(path);
+    QLinearGradient g(all.topLeft(), QPointF(all.width(), qMin(all.height(), all.width() * 0.9)));
+    for (int i = 0; i < m_colors.size(); ++i)
+        g.setColorAt(m_colors.size() == 1 ? 0 : qreal(i) / (m_colors.size() - 1), m_colors[i]);
+    q.fillRect(all, g);
+    QRadialGradient glow(all.width() * 0.9, qMin(all.height(), all.width()) * 0.1, all.width() * 0.7);
+    glow.setColorAt(0, QColor(255, 255, 255, 56));
+    glow.setColorAt(1, QColor(255, 255, 255, 0));
+    q.fillRect(all, glow);
+    q.setClipping(false);
+    q.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+    QLinearGradient fade(0, 0, 0, all.height());
+    for (int i = 0; i <= 8; ++i) {
+        const qreal t = i / 8.0;
+        fade.setColorAt(t, QColor(0, 0, 0, qRound(255 * (1 - t * t * (3 - 2 * t)))));
+    }
+    q.fillRect(all, fade);
+    q.end();
+    m_cache = QPixmap::fromImage(img);
 }
 
 void Cover::paintEvent(QPaintEvent *)
 {
+    if (m_cache.isNull())
+        render();
     QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    const QRectF band(0, 0, width(), m_band);
-    QPainterPath path;
-    path.addRoundedRect(band, 22, 22);
-    p.setClipPath(path);
-    QLinearGradient g(band.topLeft(), band.bottomRight());
-    for (int i = 0; i < m_colors.size(); ++i)
-        g.setColorAt(m_colors.size() == 1 ? 0 : qreal(i) / (m_colors.size() - 1), m_colors[i]);
-    p.fillRect(band, g);
-    QRadialGradient glow(band.width() * 0.9, band.height() * 0.1, band.width() * 0.7);
-    glow.setColorAt(0, QColor(255, 255, 255, 56));
-    glow.setColorAt(1, QColor(255, 255, 255, 0));
-    p.fillRect(band, glow);
-    p.setClipping(false);
+    p.drawPixmap(0, 0, m_cache);
     if (!m_avatar)
         ui::paintAvatar(&p, QRectF((width() - m_size) / 2.0, m_band - m_size / 2.0, m_size, m_size), m_name, m_seed, m_path);
 }

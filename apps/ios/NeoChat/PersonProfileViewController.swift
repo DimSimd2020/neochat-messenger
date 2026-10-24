@@ -10,7 +10,7 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
     private let details = UIStackView()
     private let content = UIStackView()
     private let avatar = AvatarView(size: 112)
-    // The cover with the avatar on its lower edge.
+    // The cover reaches from the top down to the end of the description card and fades out.
     private let cover = ProfileCoverView()
     private let name = label("", 28, .bold)
     private let subtitle = label("", 14, color: Theme.muted)
@@ -67,9 +67,9 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            cover.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), cover.heightAnchor.constraint(equalToConstant: 150),
+            cover.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), cover.bottomAnchor.constraint(equalTo: details.bottomAnchor, constant: 16),
             cover.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor), cover.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor),
-            avatar.centerXAnchor.constraint(equalTo: scroll.frameLayoutGuide.centerXAnchor), avatar.topAnchor.constraint(equalTo: cover.bottomAnchor, constant: -56),
+            avatar.centerXAnchor.constraint(equalTo: scroll.frameLayoutGuide.centerXAnchor), avatar.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 94),
             stack.topAnchor.constraint(equalTo: avatar.bottomAnchor, constant: 14), stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -28),
             stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16), stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
             details.widthAnchor.constraint(equalTo: stack.widthAnchor), tabScroll.widthAnchor.constraint(equalTo: stack.widthAnchor), content.widthAnchor.constraint(equalTo: stack.widthAnchor),

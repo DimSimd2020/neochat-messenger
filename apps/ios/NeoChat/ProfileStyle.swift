@@ -69,26 +69,30 @@ enum ProfileStyle {
     }
 }
 
-/// The cover of a profile: a gradient with rounded bottom corners and a soft light in the corner.
+/// The cover of a profile: a gradient behind the whole top of the page, from the edge of the screen to the end
+/// of the card with the description, thinning out smoothly toward the bottom until the page shows through.
 final class ProfileCoverView: UIView {
     private let gradient = CAGradientLayer()
     private let glow = CAGradientLayer()
+    private let fade = CAGradientLayer()
     var colors: [UIColor] = [] { didSet { gradient.colors = colors.map { $0.cgColor } } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         gradient.startPoint = CGPoint(x: 0, y: 0)
-        gradient.endPoint = CGPoint(x: 1, y: 1)
         glow.type = .radial
         glow.colors = [UIColor.white.withAlphaComponent(0.22).cgColor, UIColor.white.withAlphaComponent(0).cgColor]
         glow.startPoint = CGPoint(x: 0.9, y: 0.1)
         glow.endPoint = CGPoint(x: 1.6, y: 0.9)
         layer.addSublayer(gradient)
         layer.addSublayer(glow)
-        layer.cornerRadius = 32
-        layer.cornerCurve = .continuous
-        layer.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
-        clipsToBounds = true
+        // Opaque at the top, clear at the bottom, eased like a smoothstep so there is no visible edge.
+        let steps = (0...8).map { Double($0) / 8 }
+        fade.locations = steps.map { NSNumber(value: $0) }
+        fade.colors = steps.map { UIColor.black.withAlphaComponent(1 - $0 * $0 * (3 - 2 * $0)).cgColor }
+        fade.startPoint = CGPoint(x: 0.5, y: 0)
+        fade.endPoint = CGPoint(x: 0.5, y: 1)
+        layer.mask = fade
         isAccessibilityElement = false
     }
 
@@ -96,8 +100,16 @@ final class ProfileCoverView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        let w = bounds.width, h = max(bounds.height, 1)
+        // The height changes when the card below is rebuilt; the layers follow at once, not by the implicit animation.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         gradient.frame = bounds
-        glow.frame = bounds
+        // The colours run diagonally across the top of the page, whatever its height.
+        gradient.endPoint = CGPoint(x: 1, y: min(1, w * 0.9 / h))
+        glow.frame = CGRect(x: 0, y: 0, width: w, height: min(h, 220))
+        fade.frame = bounds
+        CATransaction.commit()
     }
 }
 
@@ -239,13 +251,13 @@ final class ProfileStyleViewController: SheetViewController {
         box.addSubview(avatar)
         box.addSubview(nameLabel)
         NSLayoutConstraint.activate([
-            box.heightAnchor.constraint(equalToConstant: 190),
+            box.heightAnchor.constraint(equalToConstant: 150),
             cover.topAnchor.constraint(equalTo: box.topAnchor),
             cover.leadingAnchor.constraint(equalTo: box.leadingAnchor),
             cover.trailingAnchor.constraint(equalTo: box.trailingAnchor),
-            cover.heightAnchor.constraint(equalToConstant: 110),
+            cover.bottomAnchor.constraint(equalTo: box.bottomAnchor),
             avatar.centerXAnchor.constraint(equalTo: box.centerXAnchor),
-            avatar.topAnchor.constraint(equalTo: cover.bottomAnchor, constant: -36),
+            avatar.topAnchor.constraint(equalTo: box.topAnchor, constant: 22),
             nameLabel.topAnchor.constraint(equalTo: avatar.bottomAnchor, constant: 10),
             nameLabel.leadingAnchor.constraint(equalTo: box.leadingAnchor),
             nameLabel.trailingAnchor.constraint(equalTo: box.trailingAnchor),

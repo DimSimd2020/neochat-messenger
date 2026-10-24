@@ -895,7 +895,7 @@ void dialogs::profileStyle(const DialogHost &h, const QJsonObject &profile, std:
     sheet->body()->addWidget(cover);
     auto *name = new ui::Label(shown, 22, QFont::Bold);
     name->setAlignment(Qt::AlignCenter);
-    sheet->body()->addWidget(name);
+    cover->column()->addWidget(name);
     const auto preview = [=] {
         cover->setColors(profilestyle::colors(header->join(','), uid));
         name->setColorOverride(profilestyle::nameOn(*nameHex, Theme::p().surface));

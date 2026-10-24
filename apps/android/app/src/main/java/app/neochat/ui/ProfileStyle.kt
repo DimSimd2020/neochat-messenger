@@ -5,9 +5,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
-import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
-import android.graphics.RectF
 import android.graphics.Shader
 import android.view.Gravity
 import android.view.View
@@ -69,29 +69,46 @@ fun TextView.personColor(hex: String, role: Theme.Role, ground: Int = Theme.p.bg
     }
 }
 
-/** The cover of a profile: a gradient with rounded bottom corners and a soft light in the corner. */
+/**
+ * The cover of a profile: a gradient behind the whole top of the page, from the edge of the screen to the
+ * end of the card with the description, thinning out smoothly toward the bottom until the page shows through.
+ */
 class ProfileHeaderView(ctx: Context) : View(ctx) {
     var colors: IntArray = ProfileStyle.colors("", "")
-        set(v) { field = v; invalidate() }
+        set(v) { field = v; shade(); invalidate() }
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val path = Path()
-    private val rect = RectF()
+    private val fade = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
+    private var colour: Shader? = null
+    private var glow: Shader? = null
+
+    private fun shade() {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        colour = LinearGradient(0f, 0f, w, minOf(h, w * 0.9f), colors, null, Shader.TileMode.CLAMP)
+        glow = RadialGradient(w * 0.9f, minOf(h, w) * 0.1f, w * 0.7f, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+        // Opaque at the top, clear at the bottom, eased like a smoothstep so there is no visible edge.
+        val steps = FloatArray(9) { it / 8f }
+        val alpha = IntArray(9) { val t = it / 8f; ((1f - t * t * (3f - 2f * t)) * 255f).toInt() shl 24 }
+        fade.shader = LinearGradient(0f, 0f, 0f, h, alpha, steps, Shader.TileMode.CLAMP)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        shade()
+    }
 
     override fun onDraw(c: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        val r = context.dpf(32)
-        rect.set(0f, -r, w, h)
-        path.rewind()
-        path.addRoundRect(rect, r, r, Path.Direction.CW)
-        c.save()
-        c.clipPath(path)
-        paint.shader = LinearGradient(0f, 0f, w, h, colors, null, Shader.TileMode.CLAMP)
+        val layer = c.saveLayer(0f, 0f, w, h, null)
+        paint.shader = colour
         c.drawRect(0f, 0f, w, h, paint)
-        paint.shader = RadialGradient(w * 0.9f, h * 0.1f, w * 0.7f, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+        paint.shader = glow
         c.drawRect(0f, 0f, w, h, paint)
         paint.shader = null
-        c.restore()
+        c.drawRect(0f, 0f, w, h, fade)
+        c.restoreToCount(layer)
     }
 }
 
@@ -164,15 +181,15 @@ fun editProfileStyle(act: MainActivity, profile: JSONObject, done: () -> Unit) {
     // Preview: the same cover and name as on the profile page.
     val preview = FrameLayout(ctx)
     val cover = ProfileHeaderView(ctx)
-    preview.addView(cover, FrameLayout.LayoutParams(MATCH, ctx.dp(110)))
+    preview.addView(cover, FrameLayout.LayoutParams(MATCH, MATCH))
     val avatar = AvatarView(ctx, 72)
     val shown = profile.str("display_name").ifEmpty { "@" + profile.str("username") }
     avatar.set(shown, uid, profile.str("avatar_path"))
-    preview.addView(avatar, FrameLayout.LayoutParams(ctx.dp(72), ctx.dp(72), Gravity.CENTER_HORIZONTAL).apply { topMargin = ctx.dp(74) })
+    preview.addView(avatar, FrameLayout.LayoutParams(ctx.dp(72), ctx.dp(72), Gravity.CENTER_HORIZONTAL).apply { topMargin = ctx.dp(22) })
     val name = ctx.label(shown, 22f, 700)
     name.gravity = Gravity.CENTER
-    preview.addView(name, FrameLayout.LayoutParams(MATCH, WRAP).apply { topMargin = ctx.dp(156) })
-    preview.minimumHeight = ctx.dp(190)
+    preview.addView(name, FrameLayout.LayoutParams(MATCH, WRAP).apply { topMargin = ctx.dp(104) })
+    preview.minimumHeight = ctx.dp(150)
     s.add(preview, 0)
 
     val picker = ColorPickerView(ctx)

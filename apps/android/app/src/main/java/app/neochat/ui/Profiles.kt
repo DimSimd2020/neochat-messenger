@@ -29,10 +29,13 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     private val details = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
     private val content = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
     private val avatar = AvatarView(act, 112)
-    // The cover reaches under the status bar; the avatar sits on its lower edge.
+    // The cover reaches under the status bar and down to the end of the card with the description, fading out.
     private val cover = ProfileHeaderView(act)
+    private val head = FrameLayout(act)
+    private val headColumn = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
     private val coverBox = FrameLayout(act)
     private val body = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+    private val tail = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
     private var backButton: View? = null
     private var inset = 0
     private val name = act.label("", 27f, 700)
@@ -51,16 +54,20 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         root.addView(BackgroundView(act), flp(MATCH, MATCH))
         val column = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
         col.setPadding(0,0,0,dp(28))
-        coverBox.addView(cover,FrameLayout.LayoutParams(MATCH,dp(150)))
         coverBox.addView(avatar,FrameLayout.LayoutParams(dp(112),dp(112),Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(94) })
         if (userId != null) {
             val back = IconButton(act,R.drawable.ic_back,"Назад",glass = true).apply { setOnClickListener { act.closePage() } }
             coverBox.addView(back,FrameLayout.LayoutParams(dp(48),dp(48),Gravity.TOP or Gravity.START).apply { topMargin = dp(8); marginStart = dp(8) })
             backButton = back
         }
-        col.addView(coverBox,lp(MATCH,dp(206)))
-        body.setPadding(dp(16),dp(14),dp(16),0)
-        col.addView(body,lp())
+        headColumn.addView(coverBox,lp(MATCH,dp(206)))
+        body.setPadding(dp(16),dp(14),dp(16),dp(16))
+        headColumn.addView(body,lp())
+        head.addView(cover,FrameLayout.LayoutParams(MATCH,MATCH))
+        head.addView(headColumn,FrameLayout.LayoutParams(MATCH,WRAP))
+        col.addView(head,lp())
+        tail.setPadding(dp(16),dp(6),dp(16),0)
+        col.addView(tail,lp())
         avatar.contentDescription = "Открыть фото профиля"; avatar.isFocusable = true
         avatar.setOnClickListener { showProfilePhotos(act,profile.str("user_id"),profile.optBoolean("me")) { load() } }
         name.gravity = Gravity.CENTER; sub.gravity = Gravity.CENTER
@@ -72,14 +79,13 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             addView(tabs, android.widget.FrameLayout.LayoutParams(WRAP, dp(68)))
         }
         tabs.onSelect = { select(tabKeys[it]) }
-        body.addView(tabScroll,lp().apply { topMargin = dp(22) }); body.addView(content,lp().apply { topMargin = dp(16) })
+        tail.addView(tabScroll,lp()); tail.addView(content,lp().apply { topMargin = dp(16) })
         scroll.addView(col); column.addView(scroll,lp(MATCH,0,1f)); root.addView(column,flp(MATCH,MATCH))
         load()
     }
     override fun applyInsets(top:Int,bottom:Int,ime:Int) {
         inset = top
         root.setPadding(0,0,0,maxOf(bottom,ime))
-        (cover.layoutParams as FrameLayout.LayoutParams).height = dp(150) + top
         (avatar.layoutParams as FrameLayout.LayoutParams).topMargin = dp(94) + top
         backButton?.let { (it.layoutParams as FrameLayout.LayoutParams).topMargin = dp(8) + top }
         coverBox.layoutParams.height = dp(206) + top

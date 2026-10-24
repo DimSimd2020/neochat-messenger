@@ -359,8 +359,10 @@ void dialogs::personProfile(const DialogHost &h,const QString &userId)
         const auto p=v.toObject();const bool own=p.value("me").toBool();const QString uid=p.value("user_id").toString();
         auto *avatar=new ProfileAvatar;avatar->name=p.value("display_name").toString();avatar->seed=uid;avatar->path=p.value("avatar_path").toString();
         auto *cover=new profilestyle::Cover(avatar->name,uid,avatar->path);cover->setColors(profilestyle::colors(p.value("header").toString(),uid));cover->setAvatarWidget(avatar);body->addWidget(cover);
+        // Everything down to the description card sits on the cover, which fades out under it.
+        auto *top=cover->column();top->setSpacing(body->spacing());
         QObject::connect(avatar,&QAbstractButton::clicked,sheet,[=]{showPhotos(h,sheet,uid,own,[=]{sheet->close();dialogs::personProfile(h,uid);});});
-        auto *name=new ui::Label(avatar->name.isEmpty()?"@"+p.value("username").toString():avatar->name,28,QFont::Bold);name->setTextFormat(Qt::PlainText);name->setWordWrap(true);name->setAlignment(Qt::AlignCenter);name->setColorOverride(profilestyle::nameOn(p.value("name_color").toString(),Theme::p().surface));body->addWidget(name);
+        auto *name=new ui::Label(avatar->name.isEmpty()?"@"+p.value("username").toString():avatar->name,28,QFont::Bold);name->setTextFormat(Qt::PlainText);name->setWordWrap(true);name->setAlignment(Qt::AlignCenter);name->setColorOverride(profilestyle::nameOn(p.value("name_color").toString(),Theme::p().surface));top->addWidget(name);
         if(!own) {
             auto *actions=new QHBoxLayout;
             auto *chat=new ui::Button(QStringLiteral("Написать"),ui::Button::Secondary);actions->addWidget(chat);
@@ -369,13 +371,13 @@ void dialogs::personProfile(const DialogHost &h,const QString &userId)
                 auto *call=new ui::Button(video?QStringLiteral("Видео"):QStringLiteral("Звонок"),ui::Button::Secondary);actions->addWidget(call);
                 QObject::connect(call,&QAbstractButton::clicked,sheet,[=] { Core::instance()->call("open_direct",{{"user_id",uid}},sheet,[=](const QJsonValue &c,const CoreError &err) { if(!err.ok())h.toast(err.message);else {sheet->close();CallController::instance()->start(c.toObject(),video);} }); });
             }
-            body->addLayout(actions);
+            top->addLayout(actions);
         } else {
             auto *actions=new QHBoxLayout;
             auto *edit=new ui::Button(QStringLiteral("Изменить профиль"),ui::Button::Secondary);actions->addWidget(edit);QObject::connect(edit,&QAbstractButton::clicked,sheet,[=]{sheet->close();dialogs::editProfile(h);});
             auto *look=new ui::Button(QStringLiteral("Оформление"),ui::Button::Secondary);actions->addWidget(look);QObject::connect(look,&QAbstractButton::clicked,sheet,[=]{sheet->close();dialogs::profileStyle(h,p,[=]{dialogs::personProfile(h);});});
             auto *settings=new ui::Button(QStringLiteral("Настройки"),ui::Button::Secondary);actions->addWidget(settings);QObject::connect(settings,&QAbstractButton::clicked,sheet,[=]{sheet->close();dialogs::settings(h);});
-            body->addLayout(actions);
+            top->addLayout(actions);
         }
         auto *info=new ProfileCard;info->setObjectName("profileInfo");auto *fields=new QVBoxLayout(info);fields->setContentsMargins(16,8,16,8);fields->setSpacing(0);
         auto *handleRow=new QHBoxLayout;
@@ -400,7 +402,7 @@ void dialogs::personProfile(const DialogHost &h,const QString &userId)
                 editor->open();
             });
         }
-        body->addWidget(info);
+        top->addWidget(info);
         auto *content=new ProfileContent(h,p);
         auto *tabScroll=new QScrollArea;tabScroll->setWidgetResizable(true);tabScroll->setFrameShape(QFrame::NoFrame);tabScroll->setFixedHeight(60);auto *tabBox=new QWidget;auto *tabs=new QHBoxLayout(tabBox);tabs->setContentsMargins(0,0,0,0);
         auto *pill=new TabPill(tabBox);tabBox->installEventFilter(pill);
