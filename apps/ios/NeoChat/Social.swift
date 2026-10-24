@@ -16,6 +16,7 @@ enum Prefs {
     }
     static var textSize: CGFloat { CGFloat(d.object(forKey: "text_size") as? Double ?? 17) }
     static var bigEmoji: Bool { bool("big_emoji", true) }
+    static var animatedEmoji: Bool { bool("animated_emoji", true) }
     static var autoload: Bool { bool("autoload", true) }
     static var chatSort: String { d.string(forKey: "chat_sort") ?? "activity" }
     /// stable receives only stable builds. Anything else, including a missing value, stays stable.
@@ -894,6 +895,7 @@ func bindChatCell(_ cell: RowCell, _ c: JSON) {
     cell.avatar.set(c.str("title"), seed: c.str("peer_user_id").isEmpty ? c.str("id") : c.str("peer_user_id"), avatar: c.str("avatar_path"))
     cell.avatar.online = kind == "direct" && (c.obj("presence")?.bool("online") ?? false)
     cell.title.text = c.str("title")
+    cell.title.textColor = ProfileStyle.name(c.str("title_color")) ?? Theme.text
     cell.groupIcon.isHidden = kind != "group"
     cell.time.text = formatListTime(c.int64("last_activity"))
     cell.badge.set(c.int("unread"),mentions:c.int("mention_count"),chat:c.str("id"))

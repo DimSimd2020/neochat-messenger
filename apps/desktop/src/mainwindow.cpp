@@ -12,6 +12,8 @@
 #include "onboarding.h"
 #include "popupmenu.h"
 #include "sheet.h"
+#include "profilestyle.h"
+#include "videoinfo.h"
 #include "theme.h"
 #include "transition.h"
 #include "widgets.h"
@@ -230,6 +232,12 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     }
+    // The colour a person chose for their name, as '#rrggbb'.
+    void setTitleColor(const QString &hex)
+    {
+        m_titleColor = hex;
+        update();
+    }
     void set(const QString &title, const QString &count, const QString &names, const QString &seed, bool accent = false, const QString &avatar = {})
     {
         m_title = title;
@@ -252,7 +260,8 @@ protected:
         ui::paintAvatar(&p, QRectF(0, (height() - 36) / 2.0, 36, 36), m_title, m_seed, m_avatar);
         const qreal x = 48;
         p.setFont(Theme::instance()->font(17, QFont::DemiBold));
-        p.setPen(c.text);
+        const QColor chosen = profilestyle::nameOn(m_titleColor, c.canvas);
+        p.setPen(chosen.isValid() ? chosen : c.text);
         const qreal w = width() - x;
         p.drawText(QRectF(x, 4, w, 24), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(m_title, Qt::ElideRight, int(w)));
         p.setFont(Theme::instance()->font(12.5));
@@ -266,7 +275,7 @@ protected:
     }
 
 private:
-    QString m_title, m_count, m_names, m_seed, m_avatar;
+    QString m_title, m_count, m_names, m_seed, m_avatar, m_titleColor;
     bool m_accent = false;
 };
 
@@ -413,6 +422,128 @@ private:
     bool m_shown = false;
 };
 
+// Pinned messages under the header: the one in turn, its place among the pins and the way to the list.
+// A click goes to the message shown and moves on to the next older pin.
+class PinBar : public QWidget {
+public:
+    explicit PinBar(QWidget *parent) : QWidget(parent)
+    {
+        setFixedHeight(0);
+        setCursor(Qt::PointingHandCursor);
+        auto *lay = new QHBoxLayout(this);
+        lay->setContentsMargins(24, 0, 10, 0);
+        lay->addStretch(1);
+        list = new ui::IconButton("more", QStringLiteral("Все закреплённые"), this, 36);
+        unpin = new ui::IconButton("close", QStringLiteral("Открепить"), this, 36);
+        lay->addWidget(list);
+        lay->addWidget(unpin);
+        m_anim.setStartValue(0.0);
+        connect(&m_anim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+            setFixedHeight(int(v.toReal() * 52));
+            update();
+        });
+        connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
+        connect(list, &QAbstractButton::clicked, this, [this] {
+            auto *menu = new PopupMenu(list);
+            for (const auto &x : m_pins) {
+                const QJsonObject m = x.toObject();
+                const QString id = m.value("id").toString();
+                menu->addAction(preview(m, 48), this, [this, id] { jump(id); });
+            }
+            menu->popup(list->mapToGlobal(QPoint(0, list->height())));
+        });
+        connect(unpin, &QAbstractButton::clicked, this, [this] {
+            if (!m_pins.isEmpty())
+                unpinMessage(m_pins.at(qMin(m_index, int(m_pins.size()) - 1)).toObject().value("id").toString());
+        });
+    }
+
+    // `pins` newest first; the same list keeps the place reached so far.
+    void set(const QString &conv, const QJsonArray &pins, bool canPin)
+    {
+        if (conv != m_conv || pins.size() != m_pins.size())
+            m_index = 0;
+        m_conv = conv;
+        m_pins = pins;
+        if (m_index >= m_pins.size())
+            m_index = 0;
+        list->setVisible(pins.size() > 1);
+        unpin->setVisible(canPin);
+        const bool show = !pins.isEmpty();
+        if (show != m_shown) {
+            m_shown = show;
+            ui::animate(m_anim, show ? 1 : 0, Theme::ms(180));
+        }
+        setAccessibleName(show ? QStringLiteral("Закреплённое сообщение: ") + preview(m_pins.at(m_index).toObject(), 80) : QString());
+        update();
+    }
+    ui::IconButton *list;
+    ui::IconButton *unpin;
+    std::function<void(const QString &)> jump;
+    std::function<void(const QString &)> unpinMessage;
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        if (m_pins.isEmpty())
+            return;
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const Palette &c = Theme::p();
+        p.fillRect(rect(), c.surface);
+        p.setPen(QPen(c.border, 1));
+        p.drawLine(0, height() - 1, width(), height() - 1);
+        // One mark per pin (up to four); the one shown is accent-coloured.
+        const int n = qMin(int(m_pins.size()), 4);
+        const qreal seg = (height() - 20.0 - (n - 1) * 3) / n;
+        const int cur = m_pins.size() > 4 ? m_index * 4 / int(m_pins.size()) : m_index;
+        p.setPen(Qt::NoPen);
+        for (int i = 0; i < n; ++i) {
+            p.setBrush(i == cur ? c.accent : c.border);
+            p.drawRoundedRect(QRectF(24, 10 + i * (seg + 3), 3, seg), 1.5, 1.5);
+        }
+        const QJsonObject m = m_pins.at(m_index).toObject();
+        const qreal right = (list->isVisible() ? list->x() : unpin->isVisible() ? unpin->x() : width()) - 8;
+        p.setFont(Theme::instance()->font(12.5, QFont::DemiBold));
+        p.setPen(c.accent);
+        QString head = QStringLiteral("Закреплённое сообщение");
+        if (m_pins.size() > 1)
+            head += QStringLiteral(" · %1 из %2").arg(m_index + 1).arg(m_pins.size());
+        p.drawText(QRectF(36, 7, right - 36, 18), Qt::AlignLeft | Qt::AlignVCenter, head);
+        p.setFont(Theme::instance()->font(14));
+        p.setPen(c.text);
+        p.drawText(QRectF(36, 25, right - 36, 20), Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(p.font()).elidedText(preview(m, 200), Qt::ElideRight, right - 36));
+    }
+    void mouseReleaseEvent(QMouseEvent *e) override
+    {
+        if (e->button() != Qt::LeftButton || m_pins.isEmpty() || !rect().contains(e->pos()))
+            return;
+        const QString id = m_pins.at(m_index).toObject().value("id").toString();
+        m_index = (m_index + 1) % m_pins.size();
+        update();
+        jump(id);
+    }
+
+private:
+    static QString preview(const QJsonObject &m, int max)
+    {
+        const QString kind = m.value("kind").toString();
+        QString t = m.value("text").toString().simplified();
+        if (kind == "file") {
+            const QJsonObject f = m.value("file").toObject();
+            t = (f.value("image").toBool() ? QStringLiteral("Фото") : f.value("video").toBool() ? QStringLiteral("Видео") : QStringLiteral("Файл ") + f.value("name").toString()) + (t.isEmpty() ? QString() : ": " + t);
+        } else if (kind == "poll") {
+            t = QStringLiteral("Опрос: ") + t;
+        }
+        return t.size() > max ? t.left(max - 1) + QStringLiteral("…") : t;
+    }
+    QVariantAnimation m_anim;
+    QJsonArray m_pins;
+    QString m_conv;
+    int m_index = 0;
+    bool m_shown = false;
+};
+
 namespace {
 
 class Surface : public QWidget {
@@ -505,6 +636,8 @@ MainWindow::MainWindow()
     conv->addWidget(new CallBanner(m_conversation));
     m_notice = new NoticeBar(m_conversation);
     conv->addWidget(m_notice);
+    m_pinBar = new PinBar(m_conversation);
+    conv->addWidget(m_pinBar);
     m_searchWrap = new QWidget;
     auto *sw = new QHBoxLayout(m_searchWrap);
     sw->setContentsMargins(24, 10, 24, 4);
@@ -650,6 +783,10 @@ MainWindow::MainWindow()
             filepicker::open(this, QStringLiteral("Выберите фото"), {"jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"}, true,
                              [this](const QStringList &files) { attachDialog(files, true); });
         });
+        menu->addAction(QStringLiteral("Видео"), this, [this] {
+            filepicker::open(this, QStringLiteral("Выберите видео"), {"mp4", "mov", "m4v", "webm", "mkv", "avi", "3gp"}, true,
+                             [this](const QStringList &files) { attachDialog(files, true); });
+        });
         menu->addAction(QStringLiteral("Файл"), this, [this] {
             filepicker::open(this, QStringLiteral("Прикрепить файл"), {}, true, [this](const QStringList &files) { attachDialog(files, false); });
         });
@@ -667,6 +804,13 @@ MainWindow::MainWindow()
     connect(m_composer, &Composer::edited, this, &MainWindow::editText);
     connect(m_view, &MessageView::forwardRequested, this, [this](const QJsonArray &msgs) { dialogs::forward(host(), msgs); });
     connect(m_view, &MessageView::toast, this, &MainWindow::toast);
+    m_pinBar->jump = [this](const QString &id) { m_view->jumpToMessage(id); };
+    m_pinBar->unpinMessage = [this](const QString &id) {
+        Core::instance()->call("pin_message", {{"message_id", id}, {"on", false}}, this, [this](const QJsonValue &, const CoreError &e) {
+            if (!e.ok())
+                toast(e.message);
+        });
+    };
     connect(m_view, &MessageView::readable, this, &MainWindow::markRead);
     connect(m_composer, &Composer::typing, this, [this] {
         // The core sends the hint at most every 4 s.
@@ -1065,7 +1209,7 @@ void MainWindow::applyConversation(const QJsonObject &c)
             count += QStringLiteral(", %1 в сети").arg(c.value("online_count").toInt());
         names = memberNames(c.value("members").toArray());
     } else if (channel) {
-        count = subscribers(c.value("member_count").toInt());
+        count = c.value("saved").toBool() ? QStringLiteral("Заметки для себя") : subscribers(c.value("member_count").toInt());
     } else {
         for (const auto &x : c.value("members").toArray())
             if (!x.toObject().value("me").toBool())
@@ -1085,15 +1229,28 @@ void MainWindow::applyConversation(const QJsonObject &c)
         accent = true;
     }
     const QString seed = c.value("kind").toString() == "direct" && !c.value("peer_user_id").toString().isEmpty() ? c.value("peer_user_id").toString() : c.value("id").toString();
+    m_header->title->setTitleColor(c.value("title_color").toString());
     m_header->title->set(c.value("title").toString(), count, names, seed, accent, c.value("avatar_path").toString());
     const bool gone = c.value("left").toBool() || c.value("archived").toBool() || system;
-    m_composer->setVisible(!gone && c.value("can_post").toBool(true));
+    m_composer->setVisible(!gone && c.value("can_post").toBool(true) && c.value("muted").toDouble() == 0);
     // Calls are one-to-one, through a direct chat the peer can receive in.
     const bool callable = c.value("kind").toString() == "direct" && !gone && c.value("can_post").toBool(true) && !c.value("peer_user_id").toString().isEmpty();
     m_header->audioCall->setVisible(callable);
     m_header->videoCall->setVisible(callable);
     m_composer->setBlocked(!c.value("key_changed_users").toArray().isEmpty());
     m_view->setCanReact(!gone && c.value("key_changed_users").toArray().isEmpty());
+    m_view->setCanPin(c.value("can_pin").toBool());
+    // Pinned messages: the bar follows the conversation's pins.
+    const QString convId = c.value("id").toString();
+    const bool canPin = c.value("can_pin").toBool();
+    if (c.value("pin_count").toInt() == 0) {
+        m_pinBar->set(convId, {}, false);
+    } else {
+        Core::instance()->call("list_pins", {{"conversation_id", convId}}, this, [this, convId, canPin](const QJsonValue &v, const CoreError &e) {
+            if (e.ok() && m_current.value("id").toString() == convId)
+                m_pinBar->set(convId, v.toArray(), canPin);
+        });
+    }
     updateNotice();
 }
 
@@ -1265,6 +1422,18 @@ void MainWindow::sendNextFile()
             p["thumb"] = thumb;
             p["width"] = size.width();
             p["height"] = size.height();
+        }
+        if (file.value("photo").toBool() && type.startsWith("video/")) {
+            // The first frame and the length come from the system; a video it cannot read goes as a plain file.
+            const videoinfo::Info clip = videoinfo::read(path);
+            if (!clip.thumb.isEmpty())
+                p["thumb"] = clip.thumb;
+            if (!clip.size.isEmpty()) {
+                p["width"] = clip.size.width();
+                p["height"] = clip.size.height();
+            }
+            if (clip.durationMs > 0)
+                p["duration"] = clip.durationMs;
         }
         if (guard) QMetaObject::invokeMethod(guard, [guard, p] {
             if (!guard) return;

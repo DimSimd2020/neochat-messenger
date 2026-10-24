@@ -120,13 +120,17 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, a *authCtx) 
 		var archived bool
 		var kind, role string
 		var rawSettings []byte
-		err := tx.QueryRow(r.Context(), `SELECT c.revision, c.archived, c.kind, c.settings, m.role FROM conversations c
-			JOIN memberships m ON m.conversation_id=c.id AND m.user_id=$2 WHERE c.id=$1 FOR UPDATE OF c`, nullUUID(convID), a.UserID).Scan(&cur, &archived, &kind, &rawSettings, &role)
+		var muted bool
+		err := tx.QueryRow(r.Context(), `SELECT c.revision, c.archived, c.kind, c.settings, m.role, COALESCE(m.muted_until > now(), false) FROM conversations c
+			JOIN memberships m ON m.conversation_id=c.id AND m.user_id=$2 WHERE c.id=$1 FOR UPDATE OF c`, nullUUID(convID), a.UserID).Scan(&cur, &archived, &kind, &rawSettings, &role, &muted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errNotFound
 		}
 		if err != nil {
 			return err
+		}
+		if !req.Control && muted {
+			return errf(403, "muted", "Вам запрещено писать в этой группе")
 		}
 		if !req.Control && role == "member" {
 			var st groupSettings

@@ -41,6 +41,15 @@ impl Inner {
         Ok(kv_get_str(&self.db().conn, "server")?.unwrap_or_else(|| DEFAULT_SERVER.to_string()))
     }
 
+    /// Tests sign their own manifests; no build that ships can swap the key.
+    fn update_key(&self) -> String {
+        #[cfg(test)]
+        if let Ok(Some(k)) = kv_get_str(&self.db().conn, "test_update_key") {
+            return k;
+        }
+        UPDATE_KEY.to_string()
+    }
+
     /// The verified manifest entry for `platform`, its download URL and whether it is an
     /// alpha build, or None when nothing is published.
     /// `platforms` is the stable channel: clients that omit `channel` keep receiving it.
@@ -50,13 +59,13 @@ impl Inner {
         let public = match Api::new(&server).call("GET", "/v1/app/manifest", None, None) {
             Err(Error::Api { status: 404, .. }) => None,
             r => {
-                let entry = select_entry(&verified_manifest(&r?)?, platform, channel);
+                let entry = select_entry(&verified_manifest(&r?, &self.update_key())?, platform, channel);
                 (!entry.is_null()).then_some(entry)
             }
         };
         // Alpha is optional: whatever goes wrong there (offline, not a tester, nothing published)
         // must not hide the public update.
-        let alpha = if self.logged_in() { self.authed("GET", "/v1/app/alpha/manifest", None).ok().and_then(|m| verified_manifest(&m).ok()) } else { None }
+        let alpha = if self.logged_in() { self.authed("GET", "/v1/app/alpha/manifest", None).ok().and_then(|m| verified_manifest(&m, &self.update_key()).ok()) } else { None }
             .map(|m| m["channels"]["alpha"][platform].clone())
             .filter(|e| !e.is_null());
         let Some((entry, alpha)) = pick(public, alpha) else { return Ok(None) };
@@ -130,10 +139,10 @@ fn pick(public: Option<Value>, alpha: Option<Value>) -> Option<(Value, bool)> {
 }
 
 /// The manifest body after the offline signature check.
-fn verified_manifest(out: &Value) -> Result<Value> {
+fn verified_manifest(out: &Value, key: &str) -> Result<Value> {
     let body = unb64(s(out, "manifest")?)?;
     let sig = Signature::from_slice(&unb64(s(out, "signature")?)?).map_err(|_| Error::Crypto("Подпись обновления повреждена".into()))?;
-    let key: [u8; 32] = hex::decode(UPDATE_KEY).ok().and_then(|k| k.try_into().ok()).ok_or_else(|| Error::Crypto("Ключ обновлений повреждён".into()))?;
+    let key: [u8; 32] = hex::decode(key).ok().and_then(|k| k.try_into().ok()).ok_or_else(|| Error::Crypto("Ключ обновлений повреждён".into()))?;
     VerifyingKey::from_bytes(&key)
         .and_then(|k| k.verify(&body, &sig))
         .map_err(|_| Error::Crypto("Подпись обновления не прошла проверку".into()))?;
@@ -224,5 +233,118 @@ mod tests {
         assert_eq!(pick(public(), None).map(|(_, a)| a), Some(false));
         assert_eq!(pick(None, alpha("0.6.9.5")).map(|(_, a)| a), Some(true));
         assert!(pick(None, None).is_none());
+    }
+
+    /// A tester's core finds the alpha build next to the public one, downloads it with the
+    /// account's token and reports the tag; the same server answers 404 to anyone else.
+    #[test]
+    fn tester_is_offered_the_alpha_build_and_others_are_not() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        use ed25519_dalek::{Signer, SigningKey};
+        use sha2::{Digest, Sha256};
+
+        use crate::engine::Core;
+        use crate::keys::b64;
+        use crate::store::kv_set;
+
+        const BUILD: &[u8] = b"alpha installer bytes";
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let manifest = json!({"channels": {"alpha": {"windows": {
+            "version": "9.9.9", "file": "NeoChat-9.9.9-alpha-x64.msi", "size": BUILD.len(),
+            "sha256": hex::encode(Sha256::digest(BUILD)), "tag": "alpha"}}}})
+        .to_string();
+        let signed = json!({"manifest": b64(manifest.as_bytes()), "signature": b64(&signing.sign(manifest.as_bytes()).to_bytes())}).to_string();
+
+        // Requests seen by the fake server: (path, Authorization header).
+        let seen = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut auth = String::new();
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("authorization:") {
+                        auth = v.trim().to_string();
+                    }
+                }
+                log.lock().unwrap().push((path.clone(), auth.clone()));
+                let tester = auth == "bearer tester-token";
+                let (status, body, kind): (&str, Vec<u8>, &str) = match path.as_str() {
+                    "/v1/app/alpha/manifest" if tester => ("200 OK", signed.clone().into_bytes(), "application/json"),
+                    "/v1/app/alpha/files/NeoChat-9.9.9-alpha-x64.msi" if tester => ("200 OK", BUILD.to_vec(), "application/octet-stream"),
+                    _ => ("404 Not Found", br#"{"error":{"code":"not_found","message":"not found"}}"#.to_vec(), "application/json"),
+                };
+                let head = format!("HTTP/1.1 {status}
+Content-Type: {kind}
+Content-Length: {}
+Connection: close
+
+", body.len());
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+                let _ = reader.read(&mut [0u8; 1]);
+            }
+        });
+
+        let open = |token: &str| {
+            let dir = std::env::temp_dir().join(format!("neochat-alpha-{}", uuid::Uuid::new_v4()));
+            let core = Core::open(&json!({"data_dir": dir, "db_key": "ab".repeat(32), "foreground": false}), Box::new(|_| {})).unwrap();
+            {
+                let db = core.inner.db();
+                for (k, v) in [
+                    ("server", base.clone()),
+                    ("user_id", "u1".into()),
+                    ("device_id", "d1".into()),
+                    ("refresh_token", "refresh".into()),
+                    ("access_token", token.into()),
+                    ("access_expires_at", (crate::store::now_ms() + 600_000).to_string()),
+                    ("test_update_key", hex::encode(signing.verifying_key().to_bytes())),
+                ] {
+                    kv_set(&db.conn, k, v.as_bytes()).unwrap();
+                }
+            }
+            (core, dir)
+        };
+        let ask = json!({"platform": "windows", "version": "0.6.9.4"});
+
+        let (tester, dir) = open("tester-token");
+        let check = tester.inner.check_update(&ask).unwrap();
+        assert_eq!(check["available"], true, "{check}");
+        assert_eq!(check["version"], "9.9.9");
+        assert_eq!(check["tag"], "alpha");
+        assert!(check["url"].as_str().unwrap().ends_with("/v1/app/alpha/files/NeoChat-9.9.9-alpha-x64.msi"));
+        let got = tester.inner.download_update(&ask).unwrap();
+        assert_eq!(got["tag"], "alpha");
+        assert_eq!(std::fs::read(got["path"].as_str().unwrap()).unwrap(), BUILD);
+        // Already on that build: nothing more to offer.
+        assert_eq!(tester.inner.check_update(&json!({"platform": "windows", "version": "9.9.9"})).unwrap()["available"], false);
+        drop(tester);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let (other, dir) = open("someone-else");
+        assert_eq!(other.inner.check_update(&ask).unwrap()["available"], false);
+        assert!(other.inner.download_update(&ask).is_err());
+        drop(other);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // The account's token goes only to the alpha routes, never to the public ones.
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|(path, _)| path == "/v1/app/manifest"));
+        assert!(seen.iter().filter(|(path, _)| path.starts_with("/v1/app/manifest") || path.starts_with("/v1/app/files/")).all(|(_, auth)| auth.is_empty()), "{seen:?}");
     }
 }

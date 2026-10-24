@@ -131,6 +131,14 @@ impl Inner {
                 now_ms()
             ],
         )?;
+        // Mutes are the server's to enforce; the client only shows them.
+        let muted: serde_json::Map<String, Value> = c["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| Some((m["user_id"].as_str()?.to_string(), json!(m["muted_until"].as_i64()?))))
+            .collect();
+        db.conn.execute("UPDATE conversations SET muted=?2 WHERE id=?1", params![id, Value::Object(muted).to_string()])?;
         if let Some((st, blob)) = verified {
             // Admins come from the verified state, never from the server's role list.
             db.conn.execute(
@@ -280,6 +288,29 @@ impl Inner {
             info["tags"] = serde_json::from_str(&tags).unwrap_or(json!({}));
         }
         self.enqueue_control(gid, "group_update", info)?;
+        // "X был добавлен …" goes after the update, so a new member already knows the group.
+        let added: Vec<String> = members.iter().filter(|m| !prev_state.members.contains(m)).cloned().collect();
+        let removed: Vec<String> = prev_state.members.iter().filter(|m| !members.contains(*m)).cloned().collect();
+        self.send_service(gid, "added", &added, None)?;
+        self.send_service(gid, "removed", &removed, None)?;
+        self.emit(json!({"type": "conversations_changed"}));
+        self.conversation_json(gid)
+    }
+
+    /// Stops a member from writing (`minutes` > 0 for that long, -1 for good) or, with 0,
+    /// lets them write again. The server enforces it; the group sees a service line.
+    pub fn group_mute(self: &Arc<Self>, p: &Value) -> Result<Value> {
+        let gid = s(p, "conversation_id")?;
+        let user = s(p, "user_id")?;
+        let minutes = p["minutes"].as_i64().filter(|m| (-1..=525_600).contains(m)).ok_or_else(|| Error::Invalid("Некорректный срок".into()))?;
+        let (me, _) = self.me()?;
+        if !self.rights(gid)?.is_admin(&me) {
+            return Err(Error::Invalid("Ограничивают владелец и админы".into()));
+        }
+        let until = if minutes > 0 { now_ms() + minutes * 60_000 } else { minutes };
+        let c = self.authed("PUT", &format!("/v1/conversations/{gid}/members/{user}/mute"), Some(&json!({"until": until})))?;
+        self.apply_conversation(&c)?;
+        self.send_service(gid, if minutes == 0 { "unmuted" } else { "muted" }, &[user.to_string()], (minutes != 0).then_some(until))?;
         self.emit(json!({"type": "conversations_changed"}));
         self.conversation_json(gid)
     }
@@ -327,7 +358,7 @@ impl Inner {
         let row = db
             .conn
             .query_row(
-                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags, in_archive, pinned, avatar FROM conversations WHERE id=?1",
+                "SELECT id, kind, title, peer_user_id, owner_id, members, archived, left_group, unread, draft, last_preview, last_activity, description, tags, in_archive, pinned, avatar, muted, saved FROM conversations WHERE id=?1",
                 [id],
                 |r| {
                     Ok((
@@ -348,42 +379,54 @@ impl Inner {
                         r.get::<_, i64>(14)?,
                         r.get::<_, i64>(15)?,
                         r.get::<_, String>(16)?,
+                        r.get::<_, String>(17)?,
+                        r.get::<_, i64>(18)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| Error::Invalid("Беседа не найдена".into()))?;
-        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags, in_archive, pinned, group_avatar) = row;
+        let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags, in_archive, pinned, group_avatar, muted, saved) = row;
         drop(db);
         let rights = self.rights(&id)?;
         let db = self.db();
         let tags: serde_json::Map<String, Value> = serde_json::from_str(&tags).unwrap_or_default();
         let role_of = |u: &str| if owner.as_deref() == Some(u) { "owner" } else if rights.admins.iter().any(|a| a == u) { "admin" } else { "member" };
         let member_ids: Vec<String> = serde_json::from_str(&members)?;
+        // Mutes still in force: {user_id: until}, -1 without an end.
+        let now = now_ms();
+        let muted: serde_json::Map<String, Value> = serde_json::from_str::<serde_json::Map<String, Value>>(&muted)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, u)| u.as_i64().is_some_and(|u| u == -1 || u > now))
+            .collect();
+        let muted_me = muted.get(&me).and_then(Value::as_i64).unwrap_or(0);
         let mut members_out = Vec::new();
         let mut peer_verified = false;
         for m in &member_ids {
             if *m == me {
-                members_out.push(json!({"user_id": m, "display_name": "Вы", "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true, "avatar_path": self.avatar_path(&kv_get_str(&db.conn, "avatar")?.unwrap_or_default()),
-                    "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
+                members_out.push(json!({"user_id": m, "display_name": "Вы", "name_color": kv_get_str(&db.conn, "name_color")?.unwrap_or_default(), "username": kv_get(&db.conn, "username")?.map(|b| String::from_utf8_lossy(&b).into_owned()), "me": true, "avatar_path": self.avatar_path(&kv_get_str(&db.conn, "avatar")?.unwrap_or_default()),
+                    "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!("")), "muted_until": muted.get(m).cloned().unwrap_or(json!(0))}));
                 continue;
             }
             let c = db
                 .conn
-                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed, c.bio, c.avatar FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?))
+                .query_row(&format!("SELECT c.username, {}, c.last_name, c.verified, c.key_changed, c.bio, c.avatar, c.name_color FROM contacts c WHERE c.user_id=?1", crate::engine::NAME_SQL), [m], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?))
                 })
                 .optional()?;
-            if let Some((u, f, l, v, k, bio, avatar)) = c {
+            if let Some((u, f, l, v, k, bio, avatar, color)) = c {
                 if Some(m) == peer.as_ref() {
                     peer_verified = v == 1;
                 }
-                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio, "avatar_path": self.avatar_path(&avatar),
-                    "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!(""))}));
+                members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio, "name_color": color, "avatar_path": self.avatar_path(&avatar),
+                    "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!("")), "muted_until": muted.get(m).cloned().unwrap_or(json!(0))}));
             }
         }
         let display = if kind == "direct" {
             members_out.iter().find(|m| m["me"] == false).and_then(|m| m["display_name"].as_str()).unwrap_or("Диалог").to_string()
+        } else if saved == 1 {
+            "Избранное".to_string()
         } else if title.is_empty() && kind == "channel" {
             "Канал".to_string()
         } else if title.is_empty() {
@@ -397,6 +440,8 @@ impl Inner {
             Some("Ключ собеседника изменился. Сверьте код перед продолжением")
         } else if left == 1 {
             Some("Вы больше не участник этой группы")
+        } else if muted_me != 0 && kind == "group" {
+            Some("Вам запретили писать в этой группе")
         } else if archived == 1 {
             Some("Группа архивирована: владелец вышел")
         } else {
@@ -413,6 +458,8 @@ impl Inner {
             "id": id,
             "kind": kind,
             "title": display,
+            // A direct chat is titled with the other person's name, in the colour they chose.
+            "title_color": if kind == "direct" { members_out.iter().find(|m| m["me"] == false).and_then(|m| m["name_color"].as_str()).unwrap_or("").to_string() } else { String::new() },
             "peer_user_id": peer,
             "avatar_path": if kind == "direct" {
                 members_out.iter().find(|m| Some(m["user_id"].as_str().unwrap_or("")) == peer.as_deref()).map(|m| m["avatar_path"].clone()).unwrap_or(json!(""))
@@ -433,10 +480,14 @@ impl Inner {
             "last_activity": activity,
             "key_changed_users": changed,
             "peer_verified": peer_verified,
-            "can_send": active && rights.can_post(&me),
+            "can_send": active && muted_me == 0 && rights.can_post(&me),
             "can_post": rights.can_post(&me),
-            "can_media": active && rights.can_media(&me),
-            "can_polls": active && rights.can_polls(&me),
+            "muted": muted_me,
+            "saved": saved == 1,
+            "can_pin": active && (kind == "direct" || rights.is_admin(&me)),
+            "pin_count": db.conn.query_row("SELECT count(*) FROM messages WHERE conversation_id=?1 AND pinned_at>0", [&id], |r| r.get::<_, i64>(0))?,
+            "can_media": active && muted_me == 0 && rights.can_media(&me),
+            "can_polls": active && muted_me == 0 && rights.can_polls(&me),
             "can_edit_info": rights.can_info(&me),
             "role": role_of(&me),
             "is_admin": rights.is_admin(&me),

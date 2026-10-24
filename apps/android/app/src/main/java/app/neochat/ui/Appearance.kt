@@ -508,7 +508,7 @@ private class BackdropCanvas(ctx: Context) : View(ctx), Themed {
 }
 
 /** Saturation and brightness square, hue strip and a hex field for one color. */
-private class ColorPickerView(ctx: Context) : LinearLayout(ctx) {
+internal class ColorPickerView(ctx: Context) : LinearLayout(ctx) {
     var onChange: ((Int) -> Unit)? = null
     private var hue = 220f
     private var sat = 0.5f

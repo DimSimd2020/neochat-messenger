@@ -212,6 +212,19 @@ object Dialogs {
         s.add(about, 10)
         val search = SearchBox(ctx, "Поиск контактов")
         s.add(search, 10)
+        // Notes to myself sit above the contacts of a direct chat.
+        val savedRow = ListRow(ctx, 44)
+        savedRow.avatar.set("Избранное", "saved", "")
+        savedRow.title.text = "Избранное"
+        savedRow.subtitle.text = "Заметки для себя"
+        savedRow.setOnClickListener {
+            CoreClient.call("open_saved", JSONObject()) { cv, ce ->
+                if (ce != null) return@call act.toast(ce.message)
+                s.dismiss()
+                act.openChat((cv as JSONObject).str("id"))
+            }
+        }
+        s.add(savedRow, 6)
         val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         s.add(rows, 6)
         val empty = ctx.label("Контактов пока нет. Добавьте человека по имени пользователя.", 14f, 400, Theme.Role.MUTED)
@@ -269,6 +282,7 @@ object Dialogs {
             chn.isSelected = mode == 2
             title.setLabel(if (channel) "Название канала" else "Название группы")
             title.visibility = if (group) View.VISIBLE else View.GONE
+            savedRow.visibility = if (group) View.GONE else View.VISIBLE
             about.visibility = if (group) View.VISIBLE else View.GONE
             create.visibility = if (group) View.VISIBLE else View.GONE
             create.setText(createText())
@@ -608,6 +622,7 @@ object Dialogs {
                     val row = ListRow(ctx, 40)
                     row.avatar.set(m.str("display_name"), uid, m.str("avatar_path"))
                     row.title.text = m.str("display_name")
+                    row.title.personColor(m.str("name_color"), Theme.Role.TEXT)
                     if (m.optBoolean("key_changed")) {
                         row.subtitle.text = "Ключ изменился — сверьте код в личном чате"
                         row.subtitle.role(Theme.Role.WARNING)
@@ -615,6 +630,7 @@ object Dialogs {
                         var sub = if (m.optBoolean("me")) "это вы" else "@" + m.str("username")
                         if (uid == ownerId) sub += " · владелец" else if (uid in admins) sub += " · админ"
                         if (m.str("tag").isNotEmpty()) sub += " · " + m.str("tag")
+                        if (m.optLong("muted_until") != 0L) sub += " · не может писать"
                         row.subtitle.text = sub
                     }
                     row.contentDescription = "${row.title.text}, ${row.subtitle.text}"
@@ -627,6 +643,21 @@ object Dialogs {
                                 setMembers(JSONObject().put("member_ids", others()).put("admin_ids", JSONArray(admins.filter { it != uid })), "Права админа сняты")
                             } else menu.add("Назначить админом") {
                                 setMembers(JSONObject().put("member_ids", others()).put("admin_ids", JSONArray(admins.toList() + uid)), "Назначен админ")
+                            }
+                        }
+                        if (!me && !channel && uid != ownerId && (owner || uid !in admins)) {
+                            fun mute(minutes: Int, done: String) {
+                                CoreClient.call("group_mute", JSONObject().put("conversation_id", cid).put("user_id", uid).put("minutes", minutes)) { _, e ->
+                                    if (e != null) return@call act.toast(e.message)
+                                    act.toast(done)
+                                    reload()
+                                }
+                            }
+                            if (m.optLong("muted_until") != 0L) menu.add("Снять ограничение") { mute(0, "Ограничение снято") }
+                            else {
+                                menu.add("Заглушить на час") { mute(60, "Участник заглушён на час") }
+                                menu.add("Заглушить на сутки") { mute(1440, "Участник заглушён на сутки") }
+                                menu.add("Заглушить навсегда") { mute(-1, "Участник заглушён") }
                             }
                         }
                         if (!me && uid != ownerId && (owner || uid !in admins)) menu.add(if (channel) "Удалить из канала" else "Исключить из группы", danger = true) {

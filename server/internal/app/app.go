@@ -135,6 +135,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/conversations/{id}/leave", s.authed(s.handleLeave))
 	m.HandleFunc("GET /v1/conversations/{id}/states", s.authed(s.handleStates))
 	m.HandleFunc("PUT /v1/conversations/{id}/settings", s.authed(s.handleSettings))
+	m.HandleFunc("PUT /v1/conversations/{id}/members/{user}/mute", s.authed(s.handleMute))
 	m.HandleFunc("POST /v1/conversations/{id}/typing", s.authed(s.handleTyping))
 	m.HandleFunc("POST /v1/presence", s.authed(s.handlePresence))
 	m.HandleFunc("POST /v1/conversations/{id}/messages", s.authed(s.handleSend))

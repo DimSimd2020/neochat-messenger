@@ -110,6 +110,11 @@ public:
     void scrollToNewest();
     bool atBottom() const;
     void setCanReact(bool on) { m_canReact = on; }
+    void setCanPin(bool on) { m_canPin = on; }
+    // Scrolls to a message (loading older pages until it is found) and flashes it.
+    void jumpToMessage(const QString &id);
+    // 0..1 while the message is flashing after a jump, else 0.
+    qreal flashOf(const QString &id) const;
     // Check mode: several messages picked for a bulk action.
     bool checkMode() const { return m_checkMode; }
     bool isChecked(const QString &id) const { return m_checked.contains(id); }
@@ -164,6 +169,10 @@ private:
     bool m_hasMore = true;
     bool m_searching = false;
     bool m_canReact = true;
+    bool m_canPin = false;
+    QString m_jumpId;  // a jump waiting for older pages
+    QString m_flashId; // the message just jumped to
+    qint64 m_flashAt = 0;
     int m_generation = 0;
     int m_newBelow = 0;
     QTimer m_anim;

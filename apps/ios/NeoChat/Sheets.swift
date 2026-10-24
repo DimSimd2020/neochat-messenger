@@ -49,10 +49,10 @@ class SheetViewController: UIViewController {
         return row
     }
 
-    func personRow(_ name: String, _ sub: String, seed: String, avatar: String = "", subColor: UIColor = Theme.muted, action: (() -> Void)? = nil) -> UIView {
+    func personRow(_ name: String, _ sub: String, seed: String, avatar: String = "", subColor: UIColor = Theme.muted, nameColor: UIColor? = nil, action: (() -> Void)? = nil) -> UIView {
         let av = AvatarView(size: 44)
         av.set(name, seed: seed, avatar: avatar)
-        let t = label(name, 16, .semibold)
+        let t = label(name, 16, .semibold, color: nameColor ?? Theme.text)
         let s = label(sub, 14, color: subColor)
         let col = UIStackView(arrangedSubviews: [t, s])
         col.axis = .vertical
@@ -194,6 +194,7 @@ final class NewChatViewController: SheetViewController {
     private let aboutField = Field("Описание (необязательно)")
     private let list = UIStackView()
     private let create = PillButton("Создать группу")
+    private var savedRow: UIView?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -201,6 +202,22 @@ final class NewChatViewController: SheetViewController {
         mode.selectedSegmentIndex = 0
         mode.addAction(UIAction { [weak self] _ in self?.setMode(self?.mode.selectedSegmentIndex ?? 0) }, for: .valueChanged)
         stack.addArrangedSubview(mode)
+        // Notes to myself sit above the contacts of a direct chat.
+        let saved = personRow("Избранное", "Заметки для себя", seed: "saved") { [weak self] in
+            Core.shared.call("open_saved") { r in
+                switch r {
+                case .failure(let e): self?.toast(e.message)
+                case .success(let v):
+                    let id = (v as? JSON)?.str("id") ?? ""
+                    self?.dismiss(animated: !Theme.reducedMotion) {
+                        NotificationCenter.default.post(name: .openConversation, object: nil, userInfo: ["id": id])
+                    }
+                }
+            }
+        }
+        saved.layer.cornerRadius = 20
+        savedRow = saved
+        stack.addArrangedSubview(saved)
         let addContact = LinkButton("Новый контакт")
         addContact.contentHorizontalAlignment = .leading
         addContact.addAction(UIAction { [weak self] _ in
@@ -231,6 +248,7 @@ final class NewChatViewController: SheetViewController {
         titleField.isHidden = !group
         aboutField.isHidden = !group
         create.isHidden = !group
+        savedRow?.isHidden = group
         updateCreate()
         reload()
     }
@@ -516,8 +534,9 @@ final class SettingsViewController: SheetViewController {
             NavRow("paintpalette", "Оформление интерфейса") { [weak self] in self?.push(AppearanceViewController()) },
             size,
             SwitchRow("face.smiling", "Крупные эмодзи без текста", on: Prefs.bigEmoji) { Prefs.set("big_emoji", $0) },
+            SwitchRow("sparkles", "Анимированные эмодзи", on: Prefs.animatedEmoji) { Prefs.set("animated_emoji", $0) },
             SwitchRow("figure.walk", "Уменьшить анимацию", on: UserDefaults.standard.bool(forKey: "reduce_motion")) { Prefs.set("reduce_motion", $0) },
-        ])
+        ], footer: "Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи.")
 
         let sort = NavRow("arrow.up.arrow.down", "Сортировка чатов", value: chatSorts.first { $0.0 == Prefs.chatSort }?.1 ?? "") {}
         sort.addAction(UIAction { [weak self, weak sort] _ in
@@ -784,9 +803,11 @@ final class ConversationInfoViewController: SheetViewController, PHPickerViewCon
                 var sub = me ? "это вы" : "@" + m.str("username")
                 if uid == ownerId { sub += " · владелец" } else if admins.contains(uid) { sub += " · админ" }
                 if !m.str("tag").isEmpty { sub += " · " + m.str("tag") }
+                let muted = m.int64("muted_until") != 0
+                if muted { sub += " · не может писать" }
                 if warn { sub = "Ключ изменился — сверьте код в личном чате" }
                 let name = m.str("display_name")
-                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, avatar: m.str("avatar_path"), subColor: warn ? Theme.warning : Theme.muted, action: admin && !gone ? {
+                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, avatar: m.str("avatar_path"), subColor: warn ? Theme.warning : Theme.muted, nameColor: ProfileStyle.name(m.str("name_color")), action: admin && !gone ? {
                     let a = UIAlertController(title: name, message: nil, preferredStyle: .actionSheet)
                     a.addAction(UIAlertAction(title: "Тег…", style: .default) { _ in self.editTag(uid, name: name, current: m.str("tag")) })
                     if owner && !me {
@@ -798,6 +819,18 @@ final class ConversationInfoViewController: SheetViewController, PHPickerViewCon
                             a.addAction(UIAlertAction(title: "Назначить админом", style: .default) { _ in
                                 self.call("group_set_members", ["conversation_id": self.cid, "member_ids": others("", ""), "admin_ids": admins.sorted() + [uid]], ok: "Назначен админ")
                             })
+                        }
+                    }
+                    if !me && !channel && uid != ownerId && (owner || !admins.contains(uid)) {
+                        let mute = { (minutes: Int, done: String) in
+                            self.call("group_mute", ["conversation_id": self.cid, "user_id": uid, "minutes": minutes], ok: done)
+                        }
+                        if muted {
+                            a.addAction(UIAlertAction(title: "Снять ограничение", style: .default) { _ in mute(0, "Ограничение снято") })
+                        } else {
+                            a.addAction(UIAlertAction(title: "Заглушить на час", style: .default) { _ in mute(60, "Участник заглушён на час") })
+                            a.addAction(UIAlertAction(title: "Заглушить на сутки", style: .default) { _ in mute(1440, "Участник заглушён на сутки") })
+                            a.addAction(UIAlertAction(title: "Заглушить навсегда", style: .default) { _ in mute(-1, "Участник заглушён") })
                         }
                     }
                     if !me && uid != ownerId && (owner || !admins.contains(uid)) {
@@ -978,6 +1011,7 @@ struct OutgoingFile {
     let mime: String
     var size: Int64 { Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
     var isImage: Bool { mime.hasPrefix("image/") }
+    var isVideo: Bool { mime.hasPrefix("video/") }
 }
 
 /// The window every attachment passes through: preview, "send as a file" for pictures, a caption.
@@ -1004,9 +1038,9 @@ final class AttachViewController: SheetViewController {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private var allImages: Bool { files.allSatisfy { $0.isImage } }
-    // Pictures can go as photos or as files; with anything else in the set there is no choice to offer.
-    private var photosNow: Bool { allImages ? !asFile : asPhotos }
+    private var allMedia: Bool { files.allSatisfy { $0.isImage || $0.isVideo } }
+    // Pictures and videos can go as such or as files; with anything else in the set there is no choice to offer.
+    private var photosNow: Bool { allMedia ? !asFile : asPhotos }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -1058,11 +1092,17 @@ final class AttachViewController: SheetViewController {
     }
 
     private func refresh() {
-        let images = allImages
-        asFileRow?.isHidden = !images
-        let photos = photosNow && images
-        title = photos ? (files.count == 1 ? "Отправить фото" : "Отправить фото: \(files.count)")
-            : (files.count == 1 ? "Отправить файл" : "Отправить файлы: \(files.count)")
+        let media = allMedia
+        asFileRow?.isHidden = !media
+        let photos = photosNow && media
+        if photos && files.allSatisfy({ $0.isVideo }) {
+            title = files.count == 1 ? "Отправить видео" : "Отправить видео: \(files.count)"
+        } else if photos && files.contains(where: { $0.isVideo }) {
+            title = "Отправить медиа: \(files.count)"
+        } else {
+            title = photos ? (files.count == 1 ? "Отправить фото" : "Отправить фото: \(files.count)")
+                : (files.count == 1 ? "Отправить файл" : "Отправить файлы: \(files.count)")
+        }
         preview.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if photos { addImagePreview() } else { addFileRows() }
     }
@@ -1079,12 +1119,22 @@ final class AttachViewController: SheetViewController {
         img.clipsToBounds = true
         img.translatesAutoresizingMaskIntoConstraints = false
         img.isAccessibilityElement = true
-        img.accessibilityLabel = files.count > 1 ? "Первое из \(files.count) фото" : "Фото"
+        let video = files[0].isVideo
+        img.accessibilityLabel = files.count > 1 ? "Первое из \(files.count): " + (video ? "видео" : "фото") : (video ? "Видео" : "Фото")
         box.addSubview(img)
         NSLayoutConstraint.activate([
             img.topAnchor.constraint(equalTo: box.topAnchor), img.bottomAnchor.constraint(equalTo: box.bottomAnchor),
             img.leadingAnchor.constraint(equalTo: box.leadingAnchor), img.trailingAnchor.constraint(equalTo: box.trailingAnchor),
         ])
+        if video {
+            let mark = VideoMarkView()
+            mark.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(mark)
+            NSLayoutConstraint.activate([
+                mark.topAnchor.constraint(equalTo: box.topAnchor), mark.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+                mark.leadingAnchor.constraint(equalTo: box.leadingAnchor), mark.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+            ])
+        }
         if files.count > 1 {
             let badge = label("+\(files.count - 1)", 13, .semibold, color: .white)
             badge.textAlignment = .center
@@ -1104,7 +1154,7 @@ final class AttachViewController: SheetViewController {
         let token = loadToken
         let url = files[0].url
         DispatchQueue.global(qos: .userInitiated).async {
-            let decoded = Photos.decode(url, maxSide: 900)
+            let decoded = video ? Videos.poster(url, maxSide: 900) : Photos.decode(url, maxSide: 900)
             DispatchQueue.main.async { [weak self] in
                 if let self, self.loadToken == token { img.image = decoded }
             }

@@ -21,6 +21,9 @@ import android.widget.TextView
 /** A file or picture picked for sending, with what the system tells about it. */
 class Pick(val uri: Uri, val name: String, val mime: String, val size: Long) {
     val image get() = mime.startsWith("image/")
+    val video get() = mime.startsWith("video/")
+    /** Pictures and videos can be sent as such or as plain files. */
+    val media get() = image || video
 }
 
 fun Context.pickOf(uri: Uri): Pick {
@@ -87,17 +90,21 @@ class AttachSheet(
         sheet.show()
     }
 
-    private fun allImages() = picks.all { it.image }
+    private fun allMedia() = picks.all { it.media }
 
-    // Pictures can go as photos or as files; with anything else in the set there is no choice to offer.
-    private fun photosNow() = if (allImages()) !asFile.checked else asPhotos
+    // Pictures and videos can go as such or as files; with anything else in the set there is no choice to offer.
+    private fun photosNow() = if (allMedia()) !asFile.checked else asPhotos
 
     private fun refresh() {
-        val images = allImages()
-        asFile.visibility = if (images) View.VISIBLE else View.GONE
-        val photos = photosNow() && images
+        val media = allMedia()
+        asFile.visibility = if (media) View.VISIBLE else View.GONE
+        val photos = photosNow() && media
+        val videos = picks.all { it.video }
         sheet.setTitle(
             when {
+                photos && videos && picks.size == 1 -> "Отправить видео"
+                photos && videos -> "Отправить видео: ${picks.size}"
+                photos && picks.any { it.video } -> "Отправить медиа: ${picks.size}"
                 photos && picks.size == 1 -> "Отправить фото"
                 photos -> "Отправить фото: ${picks.size}"
                 picks.size == 1 -> "Отправить файл"
@@ -118,13 +125,24 @@ class AttachSheet(
         }
         img.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         previewBox.addView(img, FrameLayout.LayoutParams(MATCH, act.dp(220)))
-        previewBox.contentDescription = if (picks.size > 1) "Первое из ${picks.size} фото" else "Фото"
+        val first = picks.first()
+        val noun = if (first.video) "Видео" else "Фото"
+        previewBox.contentDescription = if (picks.size > 1) "Первое из ${picks.size}: ${noun.lowercase()}" else noun
         val mine = ++token
-        val uri = picks.first().uri
+        val uri = first.uri
         Thread {
-            val bmp = decodeUri(act, uri, 900)
+            val bmp = if (first.video) Videos.frame(act, uri, 900) else decodeUri(act, uri, 900)
             act.runOnUiThread { if (mine == token && bmp != null) img.setImageBitmap(bmp) }
         }.start()
+        if (first.video) {
+            val play = ImageView(act)
+            play.setImageResource(app.neochat.R.drawable.ic_play)
+            play.setColorFilter(0xFFFFFFFF.toInt())
+            play.setPadding(act.dp(14), act.dp(14), act.dp(14), act.dp(14))
+            play.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x99000000.toInt()) }
+            play.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            previewBox.addView(play, FrameLayout.LayoutParams(act.dp(52), act.dp(52), Gravity.CENTER))
+        }
         if (picks.size > 1) {
             val badge = act.label("+${picks.size - 1}", 13f, 600)
             badge.setTextColor(0xFFFFFFFF.toInt())

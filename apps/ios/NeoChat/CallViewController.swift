@@ -6,7 +6,7 @@ import WebRTC
 /// Closes itself when the call is over; the call keeps running without it.
 final class CallViewController: UIViewController {
     private let remote = RTCMTLVideoView()
-    private let local = CameraPreviewView()
+    private let local = RTCMTLVideoView()
     private let pulse = PulseView()
     private let avatar = AvatarView(size: 120)
     private let name = label("", 28, .semibold, color: .white)
@@ -40,7 +40,7 @@ final class CallViewController: UIViewController {
         remote.isHidden = true
         remote.isAccessibilityElement = true
         remote.accessibilityLabel = "Видео собеседника"
-        local.previewLayer.videoGravity = .resizeAspectFill
+        local.videoContentMode = .scaleAspectFill
         local.layer.cornerRadius = 18
         local.layer.cornerCurve = .continuous
         local.clipsToBounds = true
@@ -140,6 +140,7 @@ final class CallViewController: UIViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         CallManager.shared.remoteRenderer.target = remote
+        CallManager.shared.localRenderer.target = local
         tick = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.sync() }
         sync()
     }
@@ -147,7 +148,7 @@ final class CallViewController: UIViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         CallManager.shared.remoteRenderer.target = nil
-        local.previewLayer.session = nil
+        CallManager.shared.localRenderer.target = nil
         tick?.invalidate()
         pulse.stop()
     }
@@ -207,14 +208,8 @@ final class CallViewController: UIViewController {
         topShade.isHidden = !video
         center.isHidden = video
         local.isHidden = !m.cameraOn
-        if local.previewLayer.session !== m.cameraSession { local.previewLayer.session = m.cameraSession }
-        if let connection = local.previewLayer.connection {
-            if connection.isVideoOrientationSupported { connection.videoOrientation = .portrait }
-            if connection.isVideoMirroringSupported {
-                connection.automaticallyAdjustsVideoMirroring = false
-                connection.isVideoMirrored = m.frontCamera
-            }
-        }
+        // The front camera is shown mirrored, like a mirror.
+        local.transform = m.frontCamera ? CGAffineTransform(scaleX: -1, y: 1) : .identity
         flip.isHidden = !m.cameraOn
         flip.isEnabled = !m.cameraStarting
         let ringing = m.phase == .incoming
@@ -232,12 +227,6 @@ final class CallViewController: UIViewController {
             UIAccessibility.post(notification: .announcement, argument: st)
         }
     }
-}
-
-/// Preview comes straight from the capture session, including when the call screen reopens.
-private final class CameraPreviewView: UIView {
-    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-    var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
 }
 
 /// Round call control with a caption; "on" toggles are drawn light.

@@ -32,6 +32,12 @@ public:
     enum Role { Text, Muted, Accent, Warning };
     Label(const QString &text, qreal px, int weight = 400, Role role = Text, QWidget *parent = nullptr);
     void setRole(Role role);
+    // A colour chosen by a person for their name wins over the role; an invalid colour puts the role back.
+    void setColorOverride(const QColor &color)
+    {
+        m_override = color;
+        update();
+    }
     // Monospace digits for codes people compare (recovery code, safety number).
     void setMono(bool mono)
     {
@@ -48,6 +54,7 @@ private:
     Role m_role;
     qreal m_px;
     int m_weight;
+    QColor m_override;
 };
 
 class IconButton : public QAbstractButton {

@@ -1,0 +1,8 @@
+Animated Noto Emoji
+Copyright Google LLC.
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+Source: https://googlefonts.github.io/noto-emoji-animation/
+
+Changes made for NeoChat: every animation was cut into frames of equal length, scaled to 96 px and packed
+into a palette PNG sprite sheet together with index.json (see scripts/build-animated-emoji.py).

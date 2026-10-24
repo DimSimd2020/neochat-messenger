@@ -1,12 +1,14 @@
 #include "dialogs.h"
 #include "profiles.h"
 
+#include "animatedemoji.h"
 #include "calls.h"
 #include "filepicker.h"
 #include "core.h"
 #include "messages.h"
 #include "popupmenu.h"
 #include "sheet.h"
+#include "profilestyle.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -149,6 +151,8 @@ public:
     bool multi = false;
     QString warning;
     QString avatar;
+    // The colour the person chose for their name, as '#rrggbb'.
+    QString nameHex;
     QSize sizeHint() const override { return {300, 58}; }
 
 protected:
@@ -167,7 +171,8 @@ protected:
         ui::paintAvatar(&p, QRectF(8, (height() - 40) / 2.0, 40, 40), m_name, m_seed, avatar);
         const qreal right = multi ? width() - 44 : width() - 10;
         p.setFont(Theme::instance()->font(15, QFont::DemiBold));
-        p.setPen(c.text);
+        const QColor chosen = profilestyle::nameOn(nameHex, c.surface);
+        p.setPen(chosen.isValid() ? chosen : c.text);
         p.drawText(QRectF(60, 9, right - 60, 22), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(m_name, Qt::ElideRight, int(right - 60)));
         p.setFont(Theme::instance()->font(12.5));
         p.setPen(warning.isEmpty() ? c.muted : c.warning);
@@ -550,10 +555,12 @@ void newChat(const DialogHost &h)
     auto *group = new ui::Button(QStringLiteral("Группа"), ui::Button::Flat);
     auto *channel = new ui::Button(QStringLiteral("Канал"), ui::Button::Flat);
     auto *addContact = new ui::Button(QStringLiteral("Новый контакт"), ui::Button::Flat);
+    auto *saved = new ui::Button(QStringLiteral("Избранное"), ui::Button::Flat);
     modeBar->addWidget(direct);
     modeBar->addWidget(group);
     modeBar->addWidget(channel);
     modeBar->addStretch();
+    modeBar->addWidget(saved);
     modeBar->addWidget(addContact);
     sheet->body()->addLayout(modeBar);
     auto *title = new ui::TextField(QStringLiteral("Название группы"));
@@ -645,6 +652,14 @@ void newChat(const DialogHost &h)
     QObject::connect(group, &QAbstractButton::clicked, sheet, [=] { setMode(1); });
     QObject::connect(channel, &QAbstractButton::clicked, sheet, [=] { setMode(2); });
     QObject::connect(addContact, &QAbstractButton::clicked, sheet, [=] { newContact(h, [=] { (*reload)(); }); });
+    QObject::connect(saved, &QAbstractButton::clicked, sheet, [=] {
+        Core::instance()->call("open_saved", {}, sheet, [=](const QJsonValue &cv, const CoreError &ce) {
+            if (!ce.ok())
+                return fail(h, ce);
+            sheet->close();
+            h.openChat(cv.toObject().value("id").toString());
+        });
+    });
     QObject::connect(search->edit(), &QLineEdit::textChanged, sheet, [=] { (*reload)(); });
     QObject::connect(create, &QAbstractButton::clicked, sheet, [=] {
         if (title->text().trimmed().isEmpty())
@@ -1032,6 +1047,11 @@ void settings(const DialogHost &h)
     notify->setChecked(QSettings().value("notifications/enabled", true).toBool());
     QObject::connect(notify, &QAbstractButton::toggled, sheet, [](bool on) { QSettings().setValue("notifications/enabled", on); });
     sheet->body()->addWidget(notify);
+    auto *moving = new ui::Toggle(QStringLiteral("Анимированные эмодзи"));
+    moving->setChecked(animatedemoji::enabled());
+    QObject::connect(moving, &QAbstractButton::toggled, sheet, [](bool on) { animatedemoji::setEnabled(on); });
+    sheet->body()->addWidget(moving);
+    sheet->body()->addWidget(mutedText(QStringLiteral("Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи.")));
     // Shared by the user's devices through the core; a double click puts it on a message.
     auto *quick = new ui::Button(QStringLiteral("Быстрая реакция · ") + quickReaction(), ui::Button::Secondary);
     quick->setToolTip(QStringLiteral("Двойной щелчок по сообщению ставит эту реакцию. Настройка общая для всех ваших устройств"));
@@ -1422,8 +1442,12 @@ static void groupInfo(const DialogHost &h, const QString &cid)
                     sub += QStringLiteral(" · админ");
                 if (!m.value("tag").toString().isEmpty())
                     sub += QStringLiteral(" · ") + m.value("tag").toString();
+                const bool muted = m.value("muted_until").toDouble() != 0;
+                if (muted)
+                    sub += QStringLiteral(" · не может писать");
                 auto *row = new PersonRow(m.value("display_name").toString(), sub, uid);
                 row->avatar = m.value("avatar_path").toString();
+                row->nameHex = m.value("name_color").toString();
                 if (m.value("key_changed").toBool())
                     row->warning = QStringLiteral("Ключ изменился — сверьте код в личном чате");
                 list->add(row);
@@ -1464,6 +1488,24 @@ static void groupInfo(const DialogHost &h, const QString &cid)
                             menu->addAction(QStringLiteral("Назначить админом"), sheet, [=] {
                                 setMembers({{"member_ids", others({}, {})}, {"admin_ids", adminIds({}, uid)}}, QStringLiteral("Назначен админ"));
                             });
+                    }
+                    if (!me && !channel && uid != ownerId && (owner || !admins.contains(uid))) {
+                        auto mute = [=](int minutes, const QString &done) {
+                            Core::instance()->call("group_mute", {{"conversation_id", cid}, {"user_id", uid}, {"minutes", minutes}}, sheet,
+                                                   [=](const QJsonValue &, const CoreError &me2) {
+                                                       if (!me2.ok())
+                                                           return fail(h, me2);
+                                                       h.toast(done);
+                                                       (*build)();
+                                                   });
+                        };
+                        if (muted) {
+                            menu->addAction(QStringLiteral("Снять ограничение"), sheet, [=] { mute(0, QStringLiteral("Ограничение снято")); });
+                        } else {
+                            menu->addAction(QStringLiteral("Заглушить на час"), sheet, [=] { mute(60, QStringLiteral("Участник заглушён на час")); });
+                            menu->addAction(QStringLiteral("Заглушить на сутки"), sheet, [=] { mute(1440, QStringLiteral("Участник заглушён на сутки")); });
+                            menu->addAction(QStringLiteral("Заглушить навсегда"), sheet, [=] { mute(-1, QStringLiteral("Участник заглушён")); });
+                        }
                     }
                     if (!me && uid != ownerId && (owner || !admins.contains(uid)))
                         menu->addAction(channel ? QStringLiteral("Удалить из канала") : QStringLiteral("Исключить из группы"), sheet, [=] {
@@ -1715,18 +1757,26 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
     sheet->body()->addLayout(buttons);
 
     auto isImage = [](const QString &path) { return QMimeDatabase().mimeTypeForFile(path).name().startsWith("image/"); };
-    // Pictures can go as photos or as files; with anything else in the set there is no choice to offer.
+    auto isVideo = [](const QString &path) { return QMimeDatabase().mimeTypeForFile(path).name().startsWith("video/"); };
+    auto isMedia = [=](const QString &path) { return isImage(path) || isVideo(path); };
+    // Pictures and videos can go as such or as files; with anything else in the set there is no choice to offer.
     auto refresh = [=] {
+        const bool media = std::all_of(paths->begin(), paths->end(), isMedia);
+        asFile->setVisible(media);
+        const bool photos = media ? !asFile->isChecked() : asPhotos;
         const bool images = std::all_of(paths->begin(), paths->end(), isImage);
-        asFile->setVisible(images);
-        const bool photos = images ? !asFile->isChecked() : asPhotos;
         preview->setPaths(*paths, photos && images);
-        if (images && photos)
+        if (media && photos && std::all_of(paths->begin(), paths->end(), isVideo))
+            sheet->setTitle(paths->size() == 1 ? QStringLiteral("Отправить видео") : QStringLiteral("Отправить видео: %1").arg(paths->size()));
+        else if (media && photos && !images)
+            sheet->setTitle(QStringLiteral("Отправить медиа: %1").arg(paths->size()));
+        else if (images && photos)
             sheet->setTitle(paths->size() == 1 ? QStringLiteral("Отправить фото") : QStringLiteral("Отправить фото: %1").arg(paths->size()));
         else
             sheet->setTitle(paths->size() == 1 ? QStringLiteral("Отправить файл") : QStringLiteral("Отправить файлы: %1").arg(paths->size()));
     };
-    asFile->setChecked(!asPhotos);
+    // Videos picked as documents still go as videos unless "as a file" is switched on.
+    asFile->setChecked(!(asPhotos || std::all_of(paths->begin(), paths->end(), isVideo)));
     QObject::connect(asFile, &QAbstractButton::toggled, sheet, refresh);
     QObject::connect(add, &QAbstractButton::clicked, sheet, [=] {
         filepicker::open(sheet, QStringLiteral("Добавить файлы"), {}, true, [=](const QStringList &more) {
@@ -1744,8 +1794,8 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
     });
     auto submit = [=] {
         *sent = true;
-        const bool images = std::all_of(paths->begin(), paths->end(), isImage);
-        const bool photos = images ? !asFile->isChecked() : asPhotos;
+        const bool media = std::all_of(paths->begin(), paths->end(), isMedia);
+        const bool photos = media ? !asFile->isChecked() : asPhotos;
         const QStringList chosen = *paths;
         const QString text = caption->text().trimmed();
         sheet->close();

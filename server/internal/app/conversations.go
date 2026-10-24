@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -38,6 +40,8 @@ type memberOut struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
 	Role        string `json:"role"`
+	// MutedUntil is Unix milliseconds while the member is muted (-1: without an end).
+	MutedUntil *int64 `json:"muted_until,omitempty"`
 }
 
 type recipientOut struct {
@@ -127,13 +131,17 @@ func (s *Server) loadConversation(ctx context.Context, q querier, id, viewer, vi
 	if err := json.Unmarshal(leaves, &c.Leaves); err != nil {
 		return nil, err
 	}
-	rows, err := q.Query(ctx, `SELECT u.id, COALESCE(NULLIF(u.nickname, ''), u.username), u.display_name, m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=$1 ORDER BY u.username`, c.ID)
+	rows, err := q.Query(ctx, `SELECT u.id, COALESCE(NULLIF(u.nickname, ''), u.username), u.display_name, m.role,
+		CASE WHEN m.muted_until IS NULL OR m.muted_until <= now() THEN NULL
+		     WHEN m.muted_until = 'infinity' THEN -1
+		     ELSE (extract(epoch FROM m.muted_until) * 1000)::bigint END
+		FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=$1 ORDER BY u.username`, c.ID)
 	if err != nil {
 		return nil, err
 	}
 	c.Members, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (memberOut, error) {
 		var m memberOut
-		return m, row.Scan(&m.UserID, &m.Username, &m.DisplayName, &m.Role)
+		return m, row.Scan(&m.UserID, &m.Username, &m.DisplayName, &m.Role, &m.MutedUntil)
 	})
 	if err != nil {
 		return nil, err
@@ -643,6 +651,83 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request, a *authC
 			return errf(403, "admin_required", "Настройки меняют владелец и админы")
 		}
 		if _, err := tx.Exec(r.Context(), `UPDATE conversations SET settings=$2 WHERE id=$1`, id, raw); err != nil {
+			return err
+		}
+		rows, err := tx.Query(r.Context(), `SELECT user_id FROM memberships WHERE conversation_id=$1`, id)
+		if err != nil {
+			return err
+		}
+		users, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		devs, err := memberDevices(r.Context(), tx, users)
+		if err != nil {
+			return err
+		}
+		notify, err = emitToDevices(r.Context(), tx, devs, "membership", map[string]string{"conversation_id": id, "revision": strconv.FormatInt(g.rev, 10)})
+		return err
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.hub.notify(notify)
+	c, err := s.loadConversation(r.Context(), s.db, id, a.UserID, a.DeviceID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, 200, c)
+}
+
+// handleMute stops a member from posting until a moment. `until` is Unix milliseconds,
+// 0 lifts the mute and -1 mutes without an end. Admins mute ordinary members; the owner
+// also mutes admins. Receipts and votes still go through (see sendReq.Control).
+func (s *Server) handleMute(w http.ResponseWriter, r *http.Request, a *authCtx) {
+	id, target := r.PathValue("id"), strings.ToLower(r.PathValue("user"))
+	var req struct {
+		Until int64 `json:"until"`
+	}
+	if err := readJSON(w, r, 1<<10, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if !isUUID(target) || req.Until < -1 {
+		s.fail(w, r, errBadRequest)
+		return
+	}
+	if req.Until > 0 && req.Until <= time.Now().UnixMilli() {
+		s.fail(w, r, errf(400, "bad_until", "Этот срок уже прошёл"))
+		return
+	}
+	var notify []string
+	err := s.inTx(r.Context(), func(tx pgx.Tx) error {
+		notify = nil
+		g, err := lockGroup(r.Context(), tx, id, a.UserID)
+		if err != nil {
+			return err
+		}
+		if g.kind != "group" {
+			return errf(400, "not_group", "Участников ограничивают только в группах")
+		}
+		if !g.isAdmin() {
+			return errf(403, "admin_required", "Ограничивают владелец и админы")
+		}
+		var role string
+		err = tx.QueryRow(r.Context(), `SELECT role FROM memberships WHERE conversation_id=$1 AND user_id=$2`, id, target).Scan(&role)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if target == a.UserID || role == "owner" || (role == "admin" && g.role != "owner") {
+			return errf(403, "cannot_mute", "Этого участника ограничить нельзя")
+		}
+		if _, err := tx.Exec(r.Context(), `UPDATE memberships SET muted_until = CASE WHEN $3::bigint = 0 THEN NULL
+			WHEN $3::bigint = -1 THEN 'infinity'::timestamptz ELSE to_timestamp($3::bigint / 1000.0) END
+			WHERE conversation_id=$1 AND user_id=$2`, id, target, req.Until); err != nil {
 			return err
 		}
 		rows, err := tx.Query(r.Context(), `SELECT user_id FROM memberships WHERE conversation_id=$1`, id)

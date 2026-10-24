@@ -112,6 +112,7 @@ pub fn may_post(conn: &rusqlite::Connection, conv: &str, sender: &str, kind: &st
         "text" => r.can_post(sender),
         "file" => r.can_media(sender),
         "poll" => r.can_polls(sender),
+        "service" => r.kind == "group" && r.is_admin(sender),
         _ => true,
     }
 }
@@ -357,6 +358,14 @@ impl Inner {
                         changed = true;
                     }
                 }
+            }
+        }
+        // The notes chat: a channel of one, flagged by its owner from another of the owner's devices.
+        if g["saved"] == true && r.kind == "channel" && r.owner.as_deref() == Some(sender) && self.me()?.0 == sender {
+            let alone: bool = self.db().conn.query_row("SELECT json_array_length(members)=1 FROM conversations WHERE id=?1", [conv], |x| x.get(0))?;
+            if alone {
+                self.db().conn.execute("UPDATE conversations SET saved=1 WHERE id=?1", [conv])?;
+                changed = true;
             }
         }
         if r.is_admin(sender) {

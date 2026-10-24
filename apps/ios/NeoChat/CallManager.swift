@@ -78,7 +78,6 @@ final class CallManager {
     private var videoSource: RTCVideoSource?
     private var videoTrack: RTCVideoTrack?
     private var capturer: RTCCameraVideoCapturer?
-    var cameraSession: AVCaptureSession? { capturer?.captureSession }
     private var videoSender: RTCRtpSender?
     private var sentSdp = false
     private var gen = 0
@@ -106,6 +105,8 @@ final class CallManager {
     }
 
     let remoteRenderer = ProxyRenderer()
+    /// The self-view shows the frames that are sent, so it is blank only when nothing is captured.
+    let localRenderer = ProxyRenderer()
 
     /// The peer's camera is on and frames are arriving.
     var remoteVideo: Bool { peerCamera && Date().timeIntervalSince(remoteRenderer.lastFrame) < 1.5 }
@@ -305,6 +306,7 @@ final class CallManager {
             capturer = cap
             videoSource = src
             videoTrack = track
+            track.add(localRenderer)
             videoSender?.track = track
             cameraStarting = true
             startCapture(cap, device) { [weak self] error in
@@ -372,7 +374,9 @@ final class CallManager {
         videoSender?.track = nil
         capturer?.stopCapture()
         capturer = nil
+        videoTrack?.remove(localRenderer)
         videoTrack = nil
+        localRenderer.reset()
         videoSource = nil
         cameraOn = false
         cameraStarting = false

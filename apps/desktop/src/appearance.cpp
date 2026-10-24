@@ -1,5 +1,7 @@
 #include "dialogs.h"
 
+#include "core.h"
+#include "profilestyle.h"
 #include "sheet.h"
 #include "theme.h"
 #include "widgets.h"
@@ -7,6 +9,7 @@
 #include <QAbstractButton>
 #include <QFocusEvent>
 #include <QHBoxLayout>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
@@ -14,6 +17,7 @@
 #include <QPainterPath>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QtMath>
 #include <functional>
@@ -597,6 +601,64 @@ private:
     QColor m_color;
 };
 
+// A round swatch: a colour, a gradient or the "default" mark; the chosen one has a ring.
+class Dot : public QAbstractButton {
+public:
+    Dot(const QString &description, const QList<QColor> &colors = {}, const QString &mark = {}) : m_colors(colors), m_mark(mark)
+    {
+        setCheckable(true);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setFixedSize(40, 40);
+        setAccessibleName(description);
+        setToolTip(description);
+        connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
+    }
+    void setColors(const QList<QColor> &colors)
+    {
+        m_colors = colors;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        const Palette &c = Theme::p();
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QRectF disc = QRectF(rect()).adjusted(7, 7, -7, -7);
+        if (m_colors.isEmpty()) {
+            p.setPen(QPen(c.muted, 1.5));
+            p.setBrush(Qt::NoBrush);
+        } else {
+            QLinearGradient g(disc.topLeft(), disc.bottomRight());
+            for (int i = 0; i < m_colors.size(); ++i)
+                g.setColorAt(m_colors.size() == 1 ? 0 : qreal(i) / (m_colors.size() - 1), m_colors[i]);
+            if (m_colors.size() == 1)
+                g.setColorAt(1, m_colors[0]);
+            p.setPen(Qt::NoPen);
+            p.setBrush(g);
+        }
+        p.drawEllipse(disc);
+        if (!m_mark.isEmpty()) {
+            p.setFont(Theme::instance()->font(13, QFont::Bold));
+            p.setPen(m_colors.isEmpty() ? c.muted : QColor(Qt::white));
+            p.drawText(rect(), Qt::AlignCenter, m_mark);
+        }
+        if (isChecked()) {
+            p.setPen(QPen(c.accent, 2.5));
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(QRectF(rect()).adjusted(2, 2, -2, -2));
+        }
+        if (hasFocus())
+            ui::paintFocusRing(&p, QRectF(rect()).adjusted(1, 1, -1, -1), 20);
+    }
+
+private:
+    QList<QColor> m_colors;
+    QString m_mark;
+};
+
 // ---- editor ----
 
 void editTheme(const DialogHost &h, int slot);
@@ -814,6 +876,163 @@ void showAppearance(const DialogHost &h)
 }
 
 } // namespace
+
+void dialogs::profileStyle(const DialogHost &h, const QJsonObject &profile, std::function<void()> done)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Оформление профиля"), 540);
+    sheet->setBack(done);
+    const QString uid = profile.value("user_id").toString();
+    const QString shown = profile.value("display_name").toString().isEmpty() ? "@" + profile.value("username").toString() : profile.value("display_name").toString();
+    auto nameHex = std::make_shared<QString>(profile.value("name_color").toString());
+    auto header = std::make_shared<QStringList>();
+    for (const QString &part : profile.value("header").toString().split(',', Qt::SkipEmptyParts))
+        if (profilestyle::parse(part.trimmed()).isValid())
+            header->append(part.trimmed().toLower());
+    // What the picker edits: -1 nothing, 0 the name, 1..3 the header colours.
+    auto target = std::make_shared<int>(-1);
+
+    auto *cover = new profilestyle::Cover(shown, uid, profile.value("avatar_path").toString(), 72);
+    sheet->body()->addWidget(cover);
+    auto *name = new ui::Label(shown, 22, QFont::Bold);
+    name->setAlignment(Qt::AlignCenter);
+    cover->column()->addWidget(name);
+    const auto preview = [=] {
+        cover->setColors(profilestyle::colors(header->join(','), uid));
+        name->setColorOverride(profilestyle::nameOn(*nameHex, Theme::p().surface));
+    };
+
+    sheet->body()->addWidget(new ui::Label(QStringLiteral("Цвет имени"), 15, QFont::DemiBold));
+    auto *nameRow = new QHBoxLayout;
+    nameRow->setSpacing(0);
+    nameRow->setContentsMargins(0, 0, 0, 0);
+    sheet->body()->addLayout(nameRow);
+    sheet->body()->addWidget(new ui::Label(QStringLiteral("Шапка"), 15, QFont::DemiBold));
+    auto *headRow = new QHBoxLayout;
+    headRow->setSpacing(0);
+    headRow->setContentsMargins(0, 0, 0, 0);
+    sheet->body()->addLayout(headRow);
+    auto *chipRow = new QHBoxLayout;
+    chipRow->setSpacing(0);
+    chipRow->setContentsMargins(0, 0, 0, 0);
+    sheet->body()->addLayout(chipRow);
+    auto *addColor = new ui::Button(QStringLiteral("Свои цвета шапки"), ui::Button::Flat);
+    sheet->body()->addWidget(addColor, 0, Qt::AlignLeft);
+    auto *picker = new ColorPicker;
+    picker->hide();
+    sheet->body()->addWidget(picker);
+    auto *hint = new ui::Label(QStringLiteral("Цвет имени виден в чатах, ответах, группах и профиле. На тёмном или светлом фоне он при необходимости подстраивается, чтобы читаться."), 13.5, QFont::Normal, ui::Label::Muted);
+    hint->setWordWrap(true);
+    sheet->body()->addWidget(hint);
+    auto *cancel = new ui::Button(QStringLiteral("Отмена"), ui::Button::Secondary);
+    auto *save = new ui::Button(QStringLiteral("Сохранить"), ui::Button::Primary);
+    auto *buttons = new QHBoxLayout;
+    buttons->addWidget(cancel, 1);
+    buttons->addWidget(save, 1);
+    sheet->body()->addLayout(buttons);
+
+    const auto clear = [](QLayout *row) {
+        while (QLayoutItem *item = row->takeAt(0)) {
+            if (QWidget *w = item->widget()) {
+                w->hide();
+                w->deleteLater();
+            }
+            delete item;
+        }
+    };
+    auto rows = std::make_shared<std::function<void()>>();
+    // A click on a swatch rebuilds the rows, so the rebuild waits until the click is over.
+    const auto later = [=] { QTimer::singleShot(0, sheet, [=] { (*rows)(); }); };
+    const auto pick = [=](int which, const QColor &current) {
+        *target = which;
+        picker->show();
+        picker->setColor(current);
+        later();
+    };
+    *rows = [=] {
+        clear(nameRow);
+        clear(headRow);
+        clear(chipRow);
+        auto *none = new Dot(QStringLiteral("Цвет имени по умолчанию"), {}, QStringLiteral("A"));
+        none->setChecked(nameHex->isEmpty());
+        QObject::connect(none, &QAbstractButton::clicked, sheet, [=] { nameHex->clear(); *target = -1; picker->hide(); preview(); later(); });
+        nameRow->addWidget(none);
+        for (const QString &hex : profilestyle::kNameColors) {
+            auto *d = new Dot(QStringLiteral("Цвет имени ") + hex, {QColor(hex)});
+            d->setChecked(*nameHex == hex);
+            QObject::connect(d, &QAbstractButton::clicked, sheet, [=] { *nameHex = hex; *target = -1; picker->hide(); preview(); later(); });
+            nameRow->addWidget(d);
+        }
+        const QColor own = profilestyle::parse(*nameHex);
+        auto *custom = new Dot(QStringLiteral("Свой цвет имени"), own.isValid() && !profilestyle::kNameColors.contains(*nameHex) ? QList<QColor>{own} : QList<QColor>{}, QStringLiteral("+"));
+        custom->setChecked(*target == 0);
+        QObject::connect(custom, &QAbstractButton::clicked, sheet, [=] { pick(0, own.isValid() ? own : QColor("#4dabf7")); });
+        nameRow->addWidget(custom);
+        nameRow->addStretch(1);
+
+        auto *auto_ = new Dot(QStringLiteral("Шапка по умолчанию"), {}, QStringLiteral("A"));
+        auto_->setChecked(header->isEmpty());
+        QObject::connect(auto_, &QAbstractButton::clicked, sheet, [=] { header->clear(); *target = -1; picker->hide(); preview(); later(); });
+        headRow->addWidget(auto_);
+        const QString current = header->join(',');
+        for (const QString &preset : profilestyle::kHeaders) {
+            QList<QColor> colors;
+            for (const QString &part : preset.split(','))
+                colors.append(QColor(part));
+            auto *d = new Dot(QStringLiteral("Шапка ") + preset, colors);
+            d->setChecked(current == preset);
+            QObject::connect(d, &QAbstractButton::clicked, sheet, [=] { *header = preset.split(','); *target = -1; picker->hide(); preview(); later(); });
+            headRow->addWidget(d);
+        }
+        headRow->addStretch(1);
+
+        for (int i = 0; i < header->size(); ++i) {
+            auto *d = new Dot(QStringLiteral("Цвет шапки %1").arg(i + 1), {profilestyle::parse(header->at(i))}, QString::number(i + 1));
+            d->setChecked(*target == i + 1);
+            QObject::connect(d, &QAbstractButton::clicked, sheet, [=] { pick(i + 1, profilestyle::parse(header->at(i))); });
+            chipRow->addWidget(d);
+        }
+        chipRow->addStretch(1);
+        addColor->setText(header->isEmpty() ? QStringLiteral("Свои цвета шапки") : QStringLiteral("Добавить цвет"));
+        addColor->setVisible(header->size() < 3);
+    };
+    QObject::connect(addColor, &QAbstractButton::clicked, sheet, [=] {
+        if (header->isEmpty()) {
+            for (const QColor &c : profilestyle::colors({}, uid))
+                header->append(profilestyle::hex(c));
+        } else {
+            header->append(header->last());
+        }
+        preview();
+        pick(header->size(), profilestyle::parse(header->last()));
+    });
+    picker->changed = [=](const QColor &color) {
+        const QString hx = profilestyle::hex(color);
+        if (*target == 0)
+            *nameHex = hx;
+        else if (*target >= 1 && *target <= header->size())
+            (*header)[*target - 1] = hx;
+        preview();
+        // The swatch follows the picker without rebuilding it under the user's hand.
+        QLayoutItem *item = *target == 0 ? nameRow->itemAt(nameRow->count() - 2) : chipRow->itemAt(*target - 1);
+        if (auto *dot = item ? qobject_cast<QAbstractButton *>(item->widget()) : nullptr)
+            static_cast<Dot *>(dot)->setColors({color});
+    };
+    QObject::connect(cancel, &QAbstractButton::clicked, sheet, [=] {
+        sheet->close();
+        done();
+    });
+    QObject::connect(save, &QAbstractButton::clicked, sheet, [=] {
+        Core::instance()->call("set_profile", {{"name_color", *nameHex}, {"header", header->join(',')}}, sheet, [=](const QJsonValue &, const CoreError &e) {
+            if (!e.ok())
+                return h.toast(e.message);
+            sheet->close();
+            done();
+        });
+    });
+    preview();
+    (*rows)();
+    sheet->open();
+}
 
 namespace dialogs {
 void appearance(const DialogHost &h)

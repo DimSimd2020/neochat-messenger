@@ -140,6 +140,9 @@ impl Db {
             "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE contacts ADD COLUMN bio TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE contacts ADD COLUMN avatar TEXT NOT NULL DEFAULT ''",
+            // How a profile looks: the colour of the name and the header gradient (see profiles.rs).
+            "ALTER TABLE contacts ADD COLUMN name_color TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE contacts ADD COLUMN header TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
             // Forwarded messages keep a small header: who originally sent it and when.
             "ALTER TABLE messages ADD COLUMN fwd TEXT",
@@ -148,6 +151,11 @@ impl Db {
             // Time of the last edit of a message (0 = never edited).
             "ALTER TABLE messages ADD COLUMN edited_at INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN mentioned INTEGER NOT NULL DEFAULT 0",
+            // Muted members of a group, as {user_id: until} (Unix ms, -1 = without an end), from the server.
+            "ALTER TABLE conversations ADD COLUMN muted TEXT NOT NULL DEFAULT '{}'",
+            // Pin time of a pinned message (0 = not pinned); 1 on the notes chat flag of a conversation.
+            "ALTER TABLE messages ADD COLUMN pinned_at INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE conversations ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(sql, []);
         }

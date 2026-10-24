@@ -10,7 +10,7 @@ use crate::outbox::FileMeta;
 
 const COLUMNS: &str = "m.local_id, m.id, m.conversation_id, m.sender_user_id, m.outgoing, m.kind, m.body, m.reply_to, m.file, m.status, m.error, m.sent_at,
     COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END, CASE WHEN m.sender_user_id='system' THEN 'NeoChat' ELSE '' END),
-    COALESCE(c.last_name, ''), COALESCE(c.username, ''), m.poll, m.fwd, m.edited_at, m.mentioned";
+    COALESCE(c.last_name, ''), COALESCE(c.username, ''), m.poll, m.fwd, m.edited_at, m.mentioned, m.pinned_at";
 
 impl Inner {
     /// Runs a message query; `me` is appended as the last positional parameter.
@@ -48,9 +48,10 @@ impl Inner {
                 poll: r.get(15)?,
                 fwd: r.get(16)?,
                 edited_at: r.get(17)?,
-                delivered: r.get(19)?,
-                read: r.get(20)?,
+                delivered: r.get(20)?,
+                read: r.get(21)?,
                 mentioned: r.get::<_, i64>(18)? == 1,
+                pinned: r.get::<_, i64>(19)? > 0,
             })
         })?;
         let rows: Vec<Row> = rows.collect::<std::result::Result<_, _>>()?;
@@ -58,6 +59,8 @@ impl Inner {
         // Per conversation: (channel title when it is a channel, member tags).
         let mut convs: std::collections::HashMap<String, (Option<String>, Value)> = Default::default();
         let mut polls: Vec<(usize, String, Value)> = Vec::new();
+        // The colour each person chose for their name, looked up once per page.
+        let mut colors: std::collections::HashMap<String, String> = Default::default();
         let mut reactions: Vec<Value> = Vec::with_capacity(rows.len());
         for r in &rows {
             reactions.push(self.reactions_json(&db.conn, &r.id, &me)?);
@@ -68,15 +71,19 @@ impl Inner {
                 Some(rid) => db
                     .conn
                     .query_row(
-                        "SELECT m.body, m.outgoing, COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END,''), COALESCE(c.last_name,''), COALESCE(c.username,''), m.kind FROM messages m
+                        "SELECT m.body, m.outgoing, COALESCE(CASE WHEN c.first_name='' AND c.last_name='' THEN c.profile_name ELSE c.first_name END,''), COALESCE(c.last_name,''), COALESCE(c.username,''), m.kind, m.sender_user_id FROM messages m
                          LEFT JOIN contacts c ON c.user_id=m.sender_user_id WHERE m.id=?1",
                         [rid],
                         |x| {
                             let name = if x.get::<_, i64>(1)? == 1 { "Вы".to_string() } else { display_name(&x.get::<_, String>(2)?, &x.get::<_, String>(3)?, &x.get::<_, String>(4)?) };
-                            Ok(json!({"id": rid, "text": x.get::<_, String>(0)?.chars().take(120).collect::<String>(), "sender_name": name, "kind": x.get::<_, String>(5)?}))
+                            Ok((json!({"id": rid, "text": x.get::<_, String>(0)?.chars().take(120).collect::<String>(), "sender_name": name, "kind": x.get::<_, String>(5)?}), x.get::<_, String>(6)?))
                         },
                     )
-                    .optional()?,
+                    .optional()?
+                    .map(|(mut quote, sender)| {
+                        quote["sender_color"] = json!(colors.entry(sender.clone()).or_insert_with(|| crate::profiles::name_color_in(&db.conn, &sender)).clone());
+                        quote
+                    }),
                 None => None,
             };
             let file = match &r.file {
@@ -85,7 +92,8 @@ impl Inner {
                     let downloaded = self.data_dir.join("files").join(format!("{}.enc", r.id)).exists();
                     Some(json!({"name": meta.name, "size": meta.size, "mime": meta.mime, "downloaded": downloaded,
                         "image": meta.mime.starts_with("image/") && meta.thumb.is_some(),
-                        "thumb": meta.thumb, "width": meta.w, "height": meta.h}))
+                        "thumb": meta.thumb, "width": meta.w, "height": meta.h,
+                        "video": meta.is_video(), "duration": meta.duration}))
                 }
                 None => None,
             };
@@ -111,12 +119,14 @@ impl Inner {
                 None if r.outgoing => "Вы".to_string(),
                 None => r.sender_name,
             };
+            let sender_color = if channel.is_some() { String::new() } else { colors.entry(r.sender.clone()).or_insert_with(|| crate::profiles::name_color_in(&db.conn, &r.sender)).clone() };
             out.push(json!({
                 "local_id": r.local_id,
                 "id": r.id,
                 "conversation_id": r.conversation_id,
                 "sender_user_id": r.sender,
                 "sender_name": sender_name,
+                "sender_color": sender_color,
                 "sender_avatar_path": self.avatar_path(&if r.outgoing { crate::store::kv_get_str(&db.conn, "avatar")?.unwrap_or_default() } else {
                     db.conn.query_row("SELECT avatar FROM contacts WHERE user_id=?1", [&r.sender], |x| x.get::<_, String>(0)).optional()?.unwrap_or_default()
                 }),
@@ -127,11 +137,13 @@ impl Inner {
                 "reactions": reactions.next().unwrap_or(json!([])),
                 "outgoing": r.outgoing,
                 "mentioned": r.mentioned,
+                "pinned": r.pinned,
                 "unread_mention": r.mentioned && !db.conn.query_row("SELECT EXISTS(SELECT 1 FROM receipts WHERE message_id=?1 AND user_id=?2 AND kind='read')", [&r.id,&me], |x| x.get::<_,bool>(0))?,
                 "kind": r.kind,
                 "text": match &call {
                     Some(c) => crate::calls::call_text(r.outgoing, c["video"] == true, c["status"].as_str().unwrap_or(""), c["duration"].as_i64().unwrap_or(0)),
                     None if r.kind == "undecryptable" => "Не удалось расшифровать сообщение".to_string(),
+                    None if r.kind == "service" => crate::service::text_in(&db.conn, &me, self.tz_offset.load(std::sync::atomic::Ordering::Relaxed) as i64, &r.body),
                     None => r.body,
                 },
                 "call": call,
@@ -219,6 +231,7 @@ struct Row {
     fwd: Option<String>,
     edited_at: i64,
     mentioned: bool,
+    pinned: bool,
     delivered: i64,
     read: i64,
 }

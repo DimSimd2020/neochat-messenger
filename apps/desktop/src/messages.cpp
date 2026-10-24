@@ -4,8 +4,10 @@
 #include "filepicker.h"
 #include "popupmenu.h"
 
+#include "animatedemoji.h"
 #include "core.h"
 #include "emoji.h"
+#include "profilestyle.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -131,9 +133,49 @@ int bigEmojiCount(const QJsonObject &m)
     return m.value("emoji_only").toInt();
 }
 
+// When the animation of a big-emoji message began: the first time it was painted.
+qint64 emojiStart(const QString &id)
+{
+    static QHash<QString, qint64> started;
+    if (!started.contains(id))
+        started.insert(id, clockMs());
+    return started.value(id);
+}
+
+// Asks the view to paint again in a moment while an animation runs.
+void keepPainting(const QWidget *w)
+{
+    static qint64 until = 0;
+    const qint64 now = clockMs();
+    if (!w || now < until)
+        return;
+    until = now + 30;
+    auto *view = const_cast<QWidget *>(w);
+    QTimer::singleShot(33, view, [view] {
+        if (auto *area = qobject_cast<QAbstractScrollArea *>(view))
+            area->viewport()->update();
+        else
+            view->update();
+    });
+}
+
 bool isImage(const QJsonObject &m)
 {
     return m.value("kind").toString() == "file" && m.value("file").toObject().value("image").toBool();
+}
+
+bool isVideo(const QJsonObject &m)
+{
+    return m.value("kind").toString() == "file" && m.value("file").toObject().value("video").toBool();
+}
+
+// 0:07, 12:30, 1:02:03.
+QString clockText(qint64 ms)
+{
+    const qint64 total = qMax<qint64>(0, ms / 1000);
+    const qint64 h = total / 3600, m = total % 3600 / 60, s = total % 60;
+    return h > 0 ? QStringLiteral("%1:%2:%3").arg(h).arg(m, 2, 10, QLatin1Char('0')).arg(s, 2, 10, QLatin1Char('0'))
+                 : QStringLiteral("%1:%2").arg(m).arg(s, 2, 10, QLatin1Char('0'));
 }
 
 QString votesText(int n)
@@ -379,9 +421,13 @@ QVariant MessageModel::data(const QModelIndex &index, int role) const
         if (it.isDate)
             return dateTitle(it.date);
         const QJsonObject &m = it.msg;
+        if (m.value("kind").toString() == "service")
+            return messageText(m);
         QString s = m.value("sender_name").toString() + ", " + QDateTime::fromMSecsSinceEpoch(qint64(m.value("sent_at").toDouble())).toString("HH:mm") + ": ";
         if (isImage(m))
             s += QStringLiteral("фото. ");
+        else if (isVideo(m))
+            s += QStringLiteral("видео. ");
         else if (m.value("kind").toString() == "file")
             s += QStringLiteral("файл ") + m.value("file").toObject().value("name").toString() + ". ";
         else if (m.value("kind").toString() == "poll")
@@ -481,7 +527,7 @@ void MessageModel::rebuild()
         it.msg = m;
         it.appearAt = m_appear.value(m.value("id").toString(), -1);
         it.reactAt = m_react.value(m.value("id").toString(), -1);
-        if (!flat && !m_items.isEmpty() && !m_items.last().isDate) {
+        if (!flat && !m_items.isEmpty() && !m_items.last().isDate && m_items.last().msg.value("kind") != "service" && m.value("kind") != "service") {
             const QJsonObject &prev = m_items.last().msg;
             const bool same = prev.value("sender_user_id") == m.value("sender_user_id") && prev.value("outgoing") == m.value("outgoing") &&
                               qAbs(m.value("sent_at").toDouble() - prev.value("sent_at").toDouble()) < 5 * 60 * 1000;
@@ -505,6 +551,11 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         return L;
     }
     const QJsonObject &m = it.msg;
+    if (m.value("kind").toString() == "service") {
+        // One centered line about members; long ones wrap on the paint side by eliding.
+        L.height = 38;
+        return L;
+    }
     const bool out = m.value("outgoing").toBool();
     const bool showAvatar = group && !out;
     const qreal pad = width < 560 ? 12 : 24;
@@ -534,7 +585,7 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     }
     const QString kind = m.value("kind").toString();
     const QString text = messageText(m);
-    if (isImage(m)) {
+    if (isImage(m) || isVideo(m)) {
         const QJsonObject f = m.value("file").toObject();
         qreal iw = f.value("width").toDouble(), ih = f.value("height").toDouble();
         if (iw <= 0 || ih <= 0)
@@ -569,7 +620,10 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     } else if (const int n = bigEmojiCount(m); n > 0) {
         const QFontMetricsF bf(bigEmojiFont(n));
         L.big = true;
-        L.text = QRectF(0, h, bf.horizontalAdvance(text) + 4, bf.height());
+        // Animated emoji take the place of the text; the row keeps the height of the text either way.
+        const int moving = int(animatedemoji::keysOf(text).size());
+        const qreal tw = moving > 0 ? moving * animatedemoji::drawSize(moving) + (moving - 1) * 4 + 4 : bf.horizontalAdvance(text) + 4;
+        L.text = QRectF(0, h, tw, bf.height());
         w = qMax(w, L.text.width());
         h += L.text.height() + 2;
     } else if (!text.isEmpty()) {
@@ -677,6 +731,20 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     }
 
     const QJsonObject &m = it->msg;
+    if (m.value("kind").toString() == "service") {
+        p->setFont(Theme::instance()->font(12.5));
+        const qreal maxW = qMin(width - 48, 640.0);
+        const QString t = QFontMetricsF(p->font()).elidedText(messageText(m), Qt::ElideRight, maxW - 28);
+        const qreal tw = QFontMetricsF(p->font()).horizontalAdvance(t) + 28;
+        const QRectF pill((width - tw) / 2, 7, tw, 24);
+        p->setPen(Qt::NoPen);
+        p->setBrush(c.selected);
+        p->drawRoundedRect(pill, 12, 12);
+        p->setPen(c.muted);
+        p->drawText(pill, Qt::AlignCenter, t);
+        p->restore();
+        return;
+    }
     const MessageLayout L = layout(*it, width, model->group && !model->flat);
     const bool out = m.value("outgoing").toBool();
     const auto *view = qobject_cast<const MessageView *>(parent());
@@ -684,6 +752,8 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     const bool checked = checking && view->isChecked(m.value("id").toString());
     if (checked)
         p->fillRect(QRectF(0, 0, width, opt.rect.height()), QColor(c.accent.red(), c.accent.green(), c.accent.blue(), 22));
+    if (const qreal f = view ? view->flashOf(m.value("id").toString()) : 0; f > 0)
+        p->fillRect(QRectF(0, 0, width, opt.rect.height()), QColor(c.accent.red(), c.accent.green(), c.accent.blue(), int(60 * f)));
 
     if (it->appearAt >= 0) {
         const qreal t = qBound(0.0, (clockMs() - it->appearAt) / kAppearMs, 1.0);
@@ -700,7 +770,8 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
 
     if (!L.name.isNull()) {
         p->setFont(Theme::instance()->font(12.5, QFont::DemiBold));
-        p->setPen(c.accent);
+        const QColor chosen = profilestyle::nameOn(m.value("sender_color").toString(), c.canvas);
+        p->setPen(chosen.isValid() ? chosen : c.accent);
         const QString name = m.value("sender_name").toString();
         p->drawText(L.name, Qt::AlignLeft | Qt::AlignVCenter, name);
         const QString tag = m.value("sender_tag").toString();
@@ -750,7 +821,9 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         p->setBrush(out ? c.onOutgoing : c.accent);
         p->drawRoundedRect(QRectF(L.reply.left(), L.reply.top(), 3, L.reply.height()), 1.5, 1.5);
         p->setFont(Theme::instance()->font(12.5, QFont::DemiBold));
-        p->setPen(out ? c.onOutgoing : c.accent);
+        // The quoted person's own colour, read against the block it sits in.
+        const QColor quoted = profilestyle::nameOn(rep.value("sender_color").toString(), out ? c.outgoing : c.surface);
+        p->setPen(quoted.isValid() ? quoted : (out ? c.onOutgoing : c.accent));
         p->drawText(L.reply.adjusted(10, 3, -8, -20), Qt::AlignLeft | Qt::AlignVCenter, rep.value("sender_name").toString());
         p->setFont(Theme::instance()->font(13));
         p->setPen(meta);
@@ -787,7 +860,8 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
     }
 
     if (!L.image.isNull()) {
-        QPixmap px = ImageCache::instance()->full(m);
+        // A video shows only its first frame; the file itself is fetched when it is played.
+        QPixmap px = isVideo(m) ? QPixmap() : ImageCache::instance()->full(m);
         if (px.isNull())
             px = ImageCache::instance()->thumb(m);
         p->save();
@@ -801,6 +875,25 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
             const qreal k = qMax(L.image.width() / px.width(), L.image.height() / px.height());
             const QSizeF src = L.image.size() / k;
             p->drawPixmap(L.image, px, QRectF(QPointF((px.width() - src.width()) / 2, (px.height() - src.height()) / 2), src));
+        }
+        if (isVideo(m)) {
+            const QPointF mid = L.image.center();
+            p->setRenderHint(QPainter::Antialiasing);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(0, 0, 0, 150));
+            p->drawEllipse(mid, 26, 26);
+            p->setBrush(Qt::white);
+            p->drawPolygon(QPolygonF({QPointF(mid.x() - 8, mid.y() - 12), QPointF(mid.x() + 13, mid.y()), QPointF(mid.x() - 8, mid.y() + 12)}));
+            const qint64 ms = qint64(m.value("file").toObject().value("duration").toDouble());
+            if (ms > 0) {
+                p->setFont(Theme::instance()->font(12, QFont::DemiBold));
+                const QString length = clockText(ms);
+                const QRectF pill(L.image.left() + 10, L.image.top() + 10, QFontMetricsF(p->font()).horizontalAdvance(length) + 16, 22);
+                p->setBrush(QColor(0, 0, 0, 150));
+                p->drawRoundedRect(pill, 11, 11);
+                p->setPen(Qt::white);
+                p->drawText(pill, Qt::AlignCenter, length);
+            }
         }
         p->restore();
     }
@@ -870,9 +963,25 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         const QRectF tr = L.call.adjusted(48, 0, 0, 0);
         p->drawText(tr, Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(p->font()).elidedText(messageText(m), Qt::ElideRight, tr.width()));
     } else if (L.big) {
-        p->setFont(bigEmojiFont(bigEmojiCount(m)));
-        p->setPen(fg);
-        p->drawText(L.text, Qt::AlignLeft | Qt::AlignVCenter, messageText(m));
+        const QStringList keys = animatedemoji::keysOf(messageText(m));
+        if (!keys.isEmpty()) {
+            const qreal side = animatedemoji::drawSize(int(keys.size()));
+            const qint64 elapsed = clockMs() - emojiStart(m.value("id").toString());
+            qreal x = L.text.left();
+            bool moving = false;
+            for (const QString &key : keys) {
+                const animatedemoji::Sheet sheet = animatedemoji::sheet(key);
+                if (sheet.valid())
+                    moving |= animatedemoji::paint(p, sheet, QRectF(x, L.text.center().y() - side / 2, side, side), elapsed);
+                x += side + 4;
+            }
+            if (moving)
+                keepPainting(opt.widget);
+        } else {
+            p->setFont(bigEmojiFont(bigEmojiCount(m)));
+            p->setPen(fg);
+            p->drawText(L.text, Qt::AlignLeft | Qt::AlignVCenter, messageText(m));
+        }
     } else if (!L.text.isNull()) {
         QTextDocument *d = textDoc(m);
         QAbstractTextDocumentLayout::PaintContext ctx;
@@ -989,6 +1098,12 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
             if ((it.appearAt >= 0 && now - it.appearAt < kAppearMs) || (it.reactAt >= 0 && now - it.reactAt < 180))
                 running = true;
         }
+        if (!m_flashId.isEmpty()) {
+            if (now - m_flashAt < 1600)
+                running = true;
+            else
+                m_flashId.clear();
+        }
         if (!running)
             m_anim.stop();
     });
@@ -1052,6 +1167,8 @@ void MessageView::setConversation(const QString &id, bool group)
     m_searching = false;
     m_newBelow = 0;
     m_jump->hide();
+    m_jumpId.clear();
+    m_flashId.clear();
     ++m_generation;
     m_loading = false;
     m_model->clear();
@@ -1093,7 +1210,44 @@ void MessageView::load(bool older)
         if (older && page.size() < 50)
             m_hasMore = false;
         applyPage(page, older);
+        if (!m_jumpId.isEmpty()) {
+            const QString id = m_jumpId;
+            m_jumpId.clear();
+            jumpToMessage(id);
+        }
     });
+}
+
+void MessageView::jumpToMessage(const QString &id)
+{
+    if (m_searching || id.isEmpty())
+        return;
+    for (int i = 0; i < m_model->rowCount(); ++i) {
+        const MessageItem &it = m_model->item(i);
+        if (!it.isDate && it.msg.value("id").toString() == id) {
+            m_jumpId.clear();
+            scrollTo(m_model->index(i, 0), QAbstractItemView::PositionAtCenter);
+            m_flashId = id;
+            m_flashAt = clockMs();
+            m_anim.start();
+            viewport()->update();
+            return;
+        }
+    }
+    if (!m_hasMore) {
+        emit toast(QStringLiteral("Сообщение не найдено в истории"));
+        return;
+    }
+    m_jumpId = id;
+    load(true);
+}
+
+qreal MessageView::flashOf(const QString &id) const
+{
+    if (m_flashId.isEmpty() || m_flashId != id)
+        return 0;
+    const qreal t = (clockMs() - m_flashAt) / 1600.0;
+    return t >= 1 ? 0 : (t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85);
 }
 
 void MessageView::applyPage(const QList<QJsonObject> &page, bool older)
@@ -1325,7 +1479,7 @@ QJsonObject MessageView::messageAt(const QPoint &pos, MessageLayout *lay) const
     if (!idx.isValid())
         return {};
     const MessageItem &it = m_model->item(idx.row());
-    if (it.isDate)
+    if (it.isDate || it.msg.value("kind") == "service")
         return {};
     const QRect vr = visualRect(idx);
     MessageLayout L = MessageDelegate::layout(it, vr.width(), m_model->group && !m_model->flat);
@@ -1461,7 +1615,7 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
         else if (L.retry.contains(e->pos()))
             retry(m);
         else if (L.image.contains(e->pos()))
-            openImage(m);
+            isVideo(m) ? openFile(m) : openImage(m);
         else if (link.startsWith(QStringLiteral("mention:")))
             openMention(link.mid(8));
         else if (!link.isEmpty())
@@ -1602,7 +1756,7 @@ void MessageView::keyPressEvent(QKeyEvent *e)
         }
     }
     const QModelIndex idx = currentIndex();
-    if (idx.isValid() && !m_model->item(idx.row()).isDate) {
+    if (idx.isValid() && !m_model->item(idx.row()).isDate && m_model->item(idx.row()).msg.value("kind") != "service") {
         const QJsonObject m = m_model->item(idx.row()).msg;
         if (e->matches(QKeySequence::Copy)) {
             const QString sel = selectedText();
@@ -1700,11 +1854,28 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
         menu->addAction(QStringLiteral("Копировать текст"), this, [m] { QApplication::clipboard()->setText(messageText(m)); });
     if (isImage(m))
         menu->addAction(QStringLiteral("Открыть фото"), this, [this, m] { openImage(m); });
+    if (isVideo(m))
+        menu->addAction(QStringLiteral("Открыть видео"), this, [this, m] { openFile(m); });
     if (kind == "poll" && m.value("outgoing").toBool() && !m.value("poll").toObject().value("closed").toBool())
         menu->addAction(QStringLiteral("Завершить опрос"), this, [this, m] {
             Core::instance()->call("close_poll", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
                 if (!e.ok())
                     emit toast(e.message);
+            });
+        });
+    if (m_canPin && (kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed") {
+        const bool pinned = m.value("pinned").toBool();
+        menu->addAction(pinned ? QStringLiteral("Открепить") : QStringLiteral("Закрепить"), this, [this, m, pinned] {
+            Core::instance()->call("pin_message", {{"message_id", m.value("id")}, {"on", !pinned}}, this, [this](const QJsonValue &, const CoreError &e) {
+                if (!e.ok())
+                    emit toast(e.message);
+            });
+        });
+    }
+    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed")
+        menu->addAction(QStringLiteral("В избранное"), this, [this, m] {
+            Core::instance()->call("save_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
+                emit toast(e.ok() ? QStringLiteral("Добавлено в избранное") : e.message);
             });
         });
     if (kind == "file") {
@@ -1745,7 +1916,7 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
 
 void MessageView::openFile(const QJsonObject &m)
 {
-    emit toast(QStringLiteral("Расшифровываем файл…"));
+    emit toast(isVideo(m) ? QStringLiteral("Расшифровываем видео…") : QStringLiteral("Расшифровываем файл…"));
     Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
             return emit toast(e.message);

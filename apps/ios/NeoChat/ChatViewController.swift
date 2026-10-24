@@ -1,3 +1,5 @@
+import AVFoundation
+import AVKit
 import ImageIO
 import PhotosUI
 import QuickLook
@@ -76,9 +78,14 @@ private func votesText(_ n: Int) -> String {
 }
 
 func isImage(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("image") ?? false) }
+func isVideo(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("video") ?? false) }
 
 /// Links found by the core's markdown parser.
 func links(_ m: JSON) -> [String] { m.arr("spans").compactMap { $0["link"] as? String } }
+
+private extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
 
 extension UILabel {
     /// The @name under `point`, when the finger is actually on that glyph.
@@ -203,6 +210,8 @@ enum Photos {
 private enum Item {
     case date(String)
     case msg(JSON, first: Bool, last: Bool)
+    /// A service line ("ner1s был добавлен владельцем DimSimd"): text and message id.
+    case note(String, id: String)
 }
 
 /// One conversation: history, composer and header with details.
@@ -241,6 +250,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private let table = UITableView(frame: .zero, style: .plain)
     private let notice = UIStackView()
     private let noticeText = label("", 14, color: Theme.warning)
+    // Pinned messages: the bar shows one at a time, a tap goes to it and on to the next older one.
+    private let pinBar = UIStackView()
+    private let pinTap = UIControl()
+    private let pinHead = label("", 12.5, .semibold, color: Theme.accent)
+    private let pinText = label("", 14)
+    private let pinList = UIButton(type: .system)
+    private let pinOff = UIButton(type: .system)
+    private var pins: [JSON] = []
+    private var pinIndex = 0
+    private var jumpId: String?
     private let composer = UIView()
     private let attach = UIButton(type: .system)
     private let input = ComposerTextView()
@@ -302,6 +321,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         table.keyboardDismissMode = .interactive
         table.register(BubbleCell.self, forCellReuseIdentifier: "b")
         table.register(DateCell.self, forCellReuseIdentifier: "d")
+        table.register(NoteCell.self, forCellReuseIdentifier: "n")
         table.accessibilityLabel = "Сообщения"
 
         notice.axis = .horizontal
@@ -320,13 +340,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         notice.addArrangedSubview(verify)
         notice.isHidden = true
 
+        buildPinBar()
         buildComposer()
         goneLabel.textAlignment = .center
         goneLabel.isHidden = true
 
         buildHeader()
 
-        let stack = UIStackView(arrangedSubviews: [header, notice, table, composer, goneLabel])
+        let stack = UIStackView(arrangedSubviews: [header, notice, pinBar, table, composer, goneLabel])
         stack.axis = .vertical
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -497,6 +518,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         switch it {
         case .date(let t): return "d:" + t
         case .msg(let m, _, _): return "m:" + m.str("id")
+        case .note(_, let id): return "n:" + id
         }
     }
 
@@ -504,6 +526,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         guard indexPath.row < items.count else { return 60 }
         if let h = heights[key(items[indexPath.row])] { return h }
         if case .date = items[indexPath.row] { return 44 }
+        if case .note = items[indexPath.row] { return 44 }
         return 60
     }
 
@@ -678,7 +701,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         replyTo = nil
         let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
         replyTitle.text = "Изменение сообщения"
-        replyText.text = t.isEmpty ? (isImage(m) ? "Фото" : "Файл") : t
+        replyText.text = t.isEmpty ? (isImage(m) ? "Фото" : isVideo(m) ? "Видео" : "Файл") : t
         replyBar.accessibilityLabel = "Изменение сообщения: " + (replyText.text ?? "")
         cancelButton?.accessibilityLabel = "Отменить изменение"
         input.text = m.str("text")
@@ -797,6 +820,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private func updateAttachMenu() {
         var acts: [UIMenuElement] = [
             UIAction(title: "Фото", image: UIImage(systemName: "photo")) { [weak self] _ in self?.pickPhotos() },
+            UIAction(title: "Видео", image: UIImage(systemName: "video")) { [weak self] _ in self?.pickVideos() },
             UIAction(title: "Камера", image: UIImage(systemName: "camera")) { [weak self] _ in self?.takePhoto() },
             UIAction(title: "Файл", image: UIImage(systemName: "doc")) { [weak self] _ in self?.pickFile() },
         ]
@@ -822,6 +846,18 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         (presentedViewController ?? self).present(picker, animated: true)
     }
 
+    private func pickVideos(more: (([OutgoingFile]) -> Void)? = nil) {
+        pendingPick = more
+        var cfg = PHPickerConfiguration()
+        cfg.filter = .videos
+        cfg.selectionLimit = 5
+        // The original file: it is re-encoded here, to MP4, before it is sent.
+        cfg.preferredAssetRepresentationMode = .current
+        let picker = PHPickerViewController(configuration: cfg)
+        picker.delegate = self
+        (presentedViewController ?? self).present(picker, animated: true)
+    }
+
     private func deliver(_ files: [OutgoingFile], photos: Bool) {
         if let done = pendingPick {
             pendingPick = nil
@@ -839,7 +875,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
         input.resignFirstResponder()
         presentSheet(AttachViewController(files: files, asPhotos: photos, more: { [weak self] done in
-            if photos && files.allSatisfy({ $0.isImage }) { self?.pickPhotos(more: done) } else { self?.pickFile(more: done) }
+            if files.allSatisfy({ $0.isVideo }) { self?.pickVideos(more: done) }
+            else if photos && files.allSatisfy({ $0.isImage }) { self?.pickPhotos(more: done) }
+            else { self?.pickFile(more: done) }
         }, send: { [weak self] chosen, asPhotos, caption in
             for (n, f) in chosen.enumerated() { self?.sendOutgoing(f, photo: asPhotos, caption: n == 0 ? caption : "") }
         }))
@@ -870,7 +908,25 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         let lock = NSLock()
         for (n, r) in results.enumerated() {
             let prov = r.itemProvider
-            guard prov.hasItemConformingToTypeIdentifier(UTType.image.identifier) else { continue }
+            guard prov.hasItemConformingToTypeIdentifier(UTType.image.identifier) else {
+                if prov.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+                    group.enter()
+                    prov.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, _ in
+                        defer { group.leave() }
+                        guard let url else { return }
+                        // The provider removes its file after this block: keep a copy.
+                        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("outgoing", isDirectory: true)
+                        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                        let dest = dir.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
+                        guard (try? FileManager.default.copyItem(at: url, to: dest)) != nil else { return }
+                        let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "video/quicktime"
+                        lock.lock()
+                        found[n] = OutgoingFile(url: dest, name: url.lastPathComponent, mime: mime)
+                        lock.unlock()
+                    }
+                }
+                continue
+            }
             group.enter()
             prov.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { url, _ in
                 defer { group.leave() }
@@ -906,13 +962,28 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     /// The thumbnail is made only for pictures that go as photos.
     private func sendOutgoing(_ f: OutgoingFile, photo: Bool, caption: String) {
+        if photo && f.isVideo { return sendVideo(f, caption: caption) }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let thumb = photo && f.isImage ? Photos.makeThumb(f.url) : nil
             DispatchQueue.main.async { self?.sendPhoto(f.url, name: f.name, mime: f.mime, thumb: thumb, caption: caption) }
         }
     }
 
-    private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?, caption: String = "") {
+    /// A video that goes as a video: made portable and small enough, then sent with its first frame and length.
+    private func sendVideo(_ f: OutgoingFile, caption: String) {
+        toast("Готовим видео…")
+        Videos.prepare(f) { [weak self] video in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let video else { return self.toast("Видео не удалось подготовить: оно слишком длинное или в неизвестном формате") }
+                var thumb: (String, Int, Int)?
+                if let t = video.info?.thumb, let i = video.info { thumb = (t, i.width, i.height) }
+                self.sendPhoto(video.url, name: video.name, mime: video.mime, thumb: thumb, caption: caption, duration: video.info?.duration)
+            }
+        }
+    }
+
+    private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?, caption: String = "", duration: Int? = nil) {
         guard accountId == Core.shared.accountId else { try? FileManager.default.removeItem(at: url); return }
         var p: JSON = ["_account_id": accountId, "conversation_id": conversationId, "path": url.path, "mime": mime, "name": name]
         if !caption.isEmpty { p["caption"] = caption }
@@ -921,6 +992,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             p["width"] = t.1
             p["height"] = t.2
         }
+        if let duration { p["duration"] = duration }
         Core.shared.call("send_file", p) { [weak self] r in
             try? FileManager.default.removeItem(at: url)
             if self?.accountId == Core.shared.accountId, case .failure(let e) = r { self?.toast(e.message) }
@@ -948,15 +1020,142 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         var files: [OutgoingFile] = []
         for u in urls {
             let size = (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            if size > 25 * 1024 * 1024 { toast("Файл больше 25 МБ"); continue }
             let mime = UTType(filenameExtension: u.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+            // A video may be longer: it is re-encoded smaller before it is sent.
+            if size > 25 * 1024 * 1024 && !mime.hasPrefix("video/") { toast("Файл больше 25 МБ"); continue }
             files.append(OutgoingFile(url: u, name: u.lastPathComponent, mime: mime))
         }
         if files.isEmpty { pendingPick = nil; return }
-        deliver(files, photos: false)
+        deliver(files, photos: files.allSatisfy { $0.isVideo })
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { pendingPick = nil }
+
+    // MARK: pinned messages
+
+    private func buildPinBar() {
+        pinBar.axis = .horizontal
+        pinBar.spacing = 4
+        pinBar.alignment = .center
+        pinBar.glass(20)
+        pinBar.isLayoutMarginsRelativeArrangement = true
+        pinBar.layoutMargins = UIEdgeInsets(top: 2, left: 14, bottom: 2, right: 2)
+        let icon = UIImageView(image: UIImage(systemName: "pin.fill"))
+        icon.tintColor = Theme.accent
+        icon.contentMode = .scaleAspectFit
+        icon.isAccessibilityElement = false
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        pinBar.addArrangedSubview(icon)
+        pinHead.numberOfLines = 1
+        pinText.numberOfLines = 1
+        let texts = UIStackView(arrangedSubviews: [pinHead, pinText])
+        texts.axis = .vertical
+        texts.spacing = 2
+        texts.isUserInteractionEnabled = false
+        texts.translatesAutoresizingMaskIntoConstraints = false
+        pinTap.addSubview(texts)
+        pinTap.isAccessibilityElement = true
+        pinTap.accessibilityTraits = .button
+        pinTap.accessibilityHint = "Переходит к сообщению"
+        NSLayoutConstraint.activate([
+            texts.leadingAnchor.constraint(equalTo: pinTap.leadingAnchor, constant: 8),
+            texts.trailingAnchor.constraint(equalTo: pinTap.trailingAnchor),
+            texts.centerYAnchor.constraint(equalTo: pinTap.centerYAnchor),
+            pinTap.heightAnchor.constraint(greaterThanOrEqualToConstant: 48),
+        ])
+        pinTap.addAction(UIAction { [weak self] _ in
+            guard let self, let m = self.pins[safe: self.pinIndex] else { return }
+            self.pinIndex = (self.pinIndex + 1) % self.pins.count
+            self.showPins()
+            self.jumpTo(m.str("id"))
+        }, for: .touchUpInside)
+        pinBar.addArrangedSubview(pinTap)
+        pinList.setImage(UIImage(systemName: "list.bullet"), for: .normal)
+        pinList.accessibilityLabel = "Все закреплённые"
+        pinList.showsMenuAsPrimaryAction = true
+        pinOff.setImage(UIImage(systemName: "xmark"), for: .normal)
+        pinOff.accessibilityLabel = "Открепить"
+        pinOff.addAction(UIAction { [weak self] _ in
+            guard let self, let m = self.pins[safe: self.pinIndex] else { return }
+            Core.shared.call("pin_message", ["message_id": m.str("id"), "on": false]) { [weak self] r in
+                if case .failure(let e) = r { self?.toast(e.message) }
+            }
+        }, for: .touchUpInside)
+        for button in [pinList, pinOff] {
+            button.tintColor = Theme.accent
+            button.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 16, weight: .medium), forImageIn: .normal)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            let width = button.widthAnchor.constraint(equalToConstant: 44)
+            width.priority = .defaultHigh
+            NSLayoutConstraint.activate([width, button.heightAnchor.constraint(equalToConstant: 44)])
+            button.springPress()
+            pinBar.addArrangedSubview(button)
+        }
+        pinBar.isHidden = true
+    }
+
+    private func pinPreview(_ m: JSON) -> String {
+        let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
+        let s: String
+        if m.str("kind") == "poll" { s = "Опрос: " + t }
+        else if let f = m.obj("file") { s = (isImage(m) ? "Фото" : isVideo(m) ? "Видео" : "Файл " + f.str("name")) + (t.isEmpty ? "" : ": " + t) }
+        else { s = t }
+        return s.count > 120 ? String(s.prefix(119)) + "…" : s
+    }
+
+    private func refreshPins() {
+        if conv.int("pin_count") == 0 {
+            pins = []
+            pinIndex = 0
+            return showPins()
+        }
+        Core.shared.call("list_pins", ["conversation_id": conversationId]) { [weak self] r in
+            guard let self, case .success(let v) = r else { return }
+            let next = v as? [JSON] ?? []
+            if next.count != self.pins.count { self.pinIndex = 0 }
+            self.pins = next
+            if self.pinIndex >= next.count { self.pinIndex = 0 }
+            self.showPins()
+        }
+    }
+
+    private func showPins() {
+        let m = pins[safe: pinIndex]
+        if let m {
+            pinHead.text = pins.count > 1 ? "Закреплённое сообщение · \(pinIndex + 1) из \(pins.count)" : "Закреплённое сообщение"
+            pinText.text = pinPreview(m)
+            pinTap.accessibilityLabel = (pinHead.text ?? "") + ": " + (pinText.text ?? "")
+            pinList.menu = UIMenu(children: pins.map { p in
+                UIAction(title: pinPreview(p)) { [weak self] _ in self?.jumpTo(p.str("id")) }
+            })
+        }
+        pinList.isHidden = pins.count < 2
+        pinOff.isHidden = !conv.bool("can_pin")
+        if pinBar.isHidden != (m == nil) { Theme.animate(0.18) { self.pinBar.isHidden = m == nil } }
+    }
+
+    /// Scrolls to a message, paging older history in until it is loaded.
+    private func jumpTo(_ id: String) {
+        guard !id.isEmpty else { return }
+        let row = items.firstIndex { if case .msg(let m, _, _) = $0 { return m.str("id") == id } else { return false } }
+        if let row {
+            jumpId = nil
+            table.scrollToRow(at: IndexPath(row: row, section: 0), at: .middle, animated: !Theme.reducedMotion)
+            DispatchQueue.main.asyncAfter(deadline: .now() + (Theme.reducedMotion ? 0 : 0.35)) { [weak self] in self?.flash(row) }
+            return
+        }
+        if !hasMore { return toast("Сообщение не найдено в истории") }
+        jumpId = id
+        load(older: true)
+    }
+
+    /// A short pulse on the message that was jumped to.
+    private func flash(_ row: Int) {
+        guard !Theme.reducedMotion, let c = table.cellForRow(at: IndexPath(row: row, section: 0)) else { return }
+        UIView.animate(withDuration: 0.22, animations: { c.contentView.alpha = 0.35 }) { _ in
+            UIView.animate(withDuration: 0.38) { c.contentView.alpha = 1 }
+        }
+    }
 
     // MARK: data
 
@@ -984,22 +1183,25 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             let handle = members.first { !$0.bool("me") }.map { "@" + $0.str("username") } ?? ""
             let seen = c.obj("presence")?.str("text") ?? ""
             self.peerOnline = c.obj("presence")?.bool("online") ?? false
-            self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) + (c.int("online_count") > 0 ? ", \(c.int("online_count")) в сети" : "") : channel ? memberCount(c.int("member_count"), channel: true)
+            self.baseSub = system ? "Системные сообщения" : self.group ? memberCount(c.int("member_count")) + (c.int("online_count") > 0 ? ", \(c.int("online_count")) в сети" : "") : channel ? (c.bool("saved") ? "Заметки для себя" : memberCount(c.int("member_count"), channel: true))
                 : seen.isEmpty ? handle : seen
             self.titleLabel.text = c.str("title")
+            self.titleLabel.textColor = ProfileStyle.name(c.str("title_color")) ?? Theme.text
             let peer = c.str("peer_user_id")
             self.headerAvatar.set(c.str("title"), seed: peer.isEmpty ? self.conversationId : peer, avatar: c.str("avatar_path"))
             self.headerAvatar.online = self.peerOnline
             self.updateSubtitle()
             if first { self.refreshPresence() }
             let gone = c.bool("left") || c.bool("archived") || system
-            let mute = gone || !(c["can_post"] as? Bool ?? true)
+            let muted = c.int64("muted") != 0
+            let mute = gone || muted || !(c["can_post"] as? Bool ?? true)
             if mute { self.input.resignFirstResponder() }
             self.composer.isHidden = mute
             self.goneLabel.isHidden = !mute
             self.goneLabel.text = system ? "Сюда приходят коды входа и сообщения о новых устройствах"
                 : c.bool("archived") ? (channel ? "Канал в архиве. Новые публикации недоступны" : "Группа в архиве. Новые сообщения недоступны")
                 : c.bool("left") ? (channel ? "Вы вышли из канала" : "Вы вышли из этой группы")
+                : muted ? "Вам запретили писать в этой группе"
                 : channel ? "Публикуют только владелец и админы канала" : "Писать здесь могут только владелец и админы"
             self.updateAttachMenu()
             self.updateCallButton(gone: gone || mute)
@@ -1010,6 +1212,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.noticeText.text = n
             self.notice.arrangedSubviews.last?.isHidden = !keyChanged
             if self.notice.isHidden != (n?.isEmpty ?? true) { Theme.animate(0.18) { self.notice.isHidden = n?.isEmpty ?? true } }
+            self.refreshPins()
             if first, !c.str("draft").isEmpty {
                 self.input.text = c.str("draft")
                 self.textViewDidChange(self.input)
@@ -1077,7 +1280,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             guard let self, generation == self.historyGeneration else { return }
             self.loading = false
             switch r {
-            case .failure(let e): self.toast(e.message)
+            case .failure(let e):
+                self.jumpId = nil
+                self.toast(e.message)
             case .success(let v):
                 let page = v as? [JSON] ?? []
                 if older && page.count < 50 { self.hasMore = false }
@@ -1115,6 +1320,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         table.layoutIfNeeded()
         if older {
             table.contentOffset.y = oldOffset + (table.contentSize.height - oldHeight)
+            if let id = jumpId { jumpTo(id) }
             return
         }
         let own = page.contains { appended.contains($0.str("id")) && $0.bool("outgoing") }
@@ -1138,8 +1344,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             let d = Date(timeIntervalSince1970: TimeInterval(m.int64("sent_at")) / 1000)
             let day = cal.dateComponents([.year, .month, .day], from: d)
             if day != lastDay { out.append(.date(dateTitle(m.int64("sent_at")))); lastDay = day }
+            if m.str("kind") == "service" { out.append(.note(m.str("text"), id: m.str("id"))); continue }
             let same = { (o: JSON?) -> Bool in
-                guard let o else { return false }
+                guard let o, o.str("kind") != "service" else { return false }
                 return o.str("sender_user_id") == m.str("sender_user_id") && cal.isDate(Date(timeIntervalSince1970: TimeInterval(o.int64("sent_at")) / 1000), inSameDayAs: d)
             }
             out.append(.msg(m, first: !same(i > 0 ? ms[i - 1] : nil), last: !same(i + 1 < ms.count ? ms[i + 1] : nil)))
@@ -1198,12 +1405,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             let c = tableView.dequeueReusableCell(withIdentifier: "d", for: indexPath) as! DateCell
             c.set(t)
             return c
+        case .note(let t, _):
+            let c = tableView.dequeueReusableCell(withIdentifier: "n", for: indexPath) as! NoteCell
+            c.set(t)
+            return c
         case .msg(let m, let first, let last):
             let c = tableView.dequeueReusableCell(withIdentifier: "b", for: indexPath) as! BubbleCell
             if let back = navigationController?.interactivePopGestureRecognizer { c.prioritizeBackGesture(back) }
             c.bind(m, group: group, first: first, last: last)
             c.onRetry = { [weak self] in self?.retry(m) }
-            c.onPhoto = { [weak self] in self?.openPhoto(m) }
+            c.onPhoto = { [weak self] in if isVideo(m) { self?.openVideo(m) } else { self?.openPhoto(m) } }
             c.onProfile = { [weak self] in self?.navigationController?.pushViewController(PersonProfileViewController(userId:m.str("sender_user_id")),animated:!Theme.reducedMotion) }
             c.onMention = { [weak self] name in
                 guard let self else { return }
@@ -1268,6 +1479,21 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             if let u = URL(string: l) { acts.append(MenuAction(title: "Открыть ссылку: " + (u.host ?? l), icon: "safari") { UIApplication.shared.open(u) }) }
         }
         if isImage(m) { acts.append(MenuAction(title: "Открыть фото", icon: "photo") { [weak self] in self?.openPhoto(m) }) }
+        if isVideo(m) { acts.append(MenuAction(title: "Открыть видео", icon: "play.rectangle") { [weak self] in self?.openVideo(m) }) }
+        let postable = ok && m.str("status") != "failed" && ["text", "file", "poll"].contains(m.str("kind"))
+        if postable && conv.bool("can_pin") {
+            let on = !m.bool("pinned")
+            acts.append(MenuAction(title: on ? "Закрепить" : "Открепить", icon: on ? "pin" : "pin.slash") { [weak self] in
+                Core.shared.call("pin_message", ["message_id": m.str("id"), "on": on]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
+            })
+        }
+        if postable && !conv.bool("saved") {
+            acts.append(MenuAction(title: "В избранное", icon: "bookmark") { [weak self] in
+                Core.shared.call("save_message", ["message_id": m.str("id")]) { r in
+                    if case .failure(let e) = r { self?.toast(e.message) } else { self?.toast("Сохранено в избранное") }
+                }
+            })
+        }
         if !composer.isHidden && m.bool("outgoing") && ["sent", "delivered", "read"].contains(m.str("status")) && ["text", "file"].contains(m.str("kind")) {
             acts.append(MenuAction(title: "Изменить", icon: "pencil") { [weak self] in self?.setEdit(m) })
         }
@@ -1356,6 +1582,23 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         present(PhotoGalleryController(photos: at == nil ? [m] : photos, start: at ?? 0), animated: !Theme.reducedMotion)
     }
 
+    /// Fetches and decrypts the video, then plays it in the system player.
+    private func openVideo(_ m: JSON) {
+        if m.obj("file")?.bool("downloaded") != true { toast("Загружаем видео…") }
+        Core.shared.call("download_file", ["message_id": m.str("id")]) { [weak self] r in
+            switch r {
+            case .failure(let e): self?.toast(e.message)
+            case .success(let v):
+                guard let self, let path = (v as? JSON)?.str("path"), !path.isEmpty else { return }
+                // The silent switch must not mute a video; a running call keeps its own audio session.
+                if CallManager.shared.call.isEmpty { try? AVAudioSession.sharedInstance().setCategory(.playback) }
+                let vc = AVPlayerViewController()
+                vc.player = AVPlayer(url: URL(fileURLWithPath: path))
+                self.present(vc, animated: !Theme.reducedMotion) { vc.player?.play() }
+            }
+        }
+    }
+
     private func retry(_ m: JSON) {
         Core.shared.call("retry_message", ["message_id": m.str("id")]) { [weak self] r in if case .failure(let e) = r { self?.toast(e.message) } }
     }
@@ -1422,6 +1665,41 @@ final class DateCell: UITableViewCell {
     func set(_ t: String) { l.text = t }
 }
 
+final class NoteCell: UITableViewCell {
+    private let l = label("", 12.5, .medium, color: Theme.muted)
+    private let pill = UIView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        backgroundColor = .clear
+        selectionStyle = .none
+        pill.backgroundColor = Theme.muted.withAlphaComponent(0.16)
+        pill.layer.cornerRadius = 14
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        l.textAlignment = .center
+        l.numberOfLines = 0
+        l.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(pill)
+        pill.addSubview(l)
+        NSLayoutConstraint.activate([
+            pill.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6), pill.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+            pill.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            pill.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 24),
+            pill.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -24),
+            l.topAnchor.constraint(equalTo: pill.topAnchor, constant: 5), l.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -5),
+            l.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 14), l.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -14),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func set(_ t: String) {
+        l.text = t
+        accessibilityLabel = t
+        isAccessibilityElement = true
+    }
+}
+
 final class BubbleCell: UITableViewCell {
     private let avatar = AvatarView(size: 30)
     private let reactRow = UIStackView()
@@ -1431,6 +1709,7 @@ final class BubbleCell: UITableViewCell {
     private let bubble = UIView()
     private let content = UIStackView()
     private let photo = UIImageView()
+    private let mark = VideoMarkView()
     private var photoW: NSLayoutConstraint!
     private var photoH: NSLayoutConstraint!
     private let inner = UIStackView()
@@ -1440,6 +1719,7 @@ final class BubbleCell: UITableViewCell {
     private let fileName = label("", 15, .semibold)
     private let fileMeta = label("", 13)
     private let text = label("", 17)
+    private let emojiRow = UIStackView()
     private let poll = UIStackView()
     private let pollQuestion = label("", 17, .semibold)
     private let pollInfo = label("", 13)
@@ -1513,6 +1793,13 @@ final class BubbleCell: UITableViewCell {
         photo.layer.cornerCurve = .continuous
         photo.isUserInteractionEnabled = true
         photo.addGestureRecognizer(TapGesture { [weak self] in self?.onPhoto?() })
+        mark.isHidden = true
+        mark.translatesAutoresizingMaskIntoConstraints = false
+        photo.addSubview(mark)
+        NSLayoutConstraint.activate([
+            mark.topAnchor.constraint(equalTo: photo.topAnchor), mark.bottomAnchor.constraint(equalTo: photo.bottomAnchor),
+            mark.leadingAnchor.constraint(equalTo: photo.leadingAnchor), mark.trailingAnchor.constraint(equalTo: photo.trailingAnchor),
+        ])
         photoW = photo.widthAnchor.constraint(equalToConstant: 200)
         photoW.priority = UILayoutPriority(999)
         photoH = photo.heightAnchor.constraint(equalToConstant: 150)
@@ -1532,7 +1819,10 @@ final class BubbleCell: UITableViewCell {
         let spacer = UIView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         reactRow.addArrangedSubview(spacer)
-        [fwd, quote, fileRow, text, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
+        emojiRow.spacing = 4
+        emojiRow.alignment = .center
+        emojiRow.isHidden = true
+        [fwd, quote, fileRow, emojiRow, text, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
         inner.setCustomSpacing(6, after: reactRow)
         bubbleTap.addTarget(self, action: #selector(tapped(_:)))
         bubbleTapDelegate.photo = photo
@@ -1695,6 +1985,7 @@ final class BubbleCell: UITableViewCell {
         avatar.set(m.str("sender_name"), seed: m.str("sender_user_id"), avatar: m.str("sender_avatar_path"))
         sender.isHidden = !(group && !out && first)
         sender.text = m.str("sender_name") + (m.str("sender_tag").isEmpty ? "" : " · " + m.str("sender_tag"))
+        sender.textColor = ProfileStyle.name(m.str("sender_color")) ?? Theme.muted
         // One to three emoji without text are shown large, without a bubble.
         let emojiCount = Prefs.bigEmoji && kind == "text" && m.obj("reply_to") == nil ? m.int("emoji_only") : 0
         let big = emojiCount > 0
@@ -1715,10 +2006,20 @@ final class BubbleCell: UITableViewCell {
         } else { fwd.isHidden = true }
         if let r = m.obj("reply_to") {
             quote.isHidden = false
-            quote.text = r.str("sender_name") + ": " + (r.str("kind") == "file" ? "Файл" : r.str("text").replacingOccurrences(of: "\n", with: " "))
+            let who = r.str("sender_name")
+            let line = who + ": " + (r.str("kind") == "file" ? "Файл" : r.str("text").replacingOccurrences(of: "\n", with: " "))
+            // The quoted person's own colour on their name, read against the bubble it sits in.
+            if let tint = ProfileStyle.name(r.str("sender_color"), on: out ? Theme.outgoing : Theme.canvas) {
+                let styled = NSMutableAttributedString(string: line, attributes: [.font: quote.font as Any, .foregroundColor: muted])
+                styled.addAttribute(.foregroundColor, value: tint, range: NSRange(location: 0, length: (who as NSString).length + 1))
+                quote.attributedText = styled
+            } else {
+                quote.text = line
+            }
         } else { quote.isHidden = true }
         let f = m.obj("file")
-        let image = isImage(m)
+        let video = isVideo(m)
+        let image = isImage(m) || video
         photo.isHidden = !image
         content.layoutMargins = image ? UIEdgeInsets(top: 4, left: 4, bottom: 7, right: 4) : UIEdgeInsets(top: 9, left: 15, bottom: 7, right: 14)
         inner.layoutMargins = image ? UIEdgeInsets(top: 0, left: 11, bottom: 0, right: 10) : .zero
@@ -1733,7 +2034,13 @@ final class BubbleCell: UITableViewCell {
             photoW.isActive = true
             photoH.isActive = true
             let id = boundId
-            if let img = Photos.cache.object(forKey: id as NSString) {
+            mark.isHidden = !video
+            mark.length = video && f.int64("duration") > 0 ? Videos.clock(f.int64("duration")) : ""
+            photo.backgroundColor = video ? UIColor(red: 0.06, green: 0.09, blue: 0.13, alpha: 1) : nil
+            if video {
+                // Only the first frame is shown; the video itself is fetched when it is played.
+                photo.image = Photos.thumb(m)
+            } else if let img = Photos.cache.object(forKey: id as NSString) {
                 photo.image = img
             } else {
                 photo.image = Photos.thumb(m)
@@ -1743,6 +2050,8 @@ final class BubbleCell: UITableViewCell {
             photoW.isActive = false
             photoH.isActive = false
             photo.image = nil
+            photo.backgroundColor = nil
+            mark.isHidden = true
         }
         // Explicit wrap widths: the automatic one is the label's previous frame, so a reused
         // cell would wrap this message at the width of the message it showed before.
@@ -1786,6 +2095,7 @@ final class BubbleCell: UITableViewCell {
         }
         bindReactions(m.arr("reactions"), out: out && !big, fg: fg)
         text.isHidden = body.isEmpty || kind == "poll"
+        bindEmojiRow(big && Prefs.animatedEmoji ? AnimatedEmoji.keys(for: body) : nil)
         let st = m.str("status")
         meta.text = (m.bool("edited") ? "изменено " : "") + hhmm(m.int64("sent_at"))
         delivery.isHidden = !out
@@ -1806,6 +2116,23 @@ final class BubbleCell: UITableViewCell {
         for r in m.arr("reactions") { a += ", " + r.str("emoji") + " \(r.int("count"))" }
         accessibilityLabel = a
         accessibilityHint = "Коснитесь дважды, чтобы открыть реакции и действия"
+    }
+
+    /// Where every emoji has an animation, they play in place of the text.
+    private func bindEmojiRow(_ keys: [String]?) {
+        emojiRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let sheets = keys?.compactMap { AnimatedEmoji.sheet($0) } ?? []
+        emojiRow.isHidden = sheets.isEmpty || sheets.count != keys?.count
+        if emojiRow.isHidden { return }
+        text.isHidden = true
+        let side = AnimatedEmoji.side(sheets.count)
+        for s in sheets {
+            let v = AnimatedEmojiView()
+            v.show(s)
+            v.widthAnchor.constraint(equalToConstant: side).isActive = true
+            v.heightAnchor.constraint(equalToConstant: side).isActive = true
+            emojiRow.addArrangedSubview(v)
+        }
     }
 
     private func bindReactions(_ list: [JSON], out: Bool, fg: UIColor) {

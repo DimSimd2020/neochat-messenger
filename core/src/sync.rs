@@ -337,6 +337,7 @@ impl Inner {
         // Group and poll controls change state through helpers that lock the db: applied after commit.
         let mut control: Option<(String, Value)> = None;
         let mut deleted = None;
+        let mut service: Option<(Payload, String)> = None;
         let payload = payload.map(|p| {
             if crate::groups::may_post(&tx, &conv, &sender, &p.kind) { Some(p) } else { None }
         });
@@ -460,12 +461,18 @@ impl Inner {
                         }
                     }
                 }
+                "service" => {
+                    // A line about members, from the owner or an admin only (checked in may_post).
+                    if let Some(body) = p.group.as_ref().zip(crate::service::rank_in(&tx, &conv, &sender)).and_then(|(g, role)| crate::service::body_of(role, &sender, g)) {
+                        service = Some((p.clone(), body));
+                    }
+                }
                 "call" => {
                     if let Some(body) = p.call.clone() {
                         stats.calls.push(crate::calls::Signal { sender: sender.clone(), sdev: sdev.clone(), conv: conv.clone(), ts: p.ts, body });
                     }
                 }
-                "group_update" | "poll_vote" | "poll_close" | "reaction" | "edit" => {
+                "group_update" | "poll_vote" | "poll_close" | "reaction" | "edit" | "pin" => {
                     if let Some(g) = p.group.clone() {
                         control = Some((p.kind.clone(), g));
                     }
@@ -476,6 +483,9 @@ impl Inner {
         tx.execute("INSERT OR IGNORE INTO processed(event_id, at) VALUES (?1, ?2)", params![event_id, now])?;
         tx.commit()?;
         drop(db);
+        if let Some((p, body)) = service {
+            self.store_service(&p, &body, sender == me)?;
+        }
         if let Some(id) = deleted {
             let _ = std::fs::remove_file(self.data_dir.join("files").join(format!("{id}.enc")));
         }
@@ -484,9 +494,10 @@ impl Inner {
                 "group_update" => self.apply_group_update(&conv, &sender, &g),
                 "reaction" => self.apply_reaction(&conv, &sender, &g),
                 "edit" => Self::apply_edit(&self.db().conn, &conv, &sender, &g, now_ms()),
+                "pin" => Self::apply_pin(&self.db().conn, &conv, &sender, &g, now_ms()),
                 _ => self.apply_poll_control(&conv, &sender, &kind, &g),
             };
-            changed_conv |= applied.unwrap_or(false) && matches!(kind.as_str(), "group_update" | "edit");
+            changed_conv |= applied.unwrap_or(false) && matches!(kind.as_str(), "group_update" | "edit" | "pin");
         }
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         if changed_conv {
