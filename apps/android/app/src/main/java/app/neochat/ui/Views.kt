@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.ColorFilter
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -116,10 +117,17 @@ class GlassDrawable(
     }
     /** How much of the fill and rim is drawn, for surfaces that fade in and out. */
     var level = 1f
+    /** What the surface looks through, blurred; with it the fill turns thinner. */
+    var backdrop: BackdropBlur? = null
+    /** The view that draws this surface when the drawable is not that view's background. */
+    var host: View? = null
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = ctx.dpf(1) }
+    private val sheen = Paint(Paint.ANTI_ALIAS_FLAG)
     private val path = Path()
     private val rect = RectF()
+    private var rimKey = 0
+    private var sheenKey = 0
 
     override fun draw(c: Canvas) {
         val p = Theme.p
@@ -138,9 +146,13 @@ class GlassDrawable(
         val cr = corners
         if (cr == null) path.addRoundRect(rect, radius, radius, Path.Direction.CW)
         else path.addRoundRect(rect, floatArrayOf(cr[0], cr[0], cr[1], cr[1], cr[2], cr[2], cr[3], cr[3]), Path.Direction.CW)
+        val through = backdrop
+        val owner = host ?: callback as? View
+        val blurred = through != null && owner != null && level > 0f &&
+            through.draw(c, owner, bounds, path, minOf(cr?.max() ?: radius, rect.width() / 2, rect.height() / 2))
         if (color != 0 && level > 0f) {
             fill.color = color
-            fill.alpha = (fill.alpha * level.coerceAtMost(1f)).toInt()
+            fill.alpha = (fill.alpha * level.coerceAtMost(1f) * (if (blurred) THIN else 1f)).toInt()
             c.drawPath(path, fill)
         }
         if (pressed > 0f) {
@@ -153,11 +165,37 @@ class GlassDrawable(
             fill.alpha = 41
             c.drawPath(path, fill)
         }
+        if (rim && level > 0f && (blurred || (kind == Kind.GLASS && radius >= ctx.dpf(14)))) {
+            // Light caught along the top edge of the glass.
+            val band = minOf(rect.height() / 2, ctx.dpf(24))
+            val key = (rect.top.toInt() * 31 + band.toInt()) * 2 + (if (p.dark) 1 else 0)
+            if (sheen.shader == null || key != sheenKey) {
+                sheenKey = key
+                sheen.shader = LinearGradient(0f, rect.top, 0f, rect.top + band, if (p.dark) 0x30FFFFFF else 0x99FFFFFF.toInt(), 0x00FFFFFF, Shader.TileMode.CLAMP)
+            }
+            sheen.alpha = (255 * level.coerceAtMost(1f)).toInt()
+            c.save()
+            c.clipPath(path)
+            c.drawRect(rect.left, rect.top, rect.right, rect.top + band, sheen)
+            c.restore()
+        }
         if (rim && kind != Kind.ACTION && kind != Kind.OUTGOING && level > 0f) {
-            stroke.color = p.rim
-            stroke.alpha = (stroke.alpha * level.coerceAtMost(1f)).toInt()
+            // Brightest at the corners the light falls on, and the colour of the palette between them.
+            val key = (((rect.left.toInt() * 31 + rect.top.toInt()) * 31 + rect.right.toInt()) * 31 + rect.bottom.toInt()) * 31 + p.rim + (if (p.dark) 1 else 0)
+            if (stroke.shader == null || key != rimKey) {
+                rimKey = key
+                val near = if (p.dark) 0xB0FFFFFF.toInt() else 0xFFFFFFFF.toInt()
+                val far = if (p.dark) 0x66FFFFFF else 0xAAFFFFFF.toInt()
+                stroke.shader = LinearGradient(rect.left, rect.top, rect.right, rect.bottom, intArrayOf(near, p.rim, p.rim, far), floatArrayOf(0f, 0.3f, 0.7f, 1f), Shader.TileMode.CLAMP)
+            }
+            stroke.alpha = (255 * level.coerceAtMost(1f)).toInt()
             c.drawPath(path, stroke)
         }
+    }
+
+    private companion object {
+        /** Share of the fill that stays over blurred content, which already tints the surface. */
+        const val THIN = 0.55f
     }
 
     override fun setAlpha(alpha: Int) {}

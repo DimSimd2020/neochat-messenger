@@ -412,7 +412,7 @@ class InteractionInstrumentation : Instrumentation() {
             textTouch(MotionEvent.ACTION_DOWN, 1); textTouch(MotionEvent.ACTION_UP, 1); pause(); pause()
             runOnMainSync { check(profileTabs.getChildAt(1).isSelected && field(profilePage, "category") == "files") { "Text lens did not select files" } }
             capture("text-lens-files")
-            // A horizontal swipe still scrolls the long profile tabs rather than trapping the finger.
+            // The lens dragged against the edge of the long profile tabs carries the strip along and lands where the finger lets go.
             val tabScroll = profileTabs.parent as android.widget.HorizontalScrollView
             val scrollStart = SystemClock.uptimeMillis()
             fun scrollTouch(action: Int, fraction: Float) = runOnMainSync {
@@ -420,12 +420,14 @@ class InteractionInstrumentation : Instrumentation() {
                 tabScroll.dispatchTouchEvent(e)
                 e.recycle()
             }
-            scrollTouch(MotionEvent.ACTION_DOWN, 0.85f)
-            for (step in 1..8) { scrollTouch(MotionEvent.ACTION_MOVE, 0.85f - step * 0.075f); SystemClock.sleep(25) }
-            scrollTouch(MotionEvent.ACTION_UP, 0.25f); pause(); pause()
+            scrollTouch(MotionEvent.ACTION_DOWN, 0.5f)
+            for (step in 1..6) { scrollTouch(MotionEvent.ACTION_MOVE, 0.5f + step * 0.08f); SystemClock.sleep(25) }
+            SystemClock.sleep(600)
             runOnMainSync {
-                check(tabScroll.scrollX > 0 && field(profilePage, "category") == "files") { "Profile tab scrolling changed selection or was blocked" }
-                profileTabs.getChildAt(4).performClick()
+                check(tabScroll.scrollX > 0 && field(profilePage, "category") == "files") { "Lens held at the edge did not scroll the strip, or chose before release" }
+            }
+            scrollTouch(MotionEvent.ACTION_UP, 0.98f); pause(); pause()
+            runOnMainSync {
                 check(field(profilePage, "category") == "privacy" && profileTabs.getChildAt(4).isSelected) { "Last profile tab is inaccessible" }
             }
             pause(); pause(); capture("text-lens-privacy")

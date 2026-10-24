@@ -10,6 +10,8 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
     private let details = UIStackView()
     private let content = UIStackView()
     private let avatar = AvatarView(size: 112)
+    private let scroll = UIScrollView()
+    private var avatarTop: NSLayoutConstraint?
     // The cover reaches from the top down to the end of the description card and fades out.
     private let cover = ProfileCoverView()
     private let name = label("", 28, .bold)
@@ -28,6 +30,7 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Профиль"
+        navigationItem.titleView = GlassPill.title("Профиль")
         navigationItem.largeTitleDisplayMode = .never
         view.backgroundColor = Theme.canvas
         view.addSubview(BackgroundView(frame: view.bounds))
@@ -59,17 +62,21 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
         ])
         stack.addArrangedSubview(tabScroll)
         stack.addArrangedSubview(content)
-        let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
+        // The page begins at the top of the screen: the cover shows through the glass of the bar and the status bar.
+        scroll.contentInsetAdjustmentBehavior = .never
+        setContentScrollView(scroll, for: .top)
         stack.translatesAutoresizingMaskIntoConstraints = false
         cover.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll); scroll.addSubview(cover); scroll.addSubview(avatar); scroll.addSubview(stack)
+        let avatarTop = avatar.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 94)
+        self.avatarTop = avatarTop
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: view.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             cover.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), cover.bottomAnchor.constraint(equalTo: details.bottomAnchor, constant: 16),
             cover.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor), cover.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor),
-            avatar.centerXAnchor.constraint(equalTo: scroll.frameLayoutGuide.centerXAnchor), avatar.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 94),
+            avatar.centerXAnchor.constraint(equalTo: scroll.frameLayoutGuide.centerXAnchor), avatarTop,
             stack.topAnchor.constraint(equalTo: avatar.bottomAnchor, constant: 14), stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -28),
             stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16), stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
             details.widthAnchor.constraint(equalTo: stack.widthAnchor), tabScroll.widthAnchor.constraint(equalTo: stack.widthAnchor), content.widthAnchor.constraint(equalTo: stack.widthAnchor),
@@ -82,6 +89,14 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
     }
 
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); if isViewLoaded { reload() } }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // The avatar sits as far below the bar as before, though the page now begins above it.
+        let top = view.safeAreaInsets.top + 94
+        if avatarTop?.constant != top { avatarTop?.constant = top }
+        scroll.verticalScrollIndicatorInsets.top = view.safeAreaInsets.top
+    }
 
     private func clear(_ col: UIStackView) { col.arrangedSubviews.forEach { col.removeArrangedSubview($0); $0.removeFromSuperview() } }
     private func button(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> UIButton {
@@ -112,7 +127,13 @@ class PersonProfileViewController: UIViewController, PHPickerViewControllerDeleg
             self.cover.colors = ProfileStyle.colors(header: p.str("header"), userId: uid)
             self.avatar.set(self.name.text ?? "", seed: uid, avatar: p.str("avatar_path"))
             self.subtitle.text = own ? "Ваш профиль" : (p.bool("verified") ? "Ключ сверен" : "@"+p.str("username"))
-            self.navigationItem.rightBarButtonItem = own ? UIBarButtonItem(image: UIImage(systemName: "pencil"), primaryAction: UIAction { [weak self] _ in self?.presentSheet(EditProfileViewController()) }) : nil
+            if own {
+                let edit = glassBarButton(symbol: "pencil", label: "Изменить профиль")
+                edit.addAction(UIAction { [weak self] _ in self?.presentSheet(EditProfileViewController()) }, for: .touchUpInside)
+                self.navigationItem.rightBarButtonItem = UIBarButtonItem(customView: GlassPill.group([edit]))
+            } else {
+                self.navigationItem.rightBarButtonItem = nil
+            }
             self.clear(self.details)
             let actions = UIStackView(); actions.spacing = 10; actions.distribution = .fillEqually
             if own {
