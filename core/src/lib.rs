@@ -24,6 +24,7 @@ mod service;
 mod social;
 mod state;
 mod store;
+mod stt;
 mod sync;
 mod update;
 mod views;

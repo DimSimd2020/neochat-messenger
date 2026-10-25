@@ -15,7 +15,7 @@ import (
 
 const (
 	// Fits a MAX_GROUP×maxDevices fan-out at maxEnvelopeSize (base64 JSON),
-	// under nginx client_max_body_size 27m. Typical text is far smaller.
+	// under nginx client_max_body_size 52m. Typical text is far smaller.
 	maxSendBody = 24 << 20
 	// A long Cyrillic text or a photo thumbnail with padding fits comfortably.
 	maxEnvelopeSize = 32 << 10

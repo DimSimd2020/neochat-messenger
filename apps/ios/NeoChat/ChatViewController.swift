@@ -79,6 +79,16 @@ private func votesText(_ n: Int) -> String {
 
 func isImage(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("image") ?? false) }
 func isVideo(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("video") ?? false) }
+func isVoice(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("voice") ?? false) }
+func isCircle(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("circle") ?? false) }
+
+/// The recognized text of a voice message or circle; nil while it has none, "" when no speech was found.
+func transcriptOf(_ m: JSON) -> String? { m.obj("file")?["transcript"] as? String }
+
+/// What a file message is called in quotes, previews and the pin bar.
+func filePreview(_ m: JSON) -> String {
+    isImage(m) ? "Фото" : isVideo(m) ? "Видео" : isVoice(m) ? "Голосовое сообщение" : isCircle(m) ? "Видеосообщение" : "Файл"
+}
 
 /// Links found by the core's markdown parser.
 func links(_ m: JSON) -> [String] { m.arr("spans").compactMap { $0["link"] as? String } }
@@ -265,6 +275,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private let input = ComposerTextView()
     private let placeholder = label("Написать сообщение…", 17, color: Theme.muted)
     private let send = UIButton(type: .system)
+    // Voice messages and circles: two buttons where the arrow will be, and the bar that replaces the field while recording.
+    private let micButton = UIButton(type: .system)
+    private let circleButton = UIButton(type: .system)
+    private let media = UIStackView()
+    private var mediaWidth: NSLayoutConstraint!
+    private let recBar = RecordingBar()
+    private var recorder: VoiceRecorder?
     private var sendWidth: NSLayoutConstraint!
     private var inputHeight: NSLayoutConstraint!
     private let replyBar = UIStackView()
@@ -555,6 +572,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         if Notifier.visibleConversation == conversationId { Notifier.visibleConversation = nil }
         presenceTimer?.invalidate()
         presenceTimer = nil
+        cancelVoice()
+        Playback.shared.stop()
         Core.shared.call("set_draft", ["_account_id": accountId, "conversation_id": conversationId, "text": editTarget != nil ? savedDraft : (input.text ?? "")])
     }
 
@@ -597,12 +616,31 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         send.clipsToBounds = true
         send.transform = Self.sendFolded
         attach.springPress()
-        for v in [attach, input, send, placeholder] {
+        micButton.setImage(UIImage(systemName: "mic"), for: .normal)
+        micButton.tintColor = Theme.text
+        micButton.accessibilityLabel = "Записать голосовое сообщение"
+        micButton.springPress()
+        micButton.addAction(UIAction { [weak self] _ in self?.startVoice() }, for: .touchUpInside)
+        circleButton.setImage(UIImage(systemName: "video.circle"), for: .normal)
+        circleButton.tintColor = Theme.text
+        circleButton.accessibilityLabel = "Записать видеосообщение"
+        circleButton.springPress()
+        circleButton.addAction(UIAction { [weak self] _ in self?.startCircle() }, for: .touchUpInside)
+        media.axis = .horizontal
+        media.distribution = .fillEqually
+        media.clipsToBounds = true
+        media.addArrangedSubview(circleButton)
+        media.addArrangedSubview(micButton)
+        recBar.isHidden = true
+        recBar.trash.addAction(UIAction { [weak self] _ in self?.cancelVoice() }, for: .touchUpInside)
+        recBar.send.addAction(UIAction { [weak self] _ in self?.finishVoice() }, for: .touchUpInside)
+        for v in [attach, input, media, send, placeholder, recBar] {
             v.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(v)
         }
         placeholder.isUserInteractionEnabled = false
         sendWidth = send.widthAnchor.constraint(equalToConstant: 0)
+        mediaWidth = media.widthAnchor.constraint(equalToConstant: 88)
         inputHeight = input.heightAnchor.constraint(equalToConstant: 46)
         NSLayoutConstraint.activate([
             attach.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 6),
@@ -612,8 +650,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             input.topAnchor.constraint(equalTo: row.topAnchor),
             input.bottomAnchor.constraint(equalTo: row.bottomAnchor),
             inputHeight,
-            send.leadingAnchor.constraint(equalTo: input.trailingAnchor, constant: 4),
+            media.leadingAnchor.constraint(equalTo: input.trailingAnchor),
+            media.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -1),
+            media.heightAnchor.constraint(equalToConstant: 44), mediaWidth,
+            send.leadingAnchor.constraint(equalTo: media.trailingAnchor, constant: 4),
             send.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -4),
+            recBar.leadingAnchor.constraint(equalTo: row.leadingAnchor), recBar.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            recBar.bottomAnchor.constraint(equalTo: row.bottomAnchor),
             send.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -3),
             send.heightAnchor.constraint(equalToConstant: 40), sendWidth,
             placeholder.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 9),
@@ -682,6 +725,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         // A caption may be emptied, so editing a file keeps the button.
         let show = !(input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editTarget?.str("kind") == "file"
         let target: CGFloat = show ? 40 : 0
+        updateMedia(show: show, animated: animated)
         send.isEnabled = !blocked
         send.alpha = blocked ? 0.5 : 1
         send.accessibilityHint = blocked ? "Отправка приостановлена: ключ собеседника изменился" : nil
@@ -695,13 +739,29 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         Motion.animate(show ? 0.42 : 0.28, show ? 0.6 : 1) { self.send.transform = show ? .identity : Self.sendFolded }
     }
 
+    /// The two recording buttons take the place of the arrow while there is nothing to send.
+    private func updateMedia(show: Bool, animated: Bool) {
+        let on = !show && editTarget == nil
+        let target: CGFloat = on ? 88 : 0
+        micButton.isEnabled = !blocked
+        circleButton.isEnabled = !blocked
+        media.isUserInteractionEnabled = on
+        guard mediaWidth.constant != target else { return }
+        mediaWidth.constant = target
+        let apply = {
+            self.media.alpha = on ? 1 : 0
+            self.composer.layoutIfNeeded()
+        }
+        if animated { Motion.animate(0.32, 1, apply) } else { apply() }
+    }
+
     private func setEdit(_ m: JSON) {
         if editTarget == nil { savedDraft = input.text ?? "" }
         editTarget = m
         replyTo = nil
         let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
         replyTitle.text = "Изменение сообщения"
-        replyText.text = t.isEmpty ? (isImage(m) ? "Фото" : isVideo(m) ? "Видео" : "Файл") : t
+        replyText.text = t.isEmpty ? filePreview(m) : t
         replyBar.accessibilityLabel = "Изменение сообщения: " + (replyText.text ?? "")
         cancelButton?.accessibilityLabel = "Отменить изменение"
         input.text = m.str("text")
@@ -733,7 +793,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         leaveEdit()
         replyTo = m
         if let m {
-            let t = m.str("kind") == "file" ? "Файл" : m.str("text").replacingOccurrences(of: "\n", with: " ")
+            let t = m.str("kind") == "file" ? filePreview(m) : m.str("text").replacingOccurrences(of: "\n", with: " ")
             replyTitle.text = "В ответ " + m.str("sender_name")
             replyText.text = t
             input.becomeFirstResponder()
@@ -813,6 +873,112 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             case .failure(let e):
                 self.toast(e.message)
                 if self.input.text.isEmpty { self.input.text = text; self.textViewDidChange(self.input) }
+            }
+        }
+    }
+
+    // MARK: voice messages and circles
+
+    private func startVoice() {
+        guard !blocked, editTarget == nil, recorder == nil else { return }
+        guard CallManager.shared.call.isEmpty else { return toast("Во время звонка запись недоступна") }
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] ok in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard ok else { return self.toast("Нет доступа к микрофону. Разрешите его в настройках") }
+                guard self.recorder == nil else { return }
+                Playback.shared.stop()
+                let r = VoiceRecorder()
+                r.onTick = { [weak self, weak r] ms in
+                    guard let self, let r else { return }
+                    self.recBar.update(ms: ms, levels: r.levels)
+                    if ms >= VoiceRecorder.maxMs { self.finishVoice() }
+                }
+                guard r.start() else { return self.toast("Не удалось начать запись") }
+                self.recorder = r
+                self.input.resignFirstResponder()
+                self.showRecording(true)
+                Haptics.select()
+            }
+        }
+    }
+
+    /// The bar covers the row while recording; everything under it is hidden so it does not show through the glass.
+    private func showRecording(_ on: Bool) {
+        let under: [UIView] = [attach, input, media, send, placeholder]
+        recBar.isHidden = !on
+        if on {
+            recBar.reset()
+            under.forEach { $0.alpha = 0 }
+            UIAccessibility.post(notification: .announcement, argument: "Запись идёт")
+        } else {
+            [attach, input, send, placeholder].forEach { $0.alpha = 1 }
+            media.alpha = mediaWidth.constant > 0 ? 1 : 0
+        }
+    }
+
+    private func finishVoice() {
+        guard let r = recorder else { return }
+        recorder = nil
+        let rec = r.stop()
+        showRecording(false)
+        guard let rec else { return toast("Не удалось сохранить запись") }
+        guard rec.durationMs >= 600 else {
+            try? FileManager.default.removeItem(at: rec.url)
+            return toast("Сообщение слишком короткое")
+        }
+        sendVoice(rec)
+    }
+
+    private func cancelVoice() {
+        guard let r = recorder else { return }
+        recorder = nil
+        r.cancel()
+        showRecording(false)
+    }
+
+    private func sendVoice(_ rec: VoiceRecorder.Recording) {
+        guard accountId == Core.shared.accountId else { try? FileManager.default.removeItem(at: rec.url); return }
+        var p: JSON = ["_account_id": accountId, "conversation_id": conversationId, "path": rec.url.path, "mime": "audio/mp4", "kind": "voice",
+                       "name": "voice.m4a", "duration": rec.durationMs, "wave": rec.wave.base64EncodedString()]
+        if let r = replyTo { p["reply_to"] = r.str("id") }
+        Haptics.confirm()
+        setReply(nil)
+        Core.shared.call("send_file", p) { [weak self] r in
+            try? FileManager.default.removeItem(at: rec.url)
+            if self?.accountId == Core.shared.accountId, case .failure(let e) = r { self?.toast(e.message) }
+        }
+    }
+
+    private func startCircle() {
+        guard !blocked, editTarget == nil, recorder == nil else { return }
+        input.resignFirstResponder()
+        CircleRecorderViewController.present(from: self) { [weak self] url, ms in self?.sendCircle(url, ms: ms) }
+    }
+
+    private func sendCircle(_ url: URL, ms: Int) {
+        guard accountId == Core.shared.accountId else { try? FileManager.default.removeItem(at: url); return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let info = Videos.info(url)
+            DispatchQueue.main.async {
+                guard let self, self.accountId == Core.shared.accountId else { try? FileManager.default.removeItem(at: url); return }
+                var p: JSON = ["_account_id": self.accountId, "conversation_id": self.conversationId, "path": url.path, "mime": "video/mp4",
+                               "kind": "circle", "name": "circle.mp4", "duration": ms]
+                if let info {
+                    if let t = info.thumb { p["thumb"] = t }
+                    let side = min(info.width, info.height)
+                    if side > 0 {
+                        p["width"] = side
+                        p["height"] = side
+                    }
+                }
+                if let r = self.replyTo { p["reply_to"] = r.str("id") }
+                Haptics.confirm()
+                self.setReply(nil)
+                Core.shared.call("send_file", p) { [weak self] r in
+                    try? FileManager.default.removeItem(at: url)
+                    if self?.accountId == Core.shared.accountId, case .failure(let e) = r { self?.toast(e.message) }
+                }
             }
         }
     }
@@ -963,6 +1129,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     /// The thumbnail is made only for pictures that go as photos.
     private func sendOutgoing(_ f: OutgoingFile, photo: Bool, caption: String) {
         if photo && f.isVideo { return sendVideo(f, caption: caption) }
+        if f.size > Videos.limit {
+            try? FileManager.default.removeItem(at: f.url)
+            return toast("Файл больше 50 МБ: " + f.name)
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let thumb = photo && f.isImage ? Photos.makeThumb(f.url) : nil
             DispatchQueue.main.async { self?.sendPhoto(f.url, name: f.name, mime: f.mime, thumb: thumb, caption: caption) }
@@ -972,7 +1142,15 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     /// A video that goes as a video: made portable and small enough, then sent with its first frame and length.
     private func sendVideo(_ f: OutgoingFile, caption: String) {
         toast("Готовим видео…")
-        Videos.prepare(f) { [weak self] video in
+        var shown = 0
+        let report = { [weak self] (pct: Int) in
+            DispatchQueue.main.async {
+                guard pct >= shown + 25 else { return }
+                shown = pct
+                self?.toast("Сжимаем видео… \(pct)%")
+            }
+        }
+        Videos.prepare(f, progress: report) { [weak self] video in
             DispatchQueue.main.async {
                 guard let self else { return }
                 guard let video else { return self.toast("Видео не удалось подготовить: оно слишком длинное или в неизвестном формате") }
@@ -1021,8 +1199,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         for u in urls {
             let size = (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             let mime = UTType(filenameExtension: u.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-            // A video may be longer: it is re-encoded smaller before it is sent.
-            if size > 25 * 1024 * 1024 && !mime.hasPrefix("video/") { toast("Файл больше 25 МБ"); continue }
+            // A video may be bigger: it is re-encoded smaller before it is sent.
+            let isMovie = mime.hasPrefix("video/")
+            if size > (isMovie ? 600 : 50) * 1024 * 1024 { toast(isMovie ? "Видео больше 600 МБ: " + u.lastPathComponent : "Файл больше 50 МБ: " + u.lastPathComponent); continue }
             files.append(OutgoingFile(url: u, name: u.lastPathComponent, mime: mime))
         }
         if files.isEmpty { pendingPick = nil; return }
@@ -1098,7 +1277,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
         let s: String
         if m.str("kind") == "poll" { s = "Опрос: " + t }
-        else if let f = m.obj("file") { s = (isImage(m) ? "Фото" : isVideo(m) ? "Видео" : "Файл " + f.str("name")) + (t.isEmpty ? "" : ": " + t) }
+        else if let f = m.obj("file") { s = (isImage(m) ? "Фото" : isVideo(m) ? "Видео" : isVoice(m) ? "Голосовое сообщение" : isCircle(m) ? "Видеосообщение" : "Файл " + f.str("name")) + (t.isEmpty ? "" : ": " + t) }
         else { s = t }
         return s.count > 120 ? String(s.prefix(119)) + "…" : s
     }
@@ -1414,6 +1593,11 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             if let back = navigationController?.interactivePopGestureRecognizer { c.prioritizeBackGesture(back) }
             c.bind(m, group: group, first: first, last: last)
             c.onRetry = { [weak self] in self?.retry(m) }
+            c.onFail = { [weak self] why in self?.toast(why) }
+            c.onTranscribe = { [weak self] in
+                guard let self else { return }
+                Transcription.shared.request(m, from: self)
+            }
             c.onPhoto = { [weak self] in if isVideo(m) { self?.openVideo(m) } else { self?.openPhoto(m) } }
             c.onProfile = { [weak self] in self?.navigationController?.pushViewController(PersonProfileViewController(userId:m.str("sender_user_id")),animated:!Theme.reducedMotion) }
             c.onMention = { [weak self] name in
@@ -1480,6 +1664,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         }
         if isImage(m) { acts.append(MenuAction(title: "Открыть фото", icon: "photo") { [weak self] in self?.openPhoto(m) }) }
         if isVideo(m) { acts.append(MenuAction(title: "Открыть видео", icon: "play.rectangle") { [weak self] in self?.openVideo(m) }) }
+        if isVoice(m) || isCircle(m), ok {
+            if transcriptOf(m) != nil {
+                acts.append(MenuAction(title: "Убрать расшифровку", icon: "text.badge.xmark") { Transcription.shared.clear(m.str("id")) })
+            } else {
+                acts.append(MenuAction(title: "Расшифровать", icon: "text.bubble") { [weak self] in
+                    guard let self else { return }
+                    Transcription.shared.request(m, from: self)
+                })
+            }
+        }
         let postable = ok && m.str("status") != "failed" && ["text", "file", "poll"].contains(m.str("kind"))
         if postable && conv.bool("can_pin") {
             let on = !m.bool("pinned")
@@ -1494,7 +1688,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 }
             })
         }
-        if !composer.isHidden && m.bool("outgoing") && ["sent", "delivered", "read"].contains(m.str("status")) && ["text", "file"].contains(m.str("kind")) {
+        if !composer.isHidden && m.bool("outgoing") && ["sent", "delivered", "read"].contains(m.str("status")) && ["text", "file"].contains(m.str("kind")) && !isVoice(m) && !isCircle(m) {
             acts.append(MenuAction(title: "Изменить", icon: "pencil") { [weak self] in self?.setEdit(m) })
         }
         if m.str("kind") == "poll", let p = m.obj("poll") {
@@ -1710,6 +1904,19 @@ final class BubbleCell: UITableViewCell {
     private let content = UIStackView()
     private let photo = UIImageView()
     private let mark = VideoMarkView()
+    private let circle = CircleView()
+    private let voiceRow = UIStackView()
+    private let playButton = UIButton(type: .system)
+    private let wave = WaveView()
+    private let voiceTime = UILabel()
+    private let speedButton = UIButton(type: .system)
+    private let transButton = UIButton(type: .system)
+    private let transText = label("", 15)
+    private var waveWidth: NSLayoutConstraint!
+    private var bound: JSON = [:]
+    private var observers: [NSObjectProtocol] = []
+    var onFail: ((String) -> Void)?
+    var onTranscribe: (() -> Void)?
     private var photoW: NSLayoutConstraint!
     private var photoH: NSLayoutConstraint!
     private let inner = UIStackView()
@@ -1812,6 +2019,49 @@ final class BubbleCell: UITableViewCell {
         let pollWidth = poll.widthAnchor.constraint(greaterThanOrEqualToConstant: 240)
         pollWidth.priority = UILayoutPriority(999)
         pollWidth.isActive = true
+        // Voice message: a round play button, the wave with the time under it and, while it plays, the speed.
+        playButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
+        playButton.layer.cornerRadius = 20
+        playButton.accessibilityLabel = "Воспроизвести"
+        playButton.addAction(UIAction { [weak self] _ in self?.togglePlay() }, for: .touchUpInside)
+        playButton.springPress()
+        wave.onSeek = { [weak self] f in self?.seek(f) }
+        waveWidth = wave.widthAnchor.constraint(equalToConstant: 150)
+        waveWidth.priority = UILayoutPriority(999)
+        voiceTime.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        let voiceCol = UIStackView(arrangedSubviews: [wave, voiceTime])
+        voiceCol.axis = .vertical
+        voiceCol.spacing = 2
+        speedButton.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        speedButton.layer.cornerRadius = 12
+        speedButton.contentEdgeInsets = UIEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        speedButton.setTitle("1×", for: .normal)
+        speedButton.alpha = 0
+        speedButton.isUserInteractionEnabled = false
+        speedButton.accessibilityLabel = "Скорость воспроизведения"
+        speedButton.addAction(UIAction { _ in Playback.shared.cycleSpeed() }, for: .touchUpInside)
+        voiceRow.addArrangedSubview(playButton)
+        voiceRow.addArrangedSubview(voiceCol)
+        voiceRow.addArrangedSubview(speedButton)
+        voiceRow.spacing = 10
+        voiceRow.alignment = .center
+        voiceRow.isHidden = true
+        NSLayoutConstraint.activate([
+            playButton.widthAnchor.constraint(equalToConstant: 40), playButton.heightAnchor.constraint(equalToConstant: 40),
+            wave.heightAnchor.constraint(equalToConstant: 28), waveWidth, speedButton.heightAnchor.constraint(equalToConstant: 24),
+        ])
+        circle.isHidden = true
+        circle.onTap = { [weak self] in self?.togglePlay() }
+        transButton.setImage(UIImage(systemName: "text.bubble"), for: .normal)
+        transButton.setTitle("Расшифровать", for: .normal)
+        transButton.titleLabel?.font = Theme.font(14, .semibold)
+        transButton.titleEdgeInsets = UIEdgeInsets(top: 0, left: 8, bottom: 0, right: -8)
+        transButton.contentHorizontalAlignment = .leading
+        transButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 36).isActive = true
+        transButton.addAction(UIAction { [weak self] _ in self?.onTranscribe?() }, for: .touchUpInside)
+        transButton.isHidden = true
+        transText.numberOfLines = 0
+        transText.isHidden = true
         inner.axis = .vertical
         inner.spacing = 4
         reactRow.spacing = 6
@@ -1822,10 +2072,12 @@ final class BubbleCell: UITableViewCell {
         emojiRow.spacing = 4
         emojiRow.alignment = .center
         emojiRow.isHidden = true
-        [fwd, quote, fileRow, emojiRow, text, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
+        [fwd, quote, fileRow, voiceRow, emojiRow, text, transText, transButton, poll, reactRow, metaRow].forEach(inner.addArrangedSubview)
         inner.setCustomSpacing(6, after: reactRow)
         bubbleTap.addTarget(self, action: #selector(tapped(_:)))
         bubbleTapDelegate.photo = photo
+        bubbleTapDelegate.circle = circle
+        bubbleTapDelegate.wave = wave
         bubbleTapDelegate.avatar = avatar
         bubbleTapDelegate.sender = sender
         bubbleTap.delegate = bubbleTapDelegate
@@ -1859,6 +2111,7 @@ final class BubbleCell: UITableViewCell {
         content.axis = .vertical
         content.spacing = 4
         content.addArrangedSubview(photo)
+        content.addArrangedSubview(circle)
         content.addArrangedSubview(inner)
         content.isLayoutMarginsRelativeArrangement = true
         content.translatesAutoresizingMaskIntoConstraints = false
@@ -1885,9 +2138,70 @@ final class BubbleCell: UITableViewCell {
             avatar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4),
             avatar.bottomAnchor.constraint(equalTo: bubble.bottomAnchor),
         ])
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: .playbackChanged, object: nil, queue: .main) { [weak self] n in
+            guard let self, let id = n.userInfo?["id"] as? String, id.isEmpty || id == self.boundId else { return }
+            self.bindPlayback()
+        })
+        observers.append(nc.addObserver(forName: .transcriptionChanged, object: nil, queue: .main) { [weak self] _ in self?.bindPlayback() })
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    private func togglePlay() {
+        Playback.shared.toggle(bound, circle: isCircle(bound) ? circle : nil) { [weak self] why in self?.onFail?(why) }
+    }
+
+    /// A tap on the wave moves to that place; on a message that is not playing it starts it.
+    private func seek(_ fraction: CGFloat) {
+        if Playback.shared.state(of: boundId) == .idle { togglePlay() } else { Playback.shared.seek(boundId, to: fraction) }
+    }
+
+    /// What changes while a message plays or is turned into text: the button, the wave, the time, the status line.
+    private func bindPlayback() {
+        let voiceMsg = isVoice(bound), circleMsg = isCircle(bound)
+        guard voiceMsg || circleMsg else { return }
+        let id = boundId
+        let total = bound.obj("file")?.int64("duration") ?? 0
+        let state = Playback.shared.state(of: id)
+        let active = state == .playing || state == .paused
+        let pos = active ? Int64(Playback.shared.position * 1000) : 0
+        if voiceMsg {
+            playButton.setImage(UIImage(systemName: state == .playing ? "pause.fill" : "play.fill"), for: .normal)
+            playButton.accessibilityLabel = state == .playing ? "Пауза" : "Воспроизвести"
+            wave.progress = Playback.shared.progress(of: id)
+            voiceTime.text = active ? Videos.clock(pos) + " / " + Videos.clock(total) : Videos.clock(total)
+            speedButton.alpha = active ? 1 : 0
+            speedButton.isUserInteractionEnabled = active
+            let sp = Playback.shared.speed
+            UIView.performWithoutAnimation {
+                speedButton.setTitle(sp == 1.5 ? "1,5×" : sp == 2 ? "2×" : "1×", for: .normal)
+                speedButton.layoutIfNeeded()
+            }
+        } else {
+            circle.update(state: state, progress: Playback.shared.progress(of: id), positionMs: pos, lengthMs: total)
+        }
+        let text = transcriptOf(bound)
+        let phase = Transcription.shared.status(of: id)
+        transText.isHidden = text == nil
+        transText.text = (text ?? "").isEmpty ? "Речь не найдена" : text
+        transButton.isHidden = text != nil
+        let title: String
+        switch phase {
+        case .model(let percent)?: title = "Скачиваем модель… \(percent)%"
+        case .working?: title = "Расшифровываем…"
+        case nil: title = "Расшифровать"
+        }
+        UIView.performWithoutAnimation {
+            transButton.setTitle(title, for: .normal)
+            transButton.layoutIfNeeded()
+        }
+        transButton.isEnabled = phase == nil
+    }
 
     @objc private func tapped(_ g: UITapGestureRecognizer) {
         let point = g.location(in: text)
@@ -1959,6 +2273,7 @@ final class BubbleCell: UITableViewCell {
     override var accessibilityCustomActions: [UIAccessibilityCustomAction]? {
         get {
             var acts: [UIAccessibilityCustomAction] = []
+            if isVoice(bound) || isCircle(bound) { acts.append(UIAccessibilityCustomAction(name: "Воспроизвести или остановить") { [weak self] _ in self?.togglePlay(); return true }) }
             if let r = onSwipeReply { acts.append(UIAccessibilityCustomAction(name: "Ответить") { _ in r(); return true }) }
             if let q = onDoubleTap { acts.append(UIAccessibilityCustomAction(name: "Быстрая реакция " + QuickReaction.current) { _ in q(); return true }) }
             return acts
@@ -2020,9 +2335,12 @@ final class BubbleCell: UITableViewCell {
         let f = m.obj("file")
         let video = isVideo(m)
         let image = isImage(m) || video
+        let voiceMsg = isVoice(m), circleMsg = isCircle(m)
+        let tight = image || circleMsg
+        bound = m
         photo.isHidden = !image
-        content.layoutMargins = image ? UIEdgeInsets(top: 4, left: 4, bottom: 7, right: 4) : UIEdgeInsets(top: 9, left: 15, bottom: 7, right: 14)
-        inner.layoutMargins = image ? UIEdgeInsets(top: 0, left: 11, bottom: 0, right: 10) : .zero
+        content.layoutMargins = tight ? UIEdgeInsets(top: 4, left: 4, bottom: 7, right: 4) : UIEdgeInsets(top: 9, left: 15, bottom: 7, right: 14)
+        inner.layoutMargins = tight ? UIEdgeInsets(top: 0, left: 11, bottom: 0, right: 10) : .zero
         if image, let f {
             let maxW = min(300, UIScreen.main.bounds.width * 0.78 - 8)
             var iw = CGFloat((f["width"] as? NSNumber)?.doubleValue ?? 0)
@@ -2056,11 +2374,32 @@ final class BubbleCell: UITableViewCell {
         // Explicit wrap widths: the automatic one is the label's previous frame, so a reused
         // cell would wrap this message at the width of the message it showed before.
         let room = min(bounds.width * 0.78, bounds.width - (out ? 52 : group ? 74 : 36))
-        let wrap = max(0, floor(image ? photoW.constant - 21 : room - 29))
+        let wrap = max(0, floor(image ? photoW.constant - 21 : circleMsg ? CircleView.side - 21 : room - 29))
+        waveWidth.constant = min(176, max(96, wrap - 40 - 10 - 56))
+        transText.preferredMaxLayoutWidth = wrap
         [fwd, quote, text, pollQuestion, pollInfo, meta].forEach { $0.preferredMaxLayoutWidth = wrap }
         [fileName, fileMeta].forEach { $0.preferredMaxLayoutWidth = max(0, wrap - 42) }
         sender.preferredMaxLayoutWidth = max(0, floor(room))
-        if let f, !image {
+        let strong: UIColor = out ? .white : Theme.accent
+        voiceRow.isHidden = !voiceMsg
+        circle.isHidden = !circleMsg
+        if voiceMsg {
+            playButton.backgroundColor = out ? .white : Theme.action
+            playButton.tintColor = out ? Theme.outgoing : .white
+            wave.played = strong
+            wave.rest = muted
+            wave.bars = Array(Data(base64Encoded: m.obj("file")?.str("wave") ?? "") ?? Data())
+            voiceTime.textColor = muted
+            speedButton.setTitleColor(strong, for: .normal)
+            speedButton.backgroundColor = strong.withAlphaComponent(0.2)
+        }
+        if circleMsg {
+            circle.ringColor = strong
+            circle.configure(id: boundId, poster: Photos.thumb(m))
+        }
+        transText.textColor = fg
+        transButton.tintColor = strong
+        if let f, !image, !voiceMsg, !circleMsg {
             fileRow.isHidden = false
             fileName.text = f.str("name")
             fileMeta.text = sizeText(f.int64("size"))
@@ -2110,12 +2449,17 @@ final class BubbleCell: UITableViewCell {
         // Poll answers stay separate buttons for VoiceOver.
         isAccessibilityElement = kind != "poll"
         var a = m.str("sender_name") + ", " + hhmm(m.int64("sent_at")) + ": "
-        if image { a += "фото. " } else if let f { a += "файл " + f.str("name") + ". " }
+        if image { a += "фото. " }
+        else if voiceMsg { a += "голосовое сообщение, " + Videos.clock(m.obj("file")?.int64("duration") ?? 0) + ". " }
+        else if circleMsg { a += "видеосообщение, " + Videos.clock(m.obj("file")?.int64("duration") ?? 0) + ". " }
+        else if let f { a += "файл " + f.str("name") + ". " }
+        if let t = transcriptOf(m), !t.isEmpty { a += "Текст: " + t + ". " }
         a += body
         if out, !statusText(st).isEmpty { a += ". " + statusText(st) }
         for r in m.arr("reactions") { a += ", " + r.str("emoji") + " \(r.int("count"))" }
         accessibilityLabel = a
         accessibilityHint = "Коснитесь дважды, чтобы открыть реакции и действия"
+        bindPlayback()
     }
 
     /// Where every emoji has an animation, they play in place of the text.
@@ -2215,13 +2559,15 @@ private final class ReplySwipeDelegate: NSObject, UIGestureRecognizerDelegate {
 /// Photos, poll answers and reaction chips handle their own taps.
 private final class BubbleTapDelegate: NSObject, UIGestureRecognizerDelegate {
     weak var photo: UIView?
+    weak var circle: UIView?
+    weak var wave: UIView?
     weak var avatar: UIView?
     weak var sender: UIView?
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         var v = touch.view
         while let x = v, x !== g.view {
-            if x is UIControl || x === photo || x === avatar || x === sender { return false }
+            if x is UIControl || x === photo || x === circle || x === wave || x === avatar || x === sender { return false }
             v = x.superview
         }
         return true

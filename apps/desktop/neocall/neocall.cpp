@@ -165,6 +165,13 @@ struct Engine {
     // communications default is often a leftover headset, so the mic works and
     // the other person is silent.
     void useDevices(const std::string &input, const std::string &output) {
+        // The factory initializes the audio device module with each peer connection
+        // and terminates it when that one is destroyed. Between calls it is shut:
+        // it lists no devices and ignores the choice, so the second call of a
+        // session would fall back to the Windows default microphone.
+        worker->BlockingCall([&] {
+            if (adm && !adm->Initialized()) adm->Init();
+        });
         int in = findDevice(true, input), out = findDevice(false, output);
         worker->BlockingCall([&] {
             if (!adm) return;

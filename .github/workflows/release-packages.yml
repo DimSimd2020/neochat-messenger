@@ -193,6 +193,11 @@ jobs:
           7z x -y -bd "-o$env:RUNNER_TEMP\webrtc" "$env:RUNNER_TEMP\libwebrtc.7z" | Out-Null
           "WEBRTC_DIR=$($env:RUNNER_TEMP -replace '\\','/')/webrtc" >> $env:GITHUB_ENV
 
+      # sherpa-onnx (Apache-2.0) recognizes speech of voice messages on the computer; pinned by hash.
+      - name: Speech recognition runtime
+        shell: bash
+        run: scripts/fetch-sherpa.sh windows
+
       - name: Desktop
         shell: cmd
         run: |
@@ -220,6 +225,7 @@ jobs:
           if (-not (Test-Path $exe)) { $exe = "apps\desktop\build\Release\neochat.exe" }
           Copy-Item $exe "$stage\neochat.exe"
           Copy-Item (Join-Path (Split-Path $exe) "neocall.dll") "$stage\neocall.dll"
+          Copy-Item "third_party\sherpa-onnx\windows\lib\*.dll" $stage
           windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime "$stage\neochat.exe"
           $crt = $null
           if ($env:VCToolsRedistDir) {

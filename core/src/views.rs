@@ -90,10 +90,14 @@ impl Inner {
                 Some(f) => {
                     let meta: FileMeta = serde_json::from_str(f)?;
                     let downloaded = self.data_dir.join("files").join(format!("{}.enc", r.id)).exists();
+                    let (voice, circle) = (meta.is_voice(), meta.is_circle());
+                    // The text of a voice message or circle is made on this device only; it never travels.
+                    let transcript = if voice || circle { crate::store::kv_get_str(&db.conn, &format!("tr:{}", r.id))? } else { None };
                     Some(json!({"name": meta.name, "size": meta.size, "mime": meta.mime, "downloaded": downloaded,
                         "image": meta.mime.starts_with("image/") && meta.thumb.is_some(),
                         "thumb": meta.thumb, "width": meta.w, "height": meta.h,
-                        "video": meta.is_video(), "duration": meta.duration}))
+                        "video": meta.is_video() && !circle, "duration": meta.duration,
+                        "voice": voice, "circle": circle, "wave": if voice { meta.wave } else { None }, "transcript": transcript}))
                 }
                 None => None,
             };

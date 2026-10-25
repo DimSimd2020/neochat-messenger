@@ -14,6 +14,10 @@ import (
 
 var updateFileRe = regexp.MustCompile(`^NeoChat-[0-9A-Za-z.\-]+\.(msi|apk|ipa)$`)
 
+// Speech-recognition model files (infra/publish-stt-model.py puts them in DataDir/models). They are
+// public like the installers; the apps check each file against a SHA-256 built into the core.
+var modelFileRe = regexp.MustCompile(`^stt-[0-9a-z][0-9a-z.\-]{0,80}\.(onnx|txt)$`)
+
 func (s *Server) handleUpdateManifest(w http.ResponseWriter, r *http.Request) {
 	s.serveManifest(w, r, filepath.Join(s.cfg.DataDir, "updates"))
 }
@@ -51,6 +55,21 @@ func (s *Server) alphaTester(w http.ResponseWriter, r *http.Request, a *authCtx)
 		s.fail(w, r, errNotFound)
 	}
 	return ok
+}
+
+func (s *Server) handleModelFile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !modelFileRe.MatchString(name) {
+		s.fail(w, r, errNotFound)
+		return
+	}
+	path := filepath.Join(s.cfg.DataDir, "models", name)
+	if _, err := os.Stat(path); err != nil {
+		s.fail(w, r, errNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeFile(w, r, path)
 }
 
 func (s *Server) serveManifest(w http.ResponseWriter, r *http.Request, dir string) {

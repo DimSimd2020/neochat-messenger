@@ -15,7 +15,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Камера нужна для видеозвонков, фотографий в чате и чтобы отсканировать QR-код при привязке нового устройства или добавлении контакта.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Микрофон нужен для звонков.</string>
+	<string>Микрофон нужен для звонков, голосовых сообщений и видеосообщений.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Face ID открывает NeoChat и архив вместо ввода код-пароля.</string>
 	<key>CFBundleDisplayName</key>

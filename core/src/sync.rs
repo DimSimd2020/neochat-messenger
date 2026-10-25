@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::engine::{Inner, STATE_CONNECTING, STATE_OFFLINE, STATE_ONLINE, s};
 use crate::error::{Error, Result};
 use crate::keys::{self, PREKEY_BATCH, unb64};
-use crate::outbox::{FileMeta, Payload, address, preview};
+use crate::outbox::{Payload, address, preview};
 use crate::store::{SignalStore, kv_get_str, kv_set, now_ms};
 
 pub const SYSTEM_CHAT: &str = "neochat-system";
@@ -395,7 +395,7 @@ impl Inner {
                             p.kind,
                             p.text.clone().unwrap_or_default().chars().take(4096).collect::<String>(),
                             p.reply_to,
-                            p.file.as_ref().map(|f| serde_json::to_string(&FileMeta { name: crate::files::safe_name(&f.name), ..f.clone() })).transpose()?,
+                            p.file.as_ref().map(|f| serde_json::to_string(&f.sanitized())).transpose()?,
                             if outgoing { "sent" } else { "received" },
                             s(ev, "message_id")?,
                             p.ts.min(now + 300_000),
@@ -406,8 +406,7 @@ impl Inner {
                     )?;
                     if inserted > 0 {
                         let pv = match &p.file {
-                            Some(f) if f.thumb.is_some() && f.mime.starts_with("image/") => "🖼 Фото".to_string(),
-                            Some(f) => format!("📎 {}", f.name),
+                            Some(f) => f.preview(),
                             None if p.kind == "poll" => format!("📊 {}", p.text.as_deref().unwrap_or("")),
                             None => preview(p.text.as_deref().unwrap_or("")),
                         };

@@ -152,6 +152,13 @@ fun isImage(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?
 
 fun isVideo(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?.optBoolean("video") == true
 
+fun isVoice(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?.optBoolean("voice") == true
+
+fun isCircle(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?.optBoolean("circle") == true
+
+/** The recognized text of a voice message or circle; null while it has none, "" when no speech was found. */
+fun transcriptOf(m: JSONObject): String? = m.optJSONObject("file")?.takeIf { it.has("transcript") && !it.isNull("transcript") }?.optString("transcript")
+
 private fun votesText(n: Int): String {
     val m10 = n % 10
     val m100 = n % 100
@@ -325,6 +332,25 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val edit = ThemedEdit(ctx)
     private val send = IconButton(ctx, R.drawable.ic_send, "Отправить", 44, iconRole = Theme.Role.ON_ACCENT)
     private val sendSlot = FrameLayout(ctx)
+    // Voice messages and circles: two buttons where the arrow will be, and the bar that replaces the field while recording.
+    private val mic = IconButton(ctx, R.drawable.ic_mic, "Записать голосовое сообщение")
+    private val circleBtn = IconButton(ctx, R.drawable.ic_record, "Записать кружок")
+    private val recBar = LinearLayout(ctx)
+    private val recTime = ctx.label("0:00", 16f, 600)
+    private val recDot = View(ctx)
+    private val recWave = WaveView(ctx)
+    private var recorder: VoiceRecorder? = null
+    private val recLevels = ArrayList<Byte>()
+    private var recordHidden: List<View> = emptyList()
+    private val recTick = object : Runnable {
+        override fun run() {
+            val r = recorder ?: return
+            recTime.text = Videos.clock(r.elapsedMs)
+            recDot.alpha = if ((r.elapsedMs / 500) % 2 == 0L) 1f else 0.35f
+            if (r.elapsedMs >= 10 * 60 * 1000) return finishVoice()
+            root.postDelayed(this, 100)
+        }
+    }
     private var sendShown = 0f
     private val sendSpring = Spring(0.38f, 0.62f, 0.001f) { sendShown = it; applySend() }
     private var blocked = false
@@ -683,7 +709,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         val f = m.optJSONObject("file")
         val s = when {
             m.str("kind") == "poll" -> "Опрос: $t"
-            f != null -> (if (isImage(m)) "Фото" else if (isVideo(m)) "Видео" else "Файл " + f.str("name")) + if (t.isEmpty()) "" else ": $t"
+            f != null -> (if (isImage(m)) "Фото" else if (isVideo(m)) "Видео" else if (isVoice(m)) "Голосовое сообщение" else if (isCircle(m)) "Видеосообщение" else "Файл " + f.str("name")) + if (t.isEmpty()) "" else ": $t"
             else -> t
         }
         return if (s.length > 120) s.take(119) + "…" else s
@@ -1010,6 +1036,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private val text = ctx.label("", 15.5f)
         private val emojiRow = LinearLayout(ctx)
         private val photo = PosterView(ctx)
+        private val voice = LinearLayout(ctx)
+        private val playBtn = ImageView(ctx)
+        private val wave = WaveView(ctx)
+        private val voiceTime = ctx.label("", 12f)
+        private val speedChip = ctx.label("1×", 12f, 600)
+        private val circle = CircleView(ctx)
+        private val transBtn = ctx.label("Расшифровать", 13.5f, 600)
+        private val transText = ctx.label("", 14.5f)
         private val poll = LinearLayout(ctx)
         private val pollQuestion = ctx.label("", 16f, 700)
         private val pollInfo = ctx.label("", 12.5f)
@@ -1098,6 +1132,42 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             fileIcon.setOnClickListener { openFile(m) }
             fileAction.setOnClickListener { openFile(m) }
             bubble.addView(photo, LayoutParams(dp(200), dp(150)))
+            // Voice message: a round play button, the wave with the time under it and, while it plays, the speed.
+            voice.orientation = HORIZONTAL
+            voice.gravity = Gravity.CENTER_VERTICAL
+            playBtn.setPadding(dp(8), dp(8), dp(8), dp(8))
+            playBtn.setImageResource(R.drawable.ic_play)
+            playBtn.isClickable = true
+            playBtn.contentDescription = "Воспроизвести"
+            voice.addView(playBtn, LayoutParams(dp(40), dp(40)))
+            val vcol = LinearLayout(ctx).apply { orientation = VERTICAL }
+            vcol.addView(wave, LayoutParams(MATCH, dp(28)))
+            vcol.addView(voiceTime, LayoutParams(WRAP, WRAP).apply { topMargin = dp(2) })
+            val waveWidth = (((ctx.resources.displayMetrics.widthPixels * 0.78f).toInt() - dp(29 + 38 + 40 + 10 + 52)).coerceIn(dp(96), dp(176)))
+            voice.addView(vcol, LayoutParams(waveWidth, WRAP).apply { marginStart = dp(10) })
+            speedChip.gravity = Gravity.CENTER
+            speedChip.setPadding(dp(8), 0, dp(8), 0)
+            speedChip.isClickable = true
+            voice.addView(speedChip, LayoutParams(WRAP, dp(24)).apply { marginStart = dp(8) })
+            bubble.addView(voice, LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(2) })
+            playBtn.setOnClickListener { Playback.toggle(ctx, m, null) { act.toast(it) } }
+            wave.onSeek = { f -> if (Playback.stateOf(m.str("id")) == Playback.State.IDLE) Playback.toggle(ctx, m, null) { act.toast(it) } else Playback.seek(m.str("id"), f) }
+            wave.setOnLongClickListener { menu(m, bubble); true }
+            speedChip.setOnClickListener { Playback.cycleSpeed(ctx) }
+            // Circle: the picture of the video in a round; a tap plays it right here.
+            circle.setOnClickListener { Playback.toggle(ctx, m, circle) { act.toast(it) } }
+            circle.setOnLongClickListener { menu(m, bubble); true }
+            bubble.addView(circle, LayoutParams(dp(220), dp(220)))
+            transBtn.minHeight = dp(40)
+            transBtn.gravity = Gravity.CENTER_VERTICAL
+            transBtn.compoundDrawablePadding = dp(8)
+            transBtn.isClickable = true
+            transBtn.setOnClickListener { Transcription.request(act, m) }
+            bubble.addView(transBtn, LayoutParams(WRAP, WRAP))
+            transText.setLineSpacing(0f, 1.2f)
+            transText.setOnClickListener { tap { menu(m, bubble) } }
+            transText.setOnLongClickListener { menu(m, bubble); true }
+            bubble.addView(transText, LayoutParams(WRAP, WRAP).apply { topMargin = dp(2) })
             poll.orientation = VERTICAL
             poll.minimumWidth = dp(240)
             poll.addView(pollQuestion)
@@ -1108,6 +1178,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             // Bubbles take at most ~78% of the screen width.
             val maxText = (ctx.resources.displayMetrics.widthPixels * 0.78f).toInt() - dp(29 + 38)
             text.maxWidth = maxText
+            transText.maxWidth = maxText
             quoteText.maxWidth = maxText
             fwd.maxWidth = maxText
             text.setTextIsSelectable(false)
@@ -1199,11 +1270,41 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val f = m.optJSONObject("file")
             val video = isVideo(m)
             val image = isImage(m) || video
-            file.visibility = if (f != null && !image) VISIBLE else GONE
+            val voiceMsg = isVoice(m)
+            val circleMsg = isCircle(m)
+            val tight = image || circleMsg
+            file.visibility = if (f != null && !image && !voiceMsg && !circleMsg) VISIBLE else GONE
             photo.visibility = if (image) VISIBLE else GONE
-            bubble.setPadding(if (image) dp(4) else dp(15), if (image) dp(4) else dp(9), if (image) dp(4) else dp(14), dp(7))
-            text.setPadding(if (image) dp(11) else 0, if (image) dp(6) else 0, if (image) dp(10) else 0, 0)
-            meta.setPadding(0, 0, if (image) dp(10) else 0, 0)
+            voice.visibility = if (voiceMsg) VISIBLE else GONE
+            circle.visibility = if (circleMsg) VISIBLE else GONE
+            bubble.setPadding(if (tight) dp(4) else dp(15), if (tight) dp(4) else dp(9), if (tight) dp(4) else dp(14), dp(7))
+            text.setPadding(if (tight) dp(11) else 0, if (tight) dp(6) else 0, if (tight) dp(10) else 0, 0)
+            meta.setPadding(0, 0, if (tight) dp(10) else 0, 0)
+            transBtn.setPadding(if (tight) dp(11) else 0, 0, 0, 0)
+            transText.setPadding(if (tight) dp(11) else 0, 0, if (tight) dp(10) else 0, 0)
+            val strong = if (out) Theme.p.onAccent else Theme.p.accent
+            if (voiceMsg && f != null) {
+                wave.bars = runCatching { android.util.Base64.decode(f.str("wave"), android.util.Base64.DEFAULT) }.getOrDefault(ByteArray(0))
+                wave.played = strong
+                wave.rest = muted
+                playBtn.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(strong) }
+                playBtn.imageTintList = android.content.res.ColorStateList.valueOf(if (out) Theme.p.accent else Theme.p.onAccent)
+                voiceTime.setTextColor(muted)
+                speedChip.setTextColor(strong)
+                speedChip.background = GradientDrawable().apply { cornerRadius = ctx.dpf(12); setColor((strong and 0x00FFFFFF) or (if (out) 0x3C000000 else 0x22000000)) }
+            }
+            if (circleMsg && f != null) {
+                circle.boundId = m.str("id")
+                circle.ringColor = strong
+                circle.lengthMs = f.optLong("duration")
+                circle.setPoster(Photos.thumb(m))
+            }
+            if (voiceMsg || circleMsg) {
+                transBtn.setTextColor(strong)
+                transBtn.setCompoundDrawablesRelativeWithIntrinsicBounds(ctx.getDrawable(R.drawable.ic_transcript)?.mutate()?.also { it.setTint(strong); it.setBounds(0, 0, dp(18), dp(18)) }, null, null, null)
+                transText.setTextColor(fg)
+            }
+            bindPlayback()
             if (image && f != null) {
                 val maxW = minOf(text.maxWidth + dp(29), dp(300)).toFloat()
                 var iw = f.optDouble("width", 0.0).toFloat()
@@ -1299,7 +1400,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             retry.visibility = if (out && st == "failed") VISIBLE else GONE
             bubble.contentDescription = buildString {
                 append(m.str("sender_name")).append(", ").append(time.text).append(": ")
-                if (video) append("видео. ") else if (image) append("фото. ") else if (f != null) append("файл ").append(f.str("name")).append(". ")
+                if (video) append("видео. ") else if (image) append("фото. ")
+                else if (voiceMsg) append("голосовое сообщение, ").append(Videos.clock(f?.optLong("duration") ?: 0)).append(". ")
+                else if (circleMsg) append("видеосообщение, ").append(Videos.clock(f?.optLong("duration") ?: 0)).append(". ")
+                else if (f != null) append("файл ").append(f.str("name")).append(". ")
+                transcriptOf(m)?.takeIf { it.isNotEmpty() }?.let { append("Текст: ").append(it).append(". ") }
                 if (kind == "poll") append("опрос. ")
                 append(body)
                 if (out && statusText(m).isNotEmpty()) append(". ").append(statusText(m))
@@ -1307,6 +1412,64 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 for (r in m.optJSONArray("reactions")?.objects() ?: emptyList()) append(", ").append(r.str("emoji")).append(" ").append(r.optInt("count"))
             }
             invalidate()
+        }
+
+        private val onPlayback: () -> Unit = { bindPlayback() }
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            Playback.addListener(onPlayback)
+            Transcription.addListener(onPlayback)
+            bindPlayback()
+        }
+
+        override fun onDetachedFromWindow() {
+            Playback.removeListener(onPlayback)
+            Transcription.removeListener(onPlayback)
+            // A circle plays on this view's texture: leaving the screen ends it.
+            if (isCircle(m) && Playback.stateOf(m.str("id")) != Playback.State.IDLE) Playback.stop()
+            super.onDetachedFromWindow()
+        }
+
+        /** What changes while a message plays or is turned into text: the button, the wave, the time, the status line. */
+        private fun bindPlayback() {
+            val id = m.str("id")
+            val f = m.optJSONObject("file") ?: return
+            val st = Playback.stateOf(id)
+            val active = st == Playback.State.PLAYING || st == Playback.State.PAUSED
+            if (isVoice(m)) {
+                playBtn.setImageResource(if (st == Playback.State.PLAYING) R.drawable.ic_pause else R.drawable.ic_play)
+                playBtn.contentDescription = if (st == Playback.State.PLAYING) "Пауза" else "Воспроизвести"
+                wave.progress = Playback.progressOf(id)
+                val total = f.optLong("duration")
+                voiceTime.text = if (active) Videos.clock(Playback.positionMs.toLong()) + " / " + Videos.clock(total) else Videos.clock(total)
+                speedChip.visibility = if (active) VISIBLE else INVISIBLE
+                speedChip.text = when (Playback.speed) { 1.5f -> "1,5×"; 2f -> "2×"; else -> "1×" }
+                speedChip.contentDescription = "Скорость " + speedChip.text
+            } else if (isCircle(m)) {
+                circle.boundId = id
+                circle.state = st
+                circle.progress = Playback.progressOf(id)
+                circle.positionMs = if (active) Playback.positionMs.toLong() else 0
+                circle.lengthMs = f.optLong("duration")
+                circle.contentDescription = "Видеосообщение, " + Videos.clock(f.optLong("duration"))
+            }
+            if (isVoice(m) || isCircle(m)) {
+                val text = transcriptOf(m)
+                val status = Transcription.statusOf(id)
+                transText.visibility = if (text != null) VISIBLE else GONE
+                transText.text = if (text.isNullOrEmpty()) "Речь не найдена" else text
+                transBtn.visibility = if (text == null) VISIBLE else GONE
+                transBtn.text = when {
+                    status?.phase == Transcription.Phase.MODEL -> "Скачиваем модель… ${status.percent}%"
+                    status?.phase == Transcription.Phase.WORKING -> "Расшифровываем…"
+                    else -> "Расшифровать"
+                }
+                transBtn.isEnabled = status == null
+            } else {
+                transText.visibility = GONE
+                transBtn.visibility = GONE
+            }
         }
 
         private fun bindEmojiRow(sheets: List<AnimatedEmoji.Sheet>?) {
@@ -1708,10 +1871,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             }
         }
         if (postable && !conv.optBoolean("saved")) pm.add("В избранное") { savedCopy(m) }
-        if (!gone && m.optBoolean("outgoing") && m.str("status") in setOf("sent", "delivered", "read") && m.str("kind") in setOf("text", "file"))
+        if (!gone && m.optBoolean("outgoing") && m.str("status") in setOf("sent", "delivered", "read") && m.str("kind") in setOf("text", "file") && !isVoice(m) && !isCircle(m))
             pm.add("Изменить") { setEdit(m) }
         if (m.str("kind") == "poll" && m.optBoolean("outgoing") && m.optJSONObject("poll")?.optBoolean("closed") != true) pm.add("Завершить опрос") {
             CoreClient.call("close_poll", JSONObject().put("message_id", m.str("id"))) { _, e -> if (e != null) act.toast(e.message) }
+        }
+        if (isVoice(m) || isCircle(m)) {
+            if (transcriptOf(m) != null) pm.add("Убрать расшифровку") { Transcription.clear(m.str("id")) }
+            else pm.add("Расшифровать") { Transcription.request(act, m) }
         }
         if (m.str("kind") == "file") {
             pm.add("Открыть файл") { openFile(m) }
@@ -1878,6 +2045,26 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         val emoji = IconButton(ctx, R.drawable.ic_smile, "Выбрать эмодзи")
         emoji.setOnClickListener { Dialogs.emoji(act) { insert(it) } }
         capsule.addView(emoji)
+        circleBtn.setOnClickListener { startCircle() }
+        mic.setOnClickListener { startVoice() }
+        capsule.addView(circleBtn)
+        capsule.addView(mic)
+        recBar.gravity = Gravity.CENTER_VERTICAL
+        recBar.visibility = View.GONE
+        val trash = IconButton(ctx, R.drawable.ic_trash, "Удалить запись", 48).apply { setOnClickListener { cancelVoice() } }
+        recBar.addView(trash)
+        recDot.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFE04040.toInt()) }
+        recBar.addView(recDot, lp(dp(10), dp(10)).apply { marginStart = dp(4) })
+        recBar.addView(recTime, lp(WRAP, WRAP).apply { marginStart = dp(10) })
+        recWave.played = Theme.p.accent
+        recWave.rest = Theme.p.accent
+        recBar.addView(recWave, lp(0, dp(28), 1f).apply { setMargins(dp(12), 0, dp(8), 0) })
+        val recSend = IconButton(ctx, R.drawable.ic_send, "Отправить запись", 44, iconRole = Theme.Role.ON_ACCENT)
+        recSend.background = GlassDrawable(ctx, GlassDrawable.Kind.ACTION, ctx.dpf(22))
+        recSend.setOnClickListener { finishVoice() }
+        recBar.addView(recSend, lp(dp(44), dp(44)).apply { setMargins(0, dp(2), dp(2), dp(2)) })
+        capsule.addView(recBar, lp(0, dp(48), 1f))
+        recordHidden = listOf(attach, edit, emoji, circleBtn, mic, sendSlot)
         send.background = GlassDrawable(ctx, GlassDrawable.Kind.ACTION, ctx.dpf(22))
         send.setOnClickListener { sendText() }
         sendSlot.clipChildren = false
@@ -1911,6 +2098,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     private fun applySend() {
+        val idle = sendShown <= 0.02f && editing == null && recorder == null
+        mic.visibility = if (idle) View.VISIBLE else View.GONE
+        circleBtn.visibility = if (idle) View.VISIBLE else View.GONE
+        mic.isEnabled = !blocked
+        circleBtn.isEnabled = !blocked
+        mic.alpha = if (blocked) 0.5f else 1f
+        circleBtn.alpha = if (blocked) 0.5f else 1f
+        if (recorder != null) return
         val open = sendShown.coerceIn(0f, 1f)
         val lpSlot = sendSlot.layoutParams
         lpSlot.width = (dp(48) * open).toInt()
@@ -1978,6 +2173,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val t = when {
                 isImage(m) -> "Фото"
                 isVideo(m) -> "Видео"
+                isVoice(m) -> "Голосовое сообщение"
+                isCircle(m) -> "Видеосообщение"
                 m.str("kind") == "file" -> "Файл"
                 m.str("kind") == "poll" -> "Опрос: " + m.str("text")
                 else -> m.str("text").replace('\n', ' ')
@@ -1992,6 +2189,106 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             }
         }
         expand(replyBar, m != null)
+    }
+
+    // ---- voice messages and circles ----
+
+    private fun startVoice() {
+        if (blocked || editing != null || recorder != null) return
+        act.withPermission(android.Manifest.permission.RECORD_AUDIO) { granted ->
+            if (!granted) return@withPermission act.toast("Для записи нужен доступ к микрофону")
+            if (recorder != null) return@withPermission
+            hideKeyboard()
+            val r = VoiceRecorder(ctx)
+            if (!r.start()) return@withPermission act.toast("Не удалось начать запись")
+            recorder = r
+            recLevels.clear()
+            r.onLevel = { v ->
+                recLevels.add((v * 255).toInt().coerceIn(14, 255).toByte())
+                if (recLevels.size > 90) recLevels.removeAt(0)
+                recWave.bars = recLevels.toByteArray()
+                recWave.progress = 1f
+            }
+            showRecorder(true)
+            root.removeCallbacks(recTick)
+            root.post(recTick)
+        }
+    }
+
+    private fun showRecorder(on: Boolean) {
+        for (v in recordHidden) v.visibility = if (on) View.GONE else View.VISIBLE
+        recBar.visibility = if (on) View.VISIBLE else View.GONE
+        recTime.text = "0:00"
+        recWave.bars = ByteArray(0)
+        recDot.alpha = 1f
+        if (!on) {
+            sendSlot.visibility = View.VISIBLE
+            applySend()
+        }
+    }
+
+    private fun finishVoice() {
+        val r = recorder ?: return
+        root.removeCallbacks(recTick)
+        val res = r.stop()
+        recorder = null
+        showRecorder(false)
+        if (res == null) return act.toast("Не удалось сохранить запись")
+        if (res.durationMs < 600) {
+            res.file.delete()
+            return act.toast("Сообщение слишком короткое")
+        }
+        sendVoice(res)
+    }
+
+    private fun cancelVoice() {
+        val r = recorder ?: return
+        root.removeCallbacks(recTick)
+        r.cancel()
+        recorder = null
+        showRecorder(false)
+    }
+
+    private fun sendVoice(res: VoiceRecorder.Result) {
+        val p = JSONObject().put("_account_id", accountId).put("conversation_id", conversationId).put("path", res.file.absolutePath)
+            .put("mime", "audio/mp4").put("kind", "voice").put("name", "voice.m4a").put("duration", res.durationMs)
+            .put("wave", android.util.Base64.encodeToString(res.wave, android.util.Base64.NO_WRAP))
+        replyTo?.let { p.put("reply_to", it.str("id")) }
+        setReply(null)
+        CoreClient.call("send_file", p) { _, e ->
+            res.file.delete()
+            if (e != null && accountId == CoreClient.accountId) act.toast(e.message)
+        }
+    }
+
+    private fun startCircle() {
+        if (blocked || editing != null || recorder != null) return
+        if (!conv.optBoolean("can_media", true)) return act.toast("Здесь нельзя отправлять видеосообщения")
+        act.withPermission(android.Manifest.permission.CAMERA) { cam ->
+            if (!cam) return@withPermission act.toast("Для съёмки нужен доступ к камере")
+            act.withPermission(android.Manifest.permission.RECORD_AUDIO) { mic ->
+                if (!mic) return@withPermission act.toast("Для записи нужен доступ к микрофону")
+                hideKeyboard()
+                CircleCamera(act) { file, ms, info -> sendCircle(file, ms, info) }.show()
+            }
+        }
+    }
+
+    private fun sendCircle(file: File, ms: Long, info: VideoInfo?) {
+        if (accountId != CoreClient.accountId) { file.delete(); return }
+        val p = JSONObject().put("_account_id", accountId).put("conversation_id", conversationId).put("path", file.absolutePath)
+            .put("mime", "video/mp4").put("kind", "circle").put("name", "circle.mp4").put("duration", ms)
+        if (info != null) {
+            info.thumb?.let { p.put("thumb", it) }
+            val side = minOf(info.width, info.height)
+            if (side > 0) p.put("width", side).put("height", side)
+        }
+        replyTo?.let { p.put("reply_to", it.str("id")) }
+        setReply(null)
+        CoreClient.call("send_file", p) { _, e ->
+            file.delete()
+            if (e != null && accountId == CoreClient.accountId) act.toast(e.message)
+        }
     }
 
     private fun sendText() {
@@ -2055,8 +2352,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     /** Everything that is about to be sent waits in the attach window: preview, "as a file", caption. */
     private fun attach(picks: List<Pick>, photos: Boolean) {
         if (picks.isEmpty() || composer.visibility != View.VISIBLE) return
-        val big = picks.firstOrNull { it.size > 25L * 1024 * 1024 }
-        if (big != null) return act.toast(if (big.video) "Видео больше 25 МБ: ${big.name}. Обрежьте или сожмите его" else "Файл больше 25 МБ: ${big.name}")
+        // A video is shrunk before it is sent, so it may be big; everything else goes as it is.
+        val sendsAsVideo = { p: Pick -> p.video && (photos || picks.all { it.video }) }
+        val big = picks.firstOrNull { if (sendsAsVideo(it)) it.size > 600L * 1024 * 1024 else it.size > 50L * 1024 * 1024 }
+        if (big != null) return act.toast(if (sendsAsVideo(big)) "Видео больше 600 МБ: ${big.name}. Обрежьте его" else "Файл больше 50 МБ: ${big.name}")
         hideKeyboard()
         // A video picked as a document still goes as a video unless "as a file" is switched on.
         val media = photos || picks.all { it.video }
@@ -2084,15 +2383,44 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val tmp = File.createTempFile("send", ".bin", dir)
             val copied = runCatching { cr.openInputStream(p.uri)!!.use { i -> tmp.outputStream().use { i.copyTo(it) } } }.isSuccess
             val thumb = if (copied && photo && p.image) Photos.makeThumb(tmp.absolutePath) else null
-            val clip = if (copied && photo && p.video) Videos.info(tmp.absolutePath) else null
             act.runOnUiThread {
                 if (!copied) {
                     tmp.delete()
                     return@runOnUiThread act.toast("Не удалось прочитать файл")
                 }
-                dispatchFile(tmp, p.mime, p.name, thumb, caption, clip)
+                if (photo && p.video) return@runOnUiThread shrinkAndSend(tmp, p, caption)
+                dispatchFile(tmp, p.mime, p.name, thumb, caption, null)
             }
         }.start()
+    }
+
+    /** A video sent as video is shrunk to H.264 + AAC when that is needed to fit the limit or to spare the traffic. */
+    private fun shrinkAndSend(tmp: File, p: Pick, caption: String) {
+        var shown = -10
+        VideoCompress.run(ctx, tmp, tmp.parentFile!!, onProgress = { pct ->
+            if (pct - shown >= 10 || pct == 100) {
+                shown = pct
+                act.toast("Сжимаем видео… $pct%")
+            }
+        }) { r ->
+            if (r.error != null) {
+                tmp.delete()
+                return@run act.toast(r.error)
+            }
+            val out = r.file ?: tmp
+            if (out.length() > VideoCompress.LIMIT) {
+                out.delete()
+                tmp.delete()
+                return@run act.toast("Видео больше 50 МБ, а сжать его не удалось. Обрежьте его")
+            }
+            if (r.file != null) tmp.delete()
+            val name = if (r.file != null) p.name.substringBeforeLast('.', p.name) + ".mp4" else p.name
+            val mime = if (r.file != null) "video/mp4" else p.mime
+            Thread {
+                val clip = Videos.info(out.absolutePath)
+                act.runOnUiThread { dispatchFile(out, mime, name, null, caption, clip) }
+            }.start()
+        }
     }
 
     /** Hands a prepared file to the core and removes it afterwards. */
@@ -2153,6 +2481,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             toggleSearch()
             return true
         }
+        if (recorder != null) {
+            cancelVoice()
+            return true
+        }
         return false
     }
 
@@ -2171,6 +2503,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         root.removeCallbacks(presenceTick)
         if (Notifier.visibleConversation == conversationId) Notifier.visibleConversation = null
         hideKeyboard()
+        cancelVoice()
+        Playback.stop()
         saveDraft()
     }
 

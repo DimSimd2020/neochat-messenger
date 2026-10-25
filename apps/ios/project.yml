@@ -12,8 +12,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.6.9.12"
-    CURRENT_PROJECT_VERSION: "36"
+    MARKETING_VERSION: "0.7.0"
+    CURRENT_PROJECT_VERSION: "37"
     TARGETED_DEVICE_FAMILY: "1"
     ENABLE_BITCODE: NO
 targets:
@@ -41,6 +41,10 @@ targets:
         CODE_SIGN_IDENTITY: ""
     dependencies:
       - package: WebRTC
+      # Speech recognition of voice messages on the phone: sherpa-onnx with onnxruntime inside (Apache-2.0 / MIT);
+      # fetched by scripts/fetch-sherpa.sh ios.
+      - framework: Vendor/SherpaOnnxC.xcframework
+        embed: true
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
       - sdk: QuickLook.framework

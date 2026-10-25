@@ -64,6 +64,9 @@ private:
 // Geometry of one message row, shared by painting and hit testing.
 struct MessageLayout {
     QRectF bubble, name, avatar, text, meta, reply, fwd, file, download, retry, image, pollInfo, call;
+    // Voice messages and circles: the row, its play button, wave, speed chip and duration; the round picture;
+    // the "transcribe" action and the recognized text under them.
+    QRectF voice, play, wave, speed, duration, circle, transBtn, transcript;
     QList<QRectF> options; // poll answers
     QList<QRectF> reacts;  // reaction chips
     bool big = false;      // emoji-only message without a bubble

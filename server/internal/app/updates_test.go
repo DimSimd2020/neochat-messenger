@@ -65,3 +65,28 @@ func TestAlphaBuildsAreOnlyForTesters(t *testing.T) {
 		}
 	}
 }
+
+func TestModelFilesArePublicAndNamesAreChecked(t *testing.T) {
+	s, ts := testServer(t)
+	dir := filepath.Join(s.cfg.DataDir, "models")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "stt-ru-test-tokens.txt"), []byte("tokens"), 0o644)
+	os.WriteFile(filepath.Join(s.cfg.DataDir, "secret.txt"), []byte("secret"), 0o644)
+	get := func(path string) (int, string) {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+	if st, body := get("/v1/app/models/stt-ru-test-tokens.txt"); st != 200 || body != "tokens" {
+		t.Fatalf("model file: %d %q", st, body)
+	}
+	for _, name := range []string{"stt-ru-test-missing.txt", "..%2Fsecret.txt", "secret.txt", "stt-.hidden", "stt-x.exe"} {
+		if st, _ := get("/v1/app/models/" + name); st != 404 {
+			t.Fatalf("%s: %d", name, st)
+		}
+	}
+}
