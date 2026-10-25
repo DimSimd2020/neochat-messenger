@@ -94,7 +94,7 @@ jobs:
 
       # sherpa-onnx (Apache-2.0) recognizes speech of voice messages on the phone; pinned by hash.
       - name: Speech recognition libraries
-        run: scripts/fetch-sherpa.sh android
+        run: bash scripts/fetch-sherpa.sh android
 
       - name: Firebase configuration
         env:

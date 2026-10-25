@@ -196,7 +196,7 @@ jobs:
       # sherpa-onnx (Apache-2.0) recognizes speech of voice messages on the computer; pinned by hash.
       - name: Speech recognition runtime
         shell: bash
-        run: scripts/fetch-sherpa.sh windows
+        run: bash scripts/fetch-sherpa.sh windows
 
       - name: Desktop
         shell: cmd
