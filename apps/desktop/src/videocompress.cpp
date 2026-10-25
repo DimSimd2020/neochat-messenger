@@ -84,7 +84,7 @@ QSize fitted(const Probe &p, const Rung &r)
     return QSize(std::max(2, int(p.width * k) & ~1), std::max(2, int(p.height * k) & ~1));
 }
 
-bool sampleToImage(IMFSample *sample, int w, int h, QImage *out)
+bool sampleToImage(IMFSample *sample, int w, int h, bool bottomUp, QImage *out)
 {
     ComPtr<IMFMediaBuffer> buffer;
     if (FAILED(sample->ConvertToContiguousBuffer(&buffer)))
@@ -105,7 +105,7 @@ bool sampleToImage(IMFSample *sample, int w, int h, QImage *out)
         if (FAILED(buffer->Lock(&data, nullptr, &len)) || len < DWORD(w) * DWORD(h) * 4)
             return false;
         for (int r = 0; r < h; ++r)
-            memcpy(img.scanLine(r), data + size_t(h - 1 - r) * w * 4, size_t(w) * 4);
+            memcpy(img.scanLine(r), data + size_t(bottomUp ? h - 1 - r : r) * w * 4, size_t(w) * 4);
         buffer->Unlock();
     }
     *out = img;
@@ -157,6 +157,8 @@ QString transcode(const std::wstring &in, const std::wstring &out, const Probe &
     if (FAILED(video->GetCurrentMediaType(vs, &cur)))
         return QStringLiteral("Windows не умеет читать это видео");
     MFGetAttributeSize(cur.Get(), MF_MT_FRAME_SIZE, &sw, &sh);
+    // A negative default stride marks a bottom-up bitmap; the reader normally gives top-down rows.
+    const bool bottomUp = LONG(MFGetAttributeUINT32(cur.Get(), MF_MT_DEFAULT_STRIDE, 0)) < 0;
 
     ComPtr<IMFSourceReader> audio;
     DWORD audioStream = (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM;
@@ -268,7 +270,7 @@ QString transcode(const std::wstring &in, const std::wstring &out, const Probe &
         if (t - lastKept < minGap)
             continue;
         QImage img;
-        if (!sampleToImage(sample.Get(), int(sw), int(sh), &img))
+        if (!sampleToImage(sample.Get(), int(sw), int(sh), bottomUp, &img))
             continue;
         if (p.rotation == 90 || p.rotation == 180 || p.rotation == 270)
             img = img.transformed(QTransform().rotate(p.rotation));
