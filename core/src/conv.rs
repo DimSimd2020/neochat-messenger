@@ -420,7 +420,7 @@ impl Inner {
                     peer_verified = v == 1;
                 }
                 members_out.push(json!({"user_id": m, "username": u, "display_name": display_name(&f, &l, &u), "verified": v == 1, "key_changed": k == 1, "me": false, "bio": bio, "name_color": color, "avatar_path": self.avatar_path(&avatar),
-                    "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!("")), "muted_until": muted.get(m).cloned().unwrap_or(json!(0))}));
+                    "role": role_of(m), "tag": tags.get(m).cloned().unwrap_or(json!("")), "muted_until": muted.get(m).cloned().unwrap_or(json!(0)), "presence": self.cached_presence(m)}));
             }
         }
         let display = if kind == "direct" {

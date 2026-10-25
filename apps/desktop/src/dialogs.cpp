@@ -149,6 +149,7 @@ public:
         connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     }
     bool multi = false;
+    bool online = false;
     QString warning;
     QString avatar;
     // The colour the person chose for their name, as '#rrggbb'.
@@ -169,6 +170,11 @@ protected:
             p.drawRoundedRect(rect(), 12, 12);
         }
         ui::paintAvatar(&p, QRectF(8, (height() - 40) / 2.0, 40, 40), m_name, m_seed, avatar);
+        if (online) {
+            p.setPen(QPen(c.surface, 2.5));
+            p.setBrush(QColor("#3CC46B"));
+            p.drawEllipse(QRectF(8 + 40 - 11, (height() - 40) / 2.0 + 40 - 11, 13, 13));
+        }
         const qreal right = multi ? width() - 44 : width() - 10;
         p.setFont(Theme::instance()->font(15, QFont::DemiBold));
         const QColor chosen = profilestyle::nameOn(nameHex, c.surface);
@@ -1445,19 +1451,27 @@ static void groupInfo(const DialogHost &h, const QString &cid)
                 const bool muted = m.value("muted_until").toDouble() != 0;
                 if (muted)
                     sub += QStringLiteral(" · не может писать");
+                const QJsonObject presence = m.value("presence").toObject();
+                if (!m.value("me").toBool() && !presence.value("text").toString().isEmpty())
+                    sub += QStringLiteral(" · ") + presence.value("text").toString();
                 auto *row = new PersonRow(m.value("display_name").toString(), sub, uid);
+                row->online = presence.value("online").toBool();
                 row->avatar = m.value("avatar_path").toString();
                 row->nameHex = m.value("name_color").toString();
                 if (m.value("key_changed").toBool())
                     row->warning = QStringLiteral("Ключ изменился — сверьте код в личном чате");
                 list->add(row);
-                if (!admin || !active)
+                const bool me = m.value("me").toBool();
+                // A plain member goes straight to the profile; an admin's menu has it as the first entry.
+                if (!admin || !active) {
+                    QObject::connect(row, &QAbstractButton::clicked, sheet, [=] { personProfile(h, me ? QString() : uid); });
                     continue;
+                }
                 const QString name = m.value("display_name").toString();
                 const QString tag = m.value("tag").toString();
-                const bool me = m.value("me").toBool();
                 QObject::connect(row, &QAbstractButton::clicked, sheet, [=] {
                     auto *menu = new PopupMenu(row);
+                    menu->addAction(QStringLiteral("Профиль"), sheet, [=] { personProfile(h, me ? QString() : uid); });
                     menu->addAction(QStringLiteral("Тег…"), sheet, [=] {
                         auto *ts = new Sheet(h.host, QStringLiteral("Тег: ") + name, 380);
                         auto *field = new ui::TextField(QStringLiteral("Например, «дизайн» или «модератор»"));
