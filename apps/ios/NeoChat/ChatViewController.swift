@@ -2164,6 +2164,9 @@ final class BubbleCell: UITableViewCell {
     /// What changes while a message plays or is turned into text: the button, the wave, the time, the status line.
     private func bindPlayback() {
         let voiceMsg = isVoice(bound), circleMsg = isCircle(bound)
+        // A reused cell may still show the button of a voice message.
+        transText.isHidden = true
+        transButton.isHidden = true
         guard voiceMsg || circleMsg else { return }
         let id = boundId
         let total = bound.obj("file")?.int64("duration") ?? 0
