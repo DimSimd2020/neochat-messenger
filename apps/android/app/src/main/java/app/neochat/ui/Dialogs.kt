@@ -58,13 +58,17 @@ object Dialogs {
     }
 
     /**
-     * Once after the first start: calls in the background need the battery limit lifted, and on
+     * Once, after the first start ever: calls in the background need the battery limit lifted, and on
      * Android 14 a ringing call needs its own permission to appear on a locked screen.
      * Settings keeps both switches for later.
      */
     fun callReadiness(act: MainActivity) {
         if (act.readinessPrompted) return
         act.readinessPrompted = true
+        // Asked once for good: it must not come back after every update and restart. Settings keeps both switches.
+        val prefs = Prefs.of(act)
+        if (prefs.getBoolean("call_readiness_asked", false)) return
+        prefs.edit().putBoolean("call_readiness_asked", true).apply()
         if (android.os.Build.VERSION.SDK_INT >= 33) act.withPermission(android.Manifest.permission.POST_NOTIFICATIONS) { callReadinessSettings(act) }
         else callReadinessSettings(act)
     }
