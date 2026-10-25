@@ -1434,6 +1434,12 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         /** What changes while a message plays or is turned into text: the button, the wave, the time, the status line. */
         private fun bindPlayback() {
             val id = m.str("id")
+            // The button is built visible: every other message must hide it, including text without a file.
+            if (!isVoice(m) && !isCircle(m)) {
+                transText.visibility = GONE
+                transBtn.visibility = GONE
+                return
+            }
             val f = m.optJSONObject("file") ?: return
             val st = Playback.stateOf(id)
             val active = st == Playback.State.PLAYING || st == Playback.State.PAUSED
@@ -1466,9 +1472,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                     else -> "Расшифровать"
                 }
                 transBtn.isEnabled = status == null
-            } else {
-                transText.visibility = GONE
-                transBtn.visibility = GONE
             }
         }
 
