@@ -26,7 +26,9 @@ enum Speech {
         let encoder = strdup(modelDir + "/encoder.int8.onnx"), decoder = strdup(modelDir + "/decoder.onnx")
         let joiner = strdup(modelDir + "/joiner.int8.onnx"), tokens = strdup(modelDir + "/tokens.txt")
         let provider = strdup("cpu"), method = strdup("greedy_search")
-        defer { [encoder, decoder, joiner, tokens, provider, method].forEach { free($0) } }
+        defer {
+            for p in [encoder, decoder, joiner, tokens, provider, method] as [UnsafeMutablePointer<CChar>?] { free(p) }
+        }
         var config = SherpaOnnxOfflineRecognizerConfig()
         config.feat_config.sample_rate = Int32(rate)
         config.feat_config.feature_dim = 80
