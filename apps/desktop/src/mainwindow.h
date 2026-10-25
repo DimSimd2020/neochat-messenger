@@ -60,6 +60,8 @@ private:
     void attachDialog(const QStringList &paths, bool photos);
     void sendFiles(const QStringList &paths, bool photos, const QString &caption = {});
     void sendNextFile();
+    void sendVoice(const QString &path, qint64 durationMs, const QByteArray &wave, const QString &replyTo);
+    void sendCircle(const QString &path, qint64 durationMs, const QImage &poster);
     void markRead();
     void toast(const QString &text);
     void notify(const QJsonObject &ev);

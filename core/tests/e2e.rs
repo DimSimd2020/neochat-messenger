@@ -878,8 +878,8 @@ fn video_keeps_poster_and_length() {
     // Sent "as a file", a video has neither poster nor length and stays an ordinary file.
     let plain = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "video/mp4", "name": "plain.mp4"}));
     assert_eq!(plain["file"]["video"], false, "{plain:?}");
-    // A duration without a video type is dropped.
-    let other = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "audio/mpeg", "duration": 5000}));
+    // A duration without a video or audio type is dropped.
+    let other = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "application/zip", "duration": 5000}));
     assert!(other["file"]["duration"].is_null() && other["file"]["video"] == false, "{other:?}");
     alice.sync();
     bob.sync();
@@ -895,6 +895,101 @@ fn video_keeps_poster_and_length() {
     let chats = alice.call("list_conversations", json!({}));
     assert!(chats.as_array().unwrap().iter().any(|c| c["id"] == cid && c["last_preview"].as_str().unwrap_or("").starts_with("📎")), "{chats:?}");
     let dl = bob.call("download_file", json!({"message_id": m["id"]}));
+    assert_eq!(std::fs::read(dl["path"].as_str().unwrap()).unwrap(), data);
+}
+
+#[test]
+fn files_up_to_50_mib_travel() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let (alice, _) = register(&e, &aname);
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let contact = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": contact["user_id"]}))["id"].as_str().unwrap().to_string();
+    bob.call("resolve_contact", json!({"username": aname}));
+    bob.call("open_direct", json!({"user_id": uid(&alice)}));
+
+    // Above the old 25 MiB limit, below the new 50 MiB one.
+    let src = std::env::temp_dir().join(format!("nc-e2e-{}.bin", uuid::Uuid::new_v4()));
+    let data: Vec<u8> = (0..(40u32 << 20)).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+    alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "application/octet-stream", "name": "big.bin"}));
+    // One byte over the limit is refused before anything is encrypted.
+    let over = std::env::temp_dir().join(format!("nc-e2e-{}.bin", uuid::Uuid::new_v4()));
+    std::fs::File::create(&over).unwrap().set_len((50 << 20) + 1).unwrap();
+    assert!(alice.try_call("send_file", json!({"conversation_id": cid, "path": over.to_string_lossy(), "mime": "application/octet-stream"})).is_err());
+    alice.sync();
+    bob.sync();
+    let m = bob.messages(&cid).into_iter().find(|m| m["file"]["name"] == "big.bin").expect("big file missing");
+    let dl = bob.call("download_file", json!({"message_id": m["id"]}));
+    assert!(std::fs::read(dl["path"].as_str().unwrap()).unwrap() == data);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&over);
+}
+
+#[test]
+fn voice_and_circle_messages() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let (alice, _) = register(&e, &aname);
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let contact = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": contact["user_id"]}))["id"].as_str().unwrap().to_string();
+    bob.call("resolve_contact", json!({"username": aname}));
+    bob.call("open_direct", json!({"user_id": uid(&alice)}));
+
+    let src = std::env::temp_dir().join(format!("nc-e2e-{}.m4a", uuid::Uuid::new_v4()));
+    let data: Vec<u8> = (0..40_000u32).map(|i| (i % 241) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+    let wave = "!!not base64!!";
+    let wave64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1u8, 40, 200, 90, 3]);
+    let voice = alice.call(
+        "send_file",
+        json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "audio/mp4", "name": "voice.m4a", "kind": "voice", "wave": wave64, "duration": 7_300}),
+    );
+    assert_eq!(voice["file"]["voice"], true, "{voice:?}");
+    assert_eq!(voice["file"]["duration"], 7_300);
+    assert_eq!(voice["file"]["wave"], wave64);
+    assert_eq!(voice["file"]["video"], false);
+    // A kind that does not match the type is dropped, and so is a waveform that is not base64.
+    let wrong = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "video/mp4", "kind": "voice", "wave": wave64}));
+    assert!(wrong["file"]["voice"] == false && wrong["file"]["wave"].is_null(), "{wrong:?}");
+    let junk = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "audio/mp4", "kind": "voice", "wave": wave}));
+    assert!(junk["file"]["voice"] == true && junk["file"]["wave"].is_null(), "{junk:?}");
+    let circle = alice.call(
+        "send_file",
+        json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "video/mp4", "name": "circle.mp4", "kind": "circle", "thumb": "AAAA", "width": 480, "height": 480, "duration": 12_000}),
+    );
+    assert_eq!((circle["file"]["circle"].clone(), circle["file"]["video"].clone()), (json!(true), json!(false)), "{circle:?}");
+    alice.sync();
+    bob.sync();
+
+    let got = bob.messages(&cid);
+    let v = got.iter().find(|m| m["file"]["name"] == "voice.m4a").unwrap_or_else(|| panic!("voice missing: {got:?}"));
+    assert_eq!((v["file"]["voice"].clone(), v["file"]["duration"].clone(), v["file"]["wave"].clone()), (json!(true), json!(7_300), json!(wave64)));
+    assert!(v["file"]["transcript"].is_null());
+    let c = got.iter().find(|m| m["file"]["name"] == "circle.mp4").unwrap();
+    assert_eq!((c["file"]["circle"].clone(), c["file"]["video"].clone(), c["file"]["thumb"].clone()), (json!(true), json!(false), json!("AAAA")));
+    let chats = bob.call("list_conversations", json!({}));
+    assert!(chats.as_array().unwrap().iter().any(|x| x["id"] == cid && x["last_preview"] == "📹 Видеосообщение"), "{chats:?}");
+
+    // The recognized text stays on the device that made it.
+    let vid = v["id"].as_str().unwrap().to_string();
+    bob.call("set_transcript", json!({"message_id": vid, "text": "  привет, как дела  "}));
+    let after = bob.messages(&cid);
+    assert_eq!(after.iter().find(|m| m["id"] == vid.as_str()).unwrap()["file"]["transcript"], "привет, как дела");
+    alice.sync();
+    let theirs = alice.messages(&cid);
+    assert!(theirs.iter().find(|m| m["id"] == vid.as_str()).unwrap()["file"]["transcript"].is_null());
+    // Only voice messages and circles can have one; clearing removes it.
+    let plain = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "audio/mp4", "name": "song.m4a"}));
+    assert!(alice.try_call("set_transcript", json!({"message_id": plain["id"], "text": "x"})).is_err());
+    bob.call("clear_transcript", json!({"message_id": vid}));
+    assert!(bob.messages(&cid).iter().find(|m| m["id"] == vid.as_str()).unwrap()["file"]["transcript"].is_null());
+
+    let dl = bob.call("download_file", json!({"message_id": vid}));
     assert_eq!(std::fs::read(dl["path"].as_str().unwrap()).unwrap(), data);
 }
 

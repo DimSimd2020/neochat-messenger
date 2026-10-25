@@ -9,3 +9,6 @@
 -keep class org.jni_zero.** { *; }
 -dontwarn org.webrtc.**
 -dontwarn org.jni_zero.**
+
+# Speech recognition (sherpa-onnx): the JNI library reads these classes and their fields by name.
+-keep class com.k2fsa.sherpa.onnx.** { *; }

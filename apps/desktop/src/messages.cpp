@@ -2,7 +2,9 @@
 
 #include "chrome.h"
 #include "filepicker.h"
+#include "playback.h"
 #include "popupmenu.h"
+#include "transcriber.h"
 
 #include "animatedemoji.h"
 #include "core.h"
@@ -167,6 +169,28 @@ bool isImage(const QJsonObject &m)
 bool isVideo(const QJsonObject &m)
 {
     return m.value("kind").toString() == "file" && m.value("file").toObject().value("video").toBool();
+}
+
+bool isVoice(const QJsonObject &m)
+{
+    return m.value("kind").toString() == "file" && m.value("file").toObject().value("voice").toBool();
+}
+
+bool isCircle(const QJsonObject &m)
+{
+    return m.value("kind").toString() == "file" && m.value("file").toObject().value("circle").toBool();
+}
+
+QFont transcriptFont()
+{
+    return Theme::instance()->font(14);
+}
+
+QString transcriptOf(const QJsonObject &m, bool *has)
+{
+    const QJsonValue v = m.value("file").toObject().value("transcript");
+    *has = v.isString();
+    return v.toString();
 }
 
 // 0:07, 12:30, 1:02:03.
@@ -428,11 +452,20 @@ QVariant MessageModel::data(const QModelIndex &index, int role) const
             s += QStringLiteral("фото. ");
         else if (isVideo(m))
             s += QStringLiteral("видео. ");
+        else if (isVoice(m))
+            s += QStringLiteral("голосовое сообщение, ") + clockText(qint64(m.value("file").toObject().value("duration").toDouble())) + QStringLiteral(". ");
+        else if (isCircle(m))
+            s += QStringLiteral("видеосообщение, ") + clockText(qint64(m.value("file").toObject().value("duration").toDouble())) + QStringLiteral(". ");
         else if (m.value("kind").toString() == "file")
             s += QStringLiteral("файл ") + m.value("file").toObject().value("name").toString() + ". ";
         else if (m.value("kind").toString() == "poll")
             s += QStringLiteral("опрос. ");
         s += messageText(m);
+        if (bool has = false; isVoice(m) || isCircle(m)) {
+            const QString t = transcriptOf(m, &has);
+            if (has && !t.isEmpty())
+                s += QStringLiteral(" Текст: ") + t;
+        }
         const QString st = statusText(m);
         if (m.value("outgoing").toBool() && !st.isEmpty())
             s += ". " + st;
@@ -595,10 +628,35 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         L.image = QRectF(0, top, qMax(140.0, iw * s), qMax(90.0, ih * s));
         w = qMax(w, L.image.width() + 8 - 2 * kPadH);
         h = top + L.image.height() + 6;
+    } else if (isCircle(m)) {
+        const qreal side = qMin(maxBubble - 8, 240.0);
+        const qreal top = L.reply.isNull() && L.fwd.isNull() ? 4 : h;
+        L.circle = QRectF(0, top, side, side);
+        w = qMax(w, side + 8 - 2 * kPadH);
+        h = top + side + 6;
+    } else if (isVoice(m)) {
+        L.voice = QRectF(0, h + 3, qMin(inner, 300.0), 48);
+        w = qMax(w, L.voice.width());
+        h += 56;
     } else if (kind == "file") {
         L.file = QRectF(0, h + 3, qMin(inner, 300.0), 62);
         w = qMax(w, L.file.width());
         h += 70;
+    }
+    if (isVoice(m) || isCircle(m)) {
+        const qreal tw = isVoice(m) ? L.voice.width() : qMin(inner, qMax(L.circle.width(), 200.0));
+        bool has = false;
+        const QString t = transcriptOf(m, &has);
+        if (has) {
+            const QString shown = t.isEmpty() ? QStringLiteral("Речь не найдена") : t;
+            const qreal th = QFontMetricsF(transcriptFont()).boundingRect(QRectF(0, 0, tw, 1e6), Qt::TextWordWrap, shown).height();
+            L.transcript = QRectF(0, h, tw, th);
+            h += th + 4;
+        } else {
+            L.transBtn = QRectF(0, h, qMin(tw, 190.0), 24);
+            h += 28;
+        }
+        w = qMax(w, tw);
     }
     if (kind == "poll") {
         const qreal pw = qMin(inner, 320.0);
@@ -675,6 +733,9 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
     place(L.fwd, false);
     place(L.reply, false);
     place(L.file, false);
+    place(L.voice, false);
+    place(L.transBtn, false);
+    place(L.transcript, false);
     place(L.text, false);
     place(L.call, false);
     place(L.pollInfo, false);
@@ -685,6 +746,15 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         r.moveTo(L.bubble.left() + kPadH + r.left(), y + r.top());
     if (!L.image.isNull())
         L.image.moveTo(L.bubble.left() + 4, y + L.image.top());
+    if (!L.circle.isNull())
+        L.circle.moveTo(L.bubble.left() + 4, y + L.circle.top());
+    if (!L.voice.isNull()) {
+        L.play = QRectF(L.voice.left(), L.voice.top() + 4, 40, 40);
+        L.speed = QRectF(L.voice.right() - 44, L.voice.top() + 4, 44, 22);
+        const qreal wx = L.play.right() + 10;
+        L.wave = QRectF(wx, L.voice.top() + 4, L.voice.right() - 50 - wx, 26);
+        L.duration = QRectF(wx, L.voice.top() + 30, L.wave.width(), 16);
+    }
     if (!L.file.isNull())
         L.download = QRectF(L.file.right() - 36, L.file.center().y() - 18, 36, 36);
     if (showAvatar && it.groupEnd)
@@ -830,6 +900,132 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         const QString rt = rep.value("kind").toString() == "file" ? QStringLiteral("Файл") : rep.value("text").toString().simplified();
         p->drawText(L.reply.adjusted(10, 19, -8, -3), Qt::AlignLeft | Qt::AlignVCenter,
                     QFontMetricsF(p->font()).elidedText(rt, Qt::ElideRight, L.reply.width() - 18));
+    }
+
+    if (!L.voice.isNull()) {
+        const QString id = m.value("id").toString();
+        const Playback *pb = Playback::instance();
+        const Playback::State st = pb->state(id);
+        const QJsonObject f = m.value("file").toObject();
+        const QColor strong = out ? c.onOutgoing : c.accent;
+        p->setPen(Qt::NoPen);
+        p->setBrush(strong);
+        p->drawEllipse(L.play);
+        const QColor glyph = out ? c.outgoing : c.onAccent;
+        if (st == Playback::State::Loading) {
+            p->setPen(QPen(glyph, 2.4, Qt::SolidLine, Qt::RoundCap));
+            p->setBrush(Qt::NoBrush);
+            p->drawArc(L.play.adjusted(10, 10, -10, -10), int((clockMs() % 900) / 900.0 * 360 * 16), 100 * 16);
+        } else {
+            ui::paintIcon(p, QRectF(L.play.center().x() - 10 + (st == Playback::State::Playing ? 0 : 1), L.play.center().y() - 10, 20, 20),
+                          st == Playback::State::Playing ? "pause" : "play", glyph, 1.4);
+        }
+        const QByteArray bars = QByteArray::fromBase64(f.value("wave").toString().toLatin1());
+        const int n = qMax(8, int(L.wave.width() / 5));
+        const qreal done = pb->progress(id);
+        for (int i = 0; i < n; ++i) {
+            int v = 40;
+            if (!bars.isEmpty()) {
+                // The loudest bar among those that fall on this slot, so peaks stay visible.
+                const int a = int(qint64(i) * bars.size() / n), b = qMax(a + 1, int(qint64(i + 1) * bars.size() / n));
+                v = 0;
+                for (int k = a; k < b && k < bars.size(); ++k)
+                    v = qMax(v, int(quint8(bars[k])));
+            }
+            const qreal bh = 4 + v / 255.0 * (L.wave.height() - 4);
+            const bool played = (i + 0.5) / n <= done;
+            QColor bc = played ? strong : meta;
+            if (!played)
+                bc.setAlpha(150);
+            p->setPen(Qt::NoPen);
+            p->setBrush(bc);
+            p->drawRoundedRect(QRectF(L.wave.left() + i * 5, L.wave.center().y() - bh / 2, 3, bh), 1.5, 1.5);
+        }
+        const qint64 total = qint64(f.value("duration").toDouble());
+        p->setFont(Theme::instance()->font(12));
+        p->setPen(meta);
+        p->drawText(L.duration, Qt::AlignLeft | Qt::AlignVCenter,
+                    st == Playback::State::Playing || st == Playback::State::Paused ? clockText(pb->positionMs(id)) + QStringLiteral(" / ") + clockText(total) : clockText(total));
+        if (st == Playback::State::Playing || st == Playback::State::Paused) {
+            p->setPen(Qt::NoPen);
+            QColor chip = strong;
+            chip.setAlpha(out ? 60 : 34);
+            p->setBrush(chip);
+            p->drawRoundedRect(L.speed, 11, 11);
+            p->setFont(Theme::instance()->font(12, QFont::DemiBold));
+            p->setPen(strong);
+            const double sp = pb->speed();
+            p->drawText(L.speed, Qt::AlignCenter, sp == 1.0 ? QStringLiteral("1×") : sp == 1.5 ? QStringLiteral("1,5×") : QStringLiteral("2×"));
+        }
+    }
+
+    if (!L.circle.isNull()) {
+        const QString id = m.value("id").toString();
+        const Playback *pb = Playback::instance();
+        const Playback::State st = pb->state(id);
+        const QImage frame = pb->circleFrame(id);
+        QPixmap px = frame.isNull() ? ImageCache::instance()->thumb(m) : QPixmap::fromImage(frame);
+        p->save();
+        QPainterPath clip;
+        clip.addEllipse(L.circle);
+        p->setClipPath(clip);
+        p->fillRect(L.circle, c.selected);
+        if (!px.isNull()) {
+            p->setRenderHint(QPainter::SmoothPixmapTransform);
+            const qreal k = qMax(L.circle.width() / px.width(), L.circle.height() / px.height());
+            const QSizeF src = L.circle.size() / k;
+            p->drawPixmap(L.circle, px, QRectF(QPointF((px.width() - src.width()) / 2, (px.height() - src.height()) / 2), src));
+        }
+        if (st != Playback::State::Playing) {
+            const QPointF mid = L.circle.center();
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(0, 0, 0, 130));
+            p->drawEllipse(mid, 26, 26);
+            if (st == Playback::State::Loading) {
+                p->setPen(QPen(Qt::white, 2.6, Qt::SolidLine, Qt::RoundCap));
+                p->setBrush(Qt::NoBrush);
+                p->drawArc(QRectF(mid.x() - 11, mid.y() - 11, 22, 22), int((clockMs() % 900) / 900.0 * 360 * 16), 100 * 16);
+            } else {
+                p->setBrush(Qt::white);
+                p->drawPolygon(QPolygonF({QPointF(mid.x() - 7, mid.y() - 12), QPointF(mid.x() + 13, mid.y()), QPointF(mid.x() - 7, mid.y() + 12)}));
+            }
+        }
+        p->restore();
+        if (st == Playback::State::Playing || st == Playback::State::Paused) {
+            p->setPen(QPen((out ? c.onOutgoing : c.accent), 3, Qt::SolidLine, Qt::RoundCap));
+            p->setBrush(Qt::NoBrush);
+            p->drawArc(L.circle.adjusted(1.5, 1.5, -1.5, -1.5), 90 * 16, int(-pb->progress(id) * 360 * 16));
+        }
+        const qint64 total = qint64(m.value("file").toObject().value("duration").toDouble());
+        if (total > 0 || st != Playback::State::Idle) {
+            p->setFont(Theme::instance()->font(12, QFont::DemiBold));
+            const QString length = st == Playback::State::Idle || st == Playback::State::Loading ? clockText(total) : clockText(pb->positionMs(id));
+            const QRectF pill(L.circle.left() + 12, L.circle.bottom() - 34, QFontMetricsF(p->font()).horizontalAdvance(length) + 16, 22);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(0, 0, 0, 150));
+            p->drawRoundedRect(pill, 11, 11);
+            p->setPen(Qt::white);
+            p->drawText(pill, Qt::AlignCenter, length);
+        }
+    }
+
+    if (!L.transBtn.isNull()) {
+        const Transcriber::Status ts = Transcriber::instance()->status(m.value("id").toString());
+        const QString label = ts.phase == Transcriber::Phase::Model ? QStringLiteral("Скачиваем модель… %1%").arg(ts.percent)
+            : ts.phase == Transcriber::Phase::Working                ? QStringLiteral("Расшифровываем…")
+                                                                     : QStringLiteral("Расшифровать");
+        const QColor strong = out ? c.onOutgoing : c.accent;
+        ui::paintIcon(p, QRectF(L.transBtn.left(), L.transBtn.center().y() - 8, 16, 16), "transcript", strong, 1.8);
+        p->setFont(Theme::instance()->font(13, QFont::DemiBold));
+        p->setPen(strong);
+        p->drawText(L.transBtn.adjusted(22, 0, 0, 0), Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(p->font()).elidedText(label, Qt::ElideRight, L.transBtn.width() - 22));
+    }
+    if (!L.transcript.isNull()) {
+        bool has = false;
+        const QString t = transcriptOf(m, &has);
+        p->setFont(transcriptFont());
+        p->setPen(t.isEmpty() ? meta : fg);
+        p->drawText(L.transcript, Qt::TextWordWrap, t.isEmpty() ? QStringLiteral("Речь не найдена") : t);
     }
 
     if (!L.file.isNull()) {
@@ -1088,6 +1284,10 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
     setAccessibleName(QStringLiteral("Сообщения"));
     viewport()->setAutoFillBackground(false);
     verticalScrollBar()->setSingleStep(28);
+    connect(Playback::instance(), &Playback::changed, viewport(), qOverload<>(&QWidget::update));
+    connect(Playback::instance(), &Playback::failed, this, &MessageView::toast);
+    connect(Transcriber::instance(), &Transcriber::changed, viewport(), qOverload<>(&QWidget::update));
+    connect(Transcriber::instance(), &Transcriber::notice, this, &MessageView::toast);
     m_anim.setInterval(16);
     connect(&m_anim, &QTimer::timeout, this, [this] {
         viewport()->update();
@@ -1488,6 +1688,8 @@ QJsonObject MessageView::messageAt(const QPoint &pos, MessageLayout *lay) const
     L.retry.translate(vr.topLeft());
     L.text.translate(vr.topLeft());
     L.image.translate(vr.topLeft());
+    for (QRectF *r : {&L.voice, &L.play, &L.wave, &L.speed, &L.duration, &L.circle, &L.transBtn, &L.transcript})
+        r->translate(vr.topLeft());
     for (QRectF &o : L.options)
         o.translate(vr.topLeft());
     for (QRectF &r : L.reacts)
@@ -1572,7 +1774,8 @@ void MessageView::mouseMoveEvent(QMouseEvent *e)
     }
     MessageLayout L;
     const QJsonObject m = messageAt(e->pos(), &L);
-    bool hand = !m.isEmpty() && (L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) ||
+    bool hand = !m.isEmpty() && (L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) || L.play.contains(e->pos()) ||
+                                 L.wave.contains(e->pos()) || L.circle.contains(e->pos()) || L.transBtn.contains(e->pos()) ||
                                  L.bubble.contains(e->pos()) || L.avatar.contains(e->pos()) || L.name.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty());
     if (!m.isEmpty() && !m.value("poll").toObject().value("closed").toBool())
         for (const QRectF &o : L.options)
@@ -1616,6 +1819,19 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
             retry(m);
         else if (L.image.contains(e->pos()))
             isVideo(m) ? openFile(m) : openImage(m);
+        else if (L.play.contains(e->pos()) || L.circle.contains(e->pos()))
+            Playback::instance()->toggle(m);
+        else if (L.wave.contains(e->pos())) {
+            // A click on the wave jumps there; on a message that is not playing it starts it first.
+            const QString id = m.value("id").toString();
+            if (Playback::instance()->state(id) == Playback::State::Idle)
+                Playback::instance()->toggle(m);
+            else
+                Playback::instance()->seek(id, (e->pos().x() - L.wave.left()) / L.wave.width());
+        } else if (L.speed.contains(e->pos()) && Playback::instance()->state(m.value("id").toString()) != Playback::State::Idle)
+            Playback::instance()->cycleSpeed();
+        else if (L.transBtn.contains(e->pos()))
+            Transcriber::instance()->request(m, this);
         else if (link.startsWith(QStringLiteral("mention:")))
             openMention(link.mid(8));
         else if (!link.isEmpty())
@@ -1638,7 +1854,8 @@ void MessageView::mouseDoubleClickEvent(QMouseEvent *e)
     if (m.isEmpty())
         return;
     // Buttons, links, photos and poll answers keep their own clicks.
-    bool control = L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty();
+    bool control = L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) || L.play.contains(e->pos()) ||
+                   L.wave.contains(e->pos()) || L.circle.contains(e->pos()) || L.speed.contains(e->pos()) || L.transBtn.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty();
     for (const QRectF &r : L.options)
         control = control || r.contains(e->pos());
     for (const QRectF &r : L.reacts)
@@ -1763,6 +1980,10 @@ void MessageView::keyPressEvent(QKeyEvent *e)
             QApplication::clipboard()->setText(sel.isEmpty() ? messageText(m) : sel);
             return;
         }
+        if ((e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter || e->key() == Qt::Key_Space) && (isVoice(m) || isCircle(m))) {
+            Playback::instance()->toggle(m);
+            return;
+        }
         if ((e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) && m.value("kind").toString() == "file") {
             isImage(m) ? openImage(m) : openFile(m);
             return;
@@ -1878,6 +2099,14 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
                 emit toast(e.ok() ? QStringLiteral("Добавлено в избранное") : e.message);
             });
         });
+    if (isVoice(m) || isCircle(m)) {
+        bool has = false;
+        transcriptOf(m, &has);
+        if (has)
+            menu->addAction(QStringLiteral("Убрать расшифровку"), this, [m] { Transcriber::instance()->clear(m.value("id").toString()); });
+        else
+            menu->addAction(QStringLiteral("Расшифровать"), this, [this, m] { Transcriber::instance()->request(m, this); });
+    }
     if (kind == "file") {
         menu->addAction(QStringLiteral("Открыть файл"), this, [this, m] { openFile(m); });
         menu->addAction(QStringLiteral("Сохранить как…"), this, [this, m] { saveFile(m); });

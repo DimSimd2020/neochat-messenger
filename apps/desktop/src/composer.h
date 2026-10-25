@@ -2,6 +2,8 @@
 
 #include <QJsonObject>
 #include <QPlainTextEdit>
+#include <QTimer>
+#include <vector>
 #include <QVariantAnimation>
 #include <QWidget>
 
@@ -10,6 +12,7 @@ class IconButton;
 }
 class SendButton;
 class QCompleter;
+class VoiceRecorder;
 
 class ComposerEdit : public QPlainTextEdit {
     Q_OBJECT
@@ -48,6 +51,9 @@ public:
     void focusInput() { m_edit->setFocus(Qt::OtherFocusReason); }
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override { return sizeHint(); }
+    bool recording() const { return m_rec != nullptr; }
+    // Throws a voice recording away (switching chats, signing out).
+    void cancelRecording();
 
 signals:
     void send(const QString &text, const QString &replyTo);
@@ -57,10 +63,15 @@ signals:
     void imagePasted(const QImage &image);
     void draftChanged(const QString &text);
     void typing();
+    // A voice message was recorded: an .m4a file, its length and the loudness bars.
+    void voiceRecorded(const QString &path, qint64 durationMs, const QByteArray &wave, const QString &replyTo);
+    void circleRequested();
+    void notice(const QString &text);
 
 protected:
     void paintEvent(QPaintEvent *) override;
     void resizeEvent(QResizeEvent *) override;
+    void keyPressEvent(QKeyEvent *) override;
     bool eventFilter(QObject *o, QEvent *e) override;
 
 private:
@@ -70,12 +81,21 @@ private:
     void submit();
     void openEmoji();
     int editHeight() const;
+    void startVoice();
+    void finishVoice();
+    void updateRecordButtons();
 
     ComposerEdit *m_edit;
     ui::IconButton *m_attach;
     ui::IconButton *m_emoji;
     ui::IconButton *m_cancelReply;
     SendButton *m_send;
+    ui::IconButton *m_mic;
+    ui::IconButton *m_circle;
+    ui::IconButton *m_recTrash;
+    VoiceRecorder *m_rec = nullptr;
+    QTimer m_recTick;
+    std::vector<qreal> m_levels;
     QVariantAnimation m_progress;
     QVariantAnimation m_replyAnim;
     QJsonObject m_reply;

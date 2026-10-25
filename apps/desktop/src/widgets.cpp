@@ -63,6 +63,12 @@ const QHash<QString, QString> &icons()
         {"video-off", R"(<path d="M15.5 13v2.4a2.6 2.6 0 0 1-2.6 2.6H5.1a2.6 2.6 0 0 1-2.6-2.6V8.6A2.6 2.6 0 0 1 5.1 6M9 6h3.9a2.6 2.6 0 0 1 2.6 2.6v1.6l5-3.2v10M3 3l18 18"/>)"},
         {"mic", R"(<rect x="9" y="3" width="6" height="11.5" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M9 21h6"/>)"},
         {"mic-off", R"(<path d="M15 10V6a3 3 0 0 0-5.8-1M9 9v2.5a3 3 0 0 0 4.6 2.5M5.5 11a6.5 6.5 0 0 0 10.4 5.2M18.5 11a6.4 6.4 0 0 1-.5 2.5M12 17.5V21M9 21h6M3 3l18 18"/>)"},
+        {"record", R"(<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.6"/>)"},
+        {"trash", R"(<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l.8 12.5h9.4L17.5 7M10 11v5M14 11v5"/>)"},
+        {"play", R"(<path d="M8 5.2v13.6a.8.8 0 0 0 1.2.7l10.6-6.8a.8.8 0 0 0 0-1.4L9.2 4.5A.8.8 0 0 0 8 5.2Z" fill="#C"/>)"},
+        {"pause", R"(<rect x="6.5" y="5" width="3.8" height="14" rx="1.2" fill="#C"/><rect x="13.7" y="5" width="3.8" height="14" rx="1.2" fill="#C"/>)"},
+        {"stop", R"(<rect x="6.5" y="6.5" width="11" height="11" rx="2.4" fill="#C"/>)"},
+        {"transcript", R"(<path d="M4 6.5h16M4 12h10M4 17.5h13"/>)"},
     };
     return map;
 }

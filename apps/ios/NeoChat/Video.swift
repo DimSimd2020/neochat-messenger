@@ -19,7 +19,7 @@ struct PreparedVideo {
 
 enum Videos {
     /// The core refuses larger files.
-    static let limit: Int64 = 25 * 1024 * 1024
+    static let limit: Int64 = 50 * 1024 * 1024
 
     /// 0:07, 12:30, 1:02:03.
     static func clock(_ ms: Int64) -> String {
@@ -70,55 +70,143 @@ enum Videos {
         Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
     }
 
-    /// An MP4 (H.264 and AAC) goes as it is when small enough; anything else is re-encoded, smaller step by step until it fits.
-    /// Calls `done` on a background queue; nil when the video cannot be sent.
-    static func prepare(_ f: OutgoingFile, done: @escaping (PreparedVideo?) -> Void) {
+    // The same rules as on the other clients (docs/30-voice-circles-stt.md): a small clip goes as it is, the rest
+    // becomes H.264 + AAC in MP4 down a ladder of sizes until it fits the budget.
+    private static let budget: Int64 = 45 * 1024 * 1024
+    private static let keep: Int64 = 10 * 1024 * 1024
+    private static let audioBps = 128_000
+
+    private struct Rung {
+        let longSide: CGFloat
+        let shortSide: CGFloat
+        let videoBps: Int
+    }
+
+    private static let ladder = [Rung(longSide: 1280, shortSide: 720, videoBps: 2_500_000),
+                                 Rung(longSide: 854, shortSide: 480, videoBps: 1_200_000),
+                                 Rung(longSide: 640, shortSide: 360, videoBps: 700_000)]
+
+    private static func outgoingDir() -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("outgoing", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// An MP4 (H.264 and AAC) goes as it is when small; anything else is re-encoded, smaller step by step until it fits.
+    /// `progress` (0...99) and `done` are called on a background queue; nil when the video cannot be sent.
+    static func prepare(_ f: OutgoingFile, progress: ((Int) -> Void)? = nil, done: @escaping (PreparedVideo?) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             func ready(_ url: URL, _ name: String, _ mime: String) {
                 done(PreparedVideo(url: url, name: name, mime: mime, info: info(url)))
             }
-            if f.mime == "video/mp4" && f.size <= limit {
-                ready(f.url, f.name, f.mime)
-                return
-            }
-            export(f.url) { out in
-                if let out {
-                    try? FileManager.default.removeItem(at: f.url)
-                    ready(out, (f.name as NSString).deletingPathExtension + ".mp4", "video/mp4")
-                } else if f.size <= limit {
-                    // The system cannot re-encode it, but it is small enough to be sent as it is.
+            let asOriginal = f.mime == "video/mp4" && f.size <= limit
+            func original() {
+                if asOriginal {
                     ready(f.url, f.name, f.mime)
                 } else {
                     try? FileManager.default.removeItem(at: f.url)
                     done(nil)
                 }
             }
+            let asset = AVURLAsset(url: f.url)
+            let seconds = CMTimeGetSeconds(asset.duration)
+            guard seconds.isFinite, seconds > 0, let track = asset.tracks(withMediaType: .video).first else { return original() }
+            let natural = track.naturalSize.applying(track.preferredTransform)
+            let oriented = CGSize(width: abs(natural.width), height: abs(natural.height))
+            guard oriented.width > 0, oriented.height > 0,
+                  let first = ladder.firstIndex(where: { Double($0.videoBps + audioBps) / 8 * seconds <= Double(budget) }) else { return original() }
+            let estimate = Double(ladder[first].videoBps + audioBps) / 8 * seconds
+            if asOriginal && ((f.size <= keep && max(oriented.width, oriented.height) <= 1920) || Double(f.size) <= estimate) {
+                return ready(f.url, f.name, f.mime)
+            }
+            for rung in first..<ladder.count {
+                guard let out = transcode(asset, track, oriented: oriented, rung: ladder[rung], seconds: seconds, progress: progress) else { break }
+                if size(out) <= limit {
+                    try? FileManager.default.removeItem(at: f.url)
+                    return ready(out, (f.name as NSString).deletingPathExtension + ".mp4", "video/mp4")
+                }
+                try? FileManager.default.removeItem(at: out)
+            }
+            // The system cannot make it smaller, but a small MP4 can still be sent as it is.
+            original()
         }
     }
 
-    private static func export(_ src: URL, done: @escaping (URL?) -> Void) {
-        let asset = AVURLAsset(url: src)
-        let allowed = AVAssetExportSession.exportPresets(compatibleWith: asset)
-        let presets = [AVAssetExportPreset1280x720, AVAssetExportPreset960x540, AVAssetExportPreset640x480].filter { allowed.contains($0) }
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("outgoing", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        func attempt(_ i: Int) {
-            guard i < presets.count, let session = AVAssetExportSession(asset: asset, presetName: presets[i]) else { return done(nil) }
-            let out = dir.appendingPathComponent(UUID().uuidString + ".mp4")
-            session.outputURL = out
-            session.outputFileType = .mp4
-            session.shouldOptimizeForNetworkUse = true
-            session.exportAsynchronously {
-                guard session.status == .completed else {
-                    try? FileManager.default.removeItem(at: out)
-                    return done(nil)
-                }
-                if size(out) <= limit { return done(out) }
-                try? FileManager.default.removeItem(at: out)
-                attempt(i + 1)
+    /// One pass: scaled to the rung, at most 30 frames a second, AAC sound; blocks until the file is written.
+    private static func transcode(_ asset: AVURLAsset, _ track: AVAssetTrack, oriented: CGSize, rung: Rung, seconds: Double, progress: ((Int) -> Void)?) -> URL? {
+        let out = outgoingDir().appendingPathComponent(UUID().uuidString + ".mp4")
+        func fail() -> URL? {
+            try? FileManager.default.removeItem(at: out)
+            return nil
+        }
+        let landscape = oriented.width >= oriented.height
+        let k = min(1, (landscape ? rung.longSide : rung.shortSide) / oriented.width, (landscape ? rung.shortSide : rung.longSide) / oriented.height)
+        let w = max(2, Int(oriented.width * k) & ~1), h = max(2, Int(oriented.height * k) & ~1)
+        let fps = min(30, max(1, Int((track.nominalFrameRate > 0 ? track.nominalFrameRate : 30).rounded())))
+        let bps = max(300_000, min(rung.videoBps, track.estimatedDataRate > 0 ? Int(track.estimatedDataRate) : rung.videoBps))
+
+        let composition = AVMutableVideoComposition()
+        composition.renderSize = CGSize(width: w, height: h)
+        composition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: asset.duration)
+        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
+        layer.setTransform(track.preferredTransform.concatenating(CGAffineTransform(scaleX: CGFloat(w) / oriented.width, y: CGFloat(h) / oriented.height)), at: .zero)
+        instruction.layerInstructions = [layer]
+        composition.instructions = [instruction]
+
+        guard let reader = try? AVAssetReader(asset: asset), let writer = try? AVAssetWriter(outputURL: out, fileType: .mp4) else { return nil }
+        let videoOut = AVAssetReaderVideoCompositionOutput(videoTracks: [track], videoSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+        videoOut.videoComposition = composition
+        let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h,
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: bps, AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel, AVVideoMaxKeyFrameIntervalKey: 2 * fps],
+        ])
+        videoIn.expectsMediaDataInRealTime = false
+        guard reader.canAdd(videoOut), writer.canAdd(videoIn) else { return nil }
+        reader.add(videoOut)
+        writer.add(videoIn)
+        var pairs: [(AVAssetReaderOutput, AVAssetWriterInput)] = [(videoOut, videoIn)]
+        if let audio = asset.tracks(withMediaType: .audio).first {
+            let audioOut = AVAssetReaderAudioMixOutput(audioTracks: [audio], audioSettings: [AVFormatIDKey: kAudioFormatLinearPCM, AVNumberOfChannelsKey: 2, AVSampleRateKey: 44100])
+            let audioIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVNumberOfChannelsKey: 2, AVSampleRateKey: 44100, AVEncoderBitRateKey: audioBps])
+            audioIn.expectsMediaDataInRealTime = false
+            if reader.canAdd(audioOut), writer.canAdd(audioIn) {
+                reader.add(audioOut)
+                writer.add(audioIn)
+                pairs.append((audioOut, audioIn))
             }
         }
-        attempt(0)
+        guard writer.startWriting(), reader.startReading() else { return fail() }
+        writer.startSession(atSourceTime: .zero)
+        let group = DispatchGroup()
+        for (n, pair) in pairs.enumerated() {
+            let (source, sink) = pair
+            group.enter()
+            sink.requestMediaDataWhenReady(on: DispatchQueue(label: "app.neochat.compress.\(n)")) {
+                while sink.isReadyForMoreMediaData {
+                    guard let buffer = source.copyNextSampleBuffer() else {
+                        sink.markAsFinished()
+                        return group.leave()
+                    }
+                    if n == 0 { progress?(min(99, Int(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(buffer)) / seconds * 100))) }
+                    if !sink.append(buffer) {
+                        sink.markAsFinished()
+                        return group.leave()
+                    }
+                }
+            }
+        }
+        group.wait()
+        if reader.status == .failed || writer.status == .failed {
+            reader.cancelReading()
+            writer.cancelWriting()
+            return fail()
+        }
+        let finished = DispatchSemaphore(value: 0)
+        writer.finishWriting { finished.signal() }
+        finished.wait()
+        return writer.status == .completed ? out : fail()
     }
 }
 

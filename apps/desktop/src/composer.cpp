@@ -1,5 +1,6 @@
 #include "composer.h"
 
+#include "audioio.h"
 #include "emoji.h"
 #include "theme.h"
 #include "widgets.h"
@@ -16,6 +17,8 @@
 #include <QMimeData>
 #include <QPushButton>
 #include <QPainter>
+#include <QPointer>
+#include <cmath>
 #include <QScrollBar>
 #include <QTimer>
 #include <QUrl>
@@ -23,6 +26,8 @@
 namespace {
 
 constexpr int kShift = 51; // emoji moves left by this when the send button appears
+constexpr int kRecordSlots = 80; // the circle and microphone buttons take this much room in front of the arrow
+constexpr qint64 kMaxVoiceMs = 10 * 60 * 1000;
 
 } // namespace
 
@@ -139,10 +144,28 @@ Composer::Composer(QWidget *parent) : QWidget(parent)
     m_send = new SendButton(this);
     m_send->hide();
     m_send->setFocusPolicy(Qt::NoFocus);
+    m_mic = new ui::IconButton("mic", QStringLiteral("Записать голосовое сообщение"), this, 40);
+    m_circle = new ui::IconButton("record", QStringLiteral("Записать кружок"), this, 40);
+    m_recTrash = new ui::IconButton("trash", QStringLiteral("Удалить запись"), this, 40);
+    m_recTrash->hide();
+    m_recTick.setInterval(60);
+    connect(&m_recTick, &QTimer::timeout, this, [this] {
+        if (m_rec && m_rec->elapsedMs() >= kMaxVoiceMs)
+            finishVoice();
+        update();
+    });
+    connect(m_mic, &QAbstractButton::clicked, this, &Composer::startVoice);
+    connect(m_circle, &QAbstractButton::clicked, this, [this] {
+        if (!m_blocked)
+            emit circleRequested();
+    });
+    connect(m_recTrash, &QAbstractButton::clicked, this, &Composer::cancelRecording);
 
     setTabOrder(m_attach, m_edit);
     setTabOrder(m_edit, m_emoji);
-    setTabOrder(m_emoji, m_send);
+    setTabOrder(m_emoji, m_circle);
+    setTabOrder(m_circle, m_mic);
+    setTabOrder(m_mic, m_send);
 
     m_progress.setStartValue(0.0);
     connect(&m_progress, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
@@ -153,6 +176,7 @@ Composer::Composer(QWidget *parent) : QWidget(parent)
     connect(&m_progress, &QVariantAnimation::finished, this, [this] {
         if (!m_hasText && !m_blocked)
             m_send->hide();
+        updateRecordButtons();
     });
     m_replyAnim.setStartValue(0.0);
     connect(&m_replyAnim, &QVariantAnimation::valueChanged, this, [this] {
@@ -280,10 +304,110 @@ void Composer::updateSendState(bool animated)
     ui::animate(m_progress, show ? 1.0 : 0.0, animated ? Theme::ms(240) : 0, Theme::surfaceEasing());
     if (!show && !animated)
         m_send->hide();
+    updateRecordButtons();
+}
+
+// The circle and microphone stand where the arrow will be as soon as there is text to send.
+void Composer::updateRecordButtons()
+{
+    const bool idle = !m_hasText && !m_editing && !m_rec && m_progress.currentValue().toReal() < 0.01;
+    m_mic->setVisible(idle);
+    m_circle->setVisible(idle);
+    m_mic->setEnabled(!m_blocked);
+    m_circle->setEnabled(!m_blocked);
+    relayout();
+}
+
+void Composer::startVoice()
+{
+    if (m_rec || m_blocked || m_editing)
+        return;
+    auto *rec = new VoiceRecorder(this);
+    QString why;
+    if (!rec->start(&why)) {
+        delete rec;
+        emit notice(why);
+        return;
+    }
+    m_rec = rec;
+    m_levels.clear();
+    connect(rec, &VoiceRecorder::level, this, [this](qreal v) {
+        m_levels.push_back(v);
+        if (m_levels.size() > 200)
+            m_levels.erase(m_levels.begin(), m_levels.begin() + 100);
+    });
+    connect(rec, &VoiceRecorder::failed, this, [this](const QString &why) {
+        cancelRecording();
+        emit notice(why);
+    });
+    connect(rec, &VoiceRecorder::finished, this, [this](const QString &path, qint64 ms, const QByteArray &wave) {
+        emit voiceRecorded(path, ms, wave, replyId());
+    });
+    m_edit->hide();
+    m_attach->hide();
+    m_emoji->hide();
+    m_recTrash->show();
+    m_send->progress = 1;
+    m_send->show();
+    m_send->setEnabled(true);
+    m_send->setFocusPolicy(Qt::NoFocus);
+    setFocus(Qt::OtherFocusReason);
+    updateRecordButtons();
+    m_recTick.start();
+}
+
+void Composer::finishVoice()
+{
+    if (!m_rec)
+        return;
+    VoiceRecorder *rec = m_rec;
+    m_rec = nullptr;
+    m_recTick.stop();
+    rec->stop(); // emits finished()
+    rec->deleteLater();
+    m_edit->show();
+    m_attach->show();
+    m_emoji->show();
+    m_recTrash->hide();
+    m_send->progress = m_hasText ? 1.0 : 0.0;
+    m_send->setVisible(m_hasText);
+    updateSendState(false);
+    m_edit->setFocus(Qt::OtherFocusReason);
+    update();
+}
+
+void Composer::cancelRecording()
+{
+    if (!m_rec)
+        return;
+    VoiceRecorder *rec = m_rec;
+    m_rec = nullptr;
+    m_recTick.stop();
+    rec->cancel();
+    rec->deleteLater();
+    m_edit->show();
+    m_attach->show();
+    m_emoji->show();
+    m_recTrash->hide();
+    m_send->progress = m_hasText ? 1.0 : 0.0;
+    m_send->setVisible(m_hasText);
+    updateSendState(false);
+    update();
+}
+
+void Composer::keyPressEvent(QKeyEvent *e)
+{
+    if (m_rec && (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter))
+        return finishVoice();
+    if (m_rec && e->key() == Qt::Key_Escape)
+        return cancelRecording();
+    QWidget::keyPressEvent(e);
 }
 
 void Composer::submit()
 {
+    if (m_rec)
+        return finishVoice();
     const QString t = m_edit->toPlainText().trimmed();
     if (m_blocked)
         return;
@@ -362,9 +486,13 @@ void Composer::relayout()
     const qreal p = m_send->progress;
     const int sendX = box.right() - 10 - 40;
     m_send->move(sendX, cy - 20 + 1);
-    m_emoji->move(int(sendX - p * kShift), cy - 20 + 1);
+    m_mic->move(sendX, cy - 20 + 1);
+    m_circle->move(sendX - 40, cy - 20 + 1);
+    m_recTrash->move(box.left() + 10, cy - 20 + 1);
+    const int emojiX = int(sendX - (1 - p) * kRecordSlots - p * kShift);
+    m_emoji->move(emojiX, cy - 20 + 1);
     const int left = box.left() + 58;
-    const int right = int(sendX - p * kShift) - 6;
+    const int right = emojiX - 6;
     const int eh = editHeight();
     m_edit->setGeometry(left, inner.top() + (inner.height() - eh) / 2, right - left, eh);
     m_cancelReply->move(box.right() - 40, box.top() + 12);
@@ -383,6 +511,32 @@ void Composer::paintEvent(QPaintEvent *)
     p.setPen(QPen(m_edit->hasFocus() ? c.accent : c.border, 1));
     p.setBrush(c.surface);
     p.drawRoundedRect(box, 20, 20);
+    if (m_rec) {
+        const int cy = int(box.bottom()) - 28;
+        const qint64 ms = m_rec->elapsedMs();
+        const qreal pulse = 0.55 + 0.45 * std::sin(double(ms) / 1000.0 * 2 * M_PI * 0.9);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(224, 64, 64));
+        p.setOpacity(pulse);
+        p.drawEllipse(QPointF(box.left() + 68, cy + 1), 5, 5);
+        p.setOpacity(1);
+        p.setFont(Theme::instance()->font(15, QFont::DemiBold));
+        p.setPen(c.text);
+        const qint64 sec = ms / 1000;
+        const QString time = QStringLiteral("%1:%2").arg(sec / 60).arg(sec % 60, 2, 10, QChar('0'));
+        const QRectF tr(box.left() + 82, cy - 12, 52, 26);
+        p.drawText(tr, Qt::AlignLeft | Qt::AlignVCenter, time);
+        const qreal x0 = tr.right() + 10, x1 = box.right() - 10 - 40 - 12;
+        p.setPen(Qt::NoPen);
+        p.setBrush(c.accent);
+        const int n = int((x1 - x0) / 6);
+        for (int i = 0; i < n && i < int(m_levels.size()); ++i) {
+            const qreal v = m_levels[m_levels.size() - 1 - size_t(i)];
+            const qreal h = 3 + std::min(1.0, std::pow(v, 0.6)) * 22;
+            p.drawRoundedRect(QRectF(x1 - 3 - i * 6, cy + 1 - h / 2, 3, h), 1.5, 1.5);
+        }
+        return;
+    }
     if (replyH > 0) {
         p.setOpacity(reply);
         const QRectF r(side + 16, 8 + 8, width() - 2 * side - 32, 42);
@@ -394,7 +548,10 @@ void Composer::paintEvent(QPaintEvent *)
         p.drawText(r.adjusted(14, 2, -44, -20), Qt::AlignLeft | Qt::AlignVCenter, m_editing ? QStringLiteral("Изменение сообщения") : QStringLiteral("В ответ ") + m_reply.value("sender_name").toString());
         p.setFont(Theme::instance()->font(13));
         p.setPen(c.muted);
-        const QString t = m_reply.value("kind").toString() == "file" && !m_editing ? m_reply.value("file").toObject().value("name").toString() : m_reply.value("text").toString().simplified();
+        const QJsonObject rf = m_reply.value("file").toObject();
+        const QString t = m_reply.value("kind").toString() == "file" && !m_editing
+            ? (rf.value("voice").toBool() ? QStringLiteral("Голосовое сообщение") : rf.value("circle").toBool() ? QStringLiteral("Видеосообщение") : rf.value("name").toString())
+            : m_reply.value("text").toString().simplified();
         p.drawText(r.adjusted(14, 20, -44, -2), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(t, Qt::ElideRight, int(r.width()) - 60));
         p.setOpacity(1);
     }

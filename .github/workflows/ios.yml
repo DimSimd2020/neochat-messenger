@@ -55,6 +55,9 @@ jobs:
         working-directory: core
         run: cargo test --lib
 
+      - name: Speech recognition (sherpa-onnx)
+        run: bash scripts/fetch-sherpa.sh ios
+
       - name: Xcode project
         working-directory: apps/ios
         run: xcodegen generate
@@ -142,6 +145,9 @@ jobs:
         env:
           IPHONEOS_DEPLOYMENT_TARGET: "15.0"
         run: cargo build --release --lib --target aarch64-apple-ios-sim
+
+      - name: Speech recognition (sherpa-onnx)
+        run: bash scripts/fetch-sherpa.sh ios
 
       - name: Xcode project
         working-directory: apps/ios

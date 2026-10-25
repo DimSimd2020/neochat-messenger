@@ -22,8 +22,8 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 36
-        versionName = "0.6.9.12"
+        versionCode = 37
+        versionName = "0.7.0"
     }
 
     signingConfigs {
@@ -75,4 +75,8 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     // WebRTC for calls (libwebrtc M150 prebuilt by the webrtc-sdk project); BSD-3-Clause.
     implementation("io.github.webrtc-sdk:android:150.7871.01")
+    // Shrinks a video before it is sent (H.264 + AAC in MP4); Apache-2.0.
+    implementation("androidx.media3:media3-transformer:1.5.1")
+    implementation("androidx.media3:media3-effect:1.5.1")
+    implementation("androidx.media3:media3-common:1.5.1")
 }

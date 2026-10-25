@@ -45,3 +45,7 @@ target/
 
 # Native core built by cargo-ndk
 apps/android/app/src/main/jniLibs/
+
+# Speech-recognition runtime fetched by scripts/fetch-sherpa.sh
+third_party/
+apps/ios/Vendor/

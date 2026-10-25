@@ -48,6 +48,7 @@ class MainActivity : Activity(), Sheet.Host {
     override fun removeInsetListener(l: () -> Unit) { insetListeners.remove(l) }
     var scanner: QrScanner? = null
     var camera: PhotoCamera? = null
+    var circleCamera: CircleCamera? = null
 
     private var home: HomeScreen? = null
     private var archive: ArchiveScreen? = null
@@ -478,6 +479,8 @@ class MainActivity : Activity(), Sheet.Host {
         // The camera must not stay open behind another app.
         scanner?.dismiss()
         camera?.dismiss()
+        circleCamera?.dismiss()
+        Playback.stop()
         super.onPause()
     }
 

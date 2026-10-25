@@ -569,3 +569,19 @@ func TestSendRejectsTooManyRecipients(t *testing.T) {
 		t.Fatalf("oversize recipient list: %d %v", st, m)
 	}
 }
+
+func TestAttachmentSizeLimit(t *testing.T) {
+	s, ts := testServer(t)
+	a := register(t, s, ts, "alice")
+	sum := sha256.Sum256([]byte("x"))
+	// 50 MiB of file and the tags of its chunks fit; one byte more does not.
+	var res struct {
+		AttachmentID string `json:"attachment_id"`
+	}
+	if st, m := a.do("POST", "/v1/attachments", map[string]any{"size": 51 << 20, "sha256": sum[:]}, &res); st != 201 {
+		t.Fatalf("reserve at the limit: %d %v", st, m)
+	}
+	if st, _ := a.do("POST", "/v1/attachments", map[string]any{"size": 51<<20 + 1, "sha256": sum[:]}, nil); st != 413 {
+		t.Fatalf("reserve over the limit: %d", st)
+	}
+}

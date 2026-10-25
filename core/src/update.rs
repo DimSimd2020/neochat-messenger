@@ -37,7 +37,7 @@ fn newer(candidate: &str, current: &str) -> bool {
 }
 
 impl Inner {
-    fn update_server(&self) -> Result<String> {
+    pub(crate) fn update_server(&self) -> Result<String> {
         Ok(kv_get_str(&self.db().conn, "server")?.unwrap_or_else(|| DEFAULT_SERVER.to_string()))
     }
 

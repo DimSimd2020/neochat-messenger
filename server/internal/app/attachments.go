@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	maxCiphertextSize = 26 << 20
-	dailyUploadQuota  = 250 << 20
+	// A 50 MiB file plus the 16-byte tag of every 64 KiB chunk.
+	maxCiphertextSize = 51 << 20
+	dailyUploadQuota  = 500 << 20
 	storedQuota       = 1 << 30
 )
 
@@ -36,7 +37,7 @@ func (s *Server) handleReserveAttachment(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if req.Size <= 0 || req.Size > maxCiphertextSize || len(req.SHA256) != sha256.Size {
-		s.fail(w, r, errf(413, "too_large", "Файл больше 25 МиБ"))
+		s.fail(w, r, errf(413, "too_large", "Файл больше 50 МиБ"))
 		return
 	}
 	id := newUUID()

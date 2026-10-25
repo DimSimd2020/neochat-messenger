@@ -15,7 +15,7 @@ use crate::keys::random_bytes;
 
 pub const CHUNK: usize = 64 * 1024;
 const TAG: usize = 16;
-pub const MAX_PLAINTEXT: u64 = 25 << 20;
+pub const MAX_PLAINTEXT: u64 = 50 << 20;
 
 pub struct Encrypted {
     pub key: [u8; 32],
@@ -39,7 +39,7 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 pub fn encrypt_file(src: &Path, dst: &Path) -> Result<Encrypted> {
     let plaintext_size = std::fs::metadata(src)?.len();
     if plaintext_size > MAX_PLAINTEXT {
-        return Err(Error::Invalid("Файл больше 25 МиБ".into()));
+        return Err(Error::Invalid("Файл больше 50 МиБ".into()));
     }
     let key = random_bytes::<32>();
     let nonce = random_bytes::<19>();
@@ -186,6 +186,17 @@ mod tests {
         for size in [0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 3 * CHUNK + 17] {
             roundtrip(size);
         }
+    }
+
+    #[test]
+    fn files_over_the_limit_are_refused_before_reading() {
+        let dir = std::env::temp_dir().join(format!("nc-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big");
+        std::fs::File::create(&big).unwrap().set_len(MAX_PLAINTEXT + 1).unwrap();
+        assert!(encrypt_file(&big, &dir.join("big.enc")).is_err());
+        assert!(!dir.join("big.enc").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

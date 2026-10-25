@@ -46,12 +46,57 @@ pub struct FileMeta {
     /// Videos: the length in milliseconds. The first frame travels as `thumb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<u64>,
+    /// How a file is shown: "voice" (an `audio/*` recording) or "circle" (a round `video/*` message).
+    /// Old apps ignore it and show an ordinary audio file or video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Voice messages: loudness bars, one byte each (base64), drawn as the waveform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave: Option<String>,
 }
+
+/// The waveform is a few dozen bars; anything longer is not one.
+const MAX_WAVE_B64: usize = 256;
 
 impl FileMeta {
     /// A video sent as a video: it brings a poster or a length. Without them it is an ordinary file.
     pub fn is_video(&self) -> bool {
         self.mime.starts_with("video/") && (self.thumb.is_some() || self.duration.is_some())
+    }
+
+    pub fn is_voice(&self) -> bool {
+        self.kind.as_deref() == Some("voice") && self.mime.starts_with("audio/")
+    }
+
+    pub fn is_circle(&self) -> bool {
+        self.kind.as_deref() == Some("circle") && self.mime.starts_with("video/")
+    }
+
+    /// Makes metadata from another device safe to store: an unknown or mismatched kind and a
+    /// malformed waveform are dropped, the name loses separators.
+    pub fn sanitized(&self) -> FileMeta {
+        let kind = match (self.kind.as_deref(), self.mime.as_str()) {
+            (Some("voice"), m) if m.starts_with("audio/") => Some("voice".to_string()),
+            (Some("circle"), m) if m.starts_with("video/") => Some("circle".to_string()),
+            _ => None,
+        };
+        let wave = self.wave.clone().filter(|w| kind.as_deref() == Some("voice") && w.len() <= MAX_WAVE_B64 && unb64(w).is_ok());
+        FileMeta { name: files::safe_name(&self.name), kind, wave, ..self.clone() }
+    }
+
+    /// The chat-list line for a message that carries this file.
+    pub fn preview(&self) -> String {
+        if self.is_voice() {
+            "🎤 Голосовое сообщение".to_string()
+        } else if self.is_circle() {
+            "📹 Видеосообщение".to_string()
+        } else if self.thumb.is_some() && self.mime.starts_with("image/") {
+            "🖼 Фото".to_string()
+        } else if self.is_video() {
+            "🎬 Видео".to_string()
+        } else {
+            format!("📎 {}", self.name)
+        }
     }
 }
 
@@ -226,6 +271,12 @@ impl Inner {
         let mut pl = self.new_payload(conv, "file")?;
         let enc_path = self.data_dir.join("outgoing").join(format!("{}.enc", pl.mid));
         let enc = files::encrypt_file(&src, &enc_path)?;
+        let mime = p["mime"].as_str().unwrap_or("application/octet-stream").to_string();
+        let kind = match p["kind"].as_str() {
+            Some("voice") if mime.starts_with("audio/") => Some("voice".to_string()),
+            Some("circle") if mime.starts_with("video/") => Some("circle".to_string()),
+            _ => None,
+        };
         pl.file = Some(FileMeta {
             id: String::new(),
             key: b64(&enc.key),
@@ -234,18 +285,19 @@ impl Inner {
             size: enc.plaintext_size,
             ciphertext_size: enc.ciphertext_size,
             name: name.clone(),
-            mime: p["mime"].as_str().unwrap_or("application/octet-stream").to_string(),
+            mime: mime.clone(),
             thumb: p["thumb"].as_str().filter(|t| !t.is_empty() && t.len() <= MAX_THUMB_B64).map(str::to_string),
             w: p["width"].as_u64().map(|v| v.min(100_000) as u32),
             h: p["height"].as_u64().map(|v| v.min(100_000) as u32),
-            duration: p["duration"].as_u64().filter(|_| p["mime"].as_str().is_some_and(|m| m.starts_with("video/"))).map(|v| v.min(86_400_000)),
+            duration: p["duration"].as_u64().filter(|_| mime.starts_with("video/") || mime.starts_with("audio/")).map(|v| v.min(86_400_000)),
+            wave: p["wave"].as_str().filter(|w| kind.as_deref() == Some("voice") && w.len() <= MAX_WAVE_B64 && unb64(w).is_ok()).map(str::to_string),
+            kind,
         });
-        let photo = pl.file.as_ref().is_some_and(|f| f.thumb.is_some() && f.mime.starts_with("image/"));
-        let video = pl.file.as_ref().is_some_and(FileMeta::is_video);
         pl.text = p["caption"].as_str().map(str::to_string);
+        pl.reply_to = p["reply_to"].as_str().map(str::to_string);
         // The sender keeps its own encrypted copy for local viewing.
         std::fs::copy(&enc_path, self.data_dir.join("files").join(format!("{}.enc", pl.mid)))?;
-        let preview = if photo { "🖼 Фото".to_string() } else if video { "🎬 Видео".to_string() } else { format!("📎 {name}") };
+        let preview = pl.file.as_ref().map(FileMeta::preview).unwrap_or_default();
         self.enqueue(&pl, true, Some(&enc_path), &preview)?;
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         self.emit(json!({"type": "conversations_changed"}));
@@ -485,6 +537,7 @@ impl Inner {
         conn.execute("DELETE FROM messages WHERE id=?1", [id])?;
         conn.execute("DELETE FROM outbox WHERE id=?1 AND request IS NULL", [id])?;
         conn.execute("DELETE FROM reactions WHERE message_id=?1", [id])?;
+        conn.execute("DELETE FROM kv WHERE k=?1", [format!("tr:{id}")])?;
         conn.execute("DELETE FROM poll_votes WHERE poll_id=?1", [id])?;
         conn.execute(
             "UPDATE conversations SET last_preview=COALESCE((SELECT CASE kind WHEN 'file' THEN '📎 Файл' WHEN 'poll' THEN '📊 ' || body WHEN 'call' THEN '📞 Звонок' WHEN 'service' THEN '' ELSE body END FROM messages WHERE conversation_id=?1 ORDER BY local_id DESC LIMIT 1),'') WHERE id=?1",
@@ -679,9 +732,7 @@ impl Inner {
             att = Some(dst);
         }
         let pv = match &pl.file {
-            Some(f) if f.thumb.is_some() && f.mime.starts_with("image/") => "🖼 Фото".to_string(),
-            Some(f) if f.is_video() => "🎬 Видео".to_string(),
-            Some(f) => format!("📎 {}", f.name),
+            Some(f) => f.preview(),
             None if kind == "poll" => format!("📊 {}", pl.text.as_deref().unwrap_or("")),
             None => preview(pl.text.as_deref().unwrap_or("")),
         };

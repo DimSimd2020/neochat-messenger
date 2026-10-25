@@ -1,6 +1,9 @@
 #include "mainwindow.h"
 
 #include "calls.h"
+#include "circlesheet.h"
+#include "mf.h"
+#include "videocompress.h"
 #include "email.h"
 #include "chatlist.h"
 #include "composer.h"
@@ -759,6 +762,13 @@ MainWindow::MainWindow()
             dialogs::conversationInfo(host(), m_current.value("id").toString());
     });
     connect(m_composer, &Composer::send, this, &MainWindow::sendText);
+    connect(m_composer, &Composer::voiceRecorded, this, &MainWindow::sendVoice);
+    connect(m_composer, &Composer::notice, this, &MainWindow::toast);
+    connect(m_composer, &Composer::circleRequested, this, [this] {
+        if (m_current.isEmpty() || !m_current.value("can_media").toBool())
+            return toast(QStringLiteral("Здесь нельзя отправлять видеосообщения"));
+        circlesheet::open(this, [this](const QString &path, qint64 ms, const QImage &poster) { sendCircle(path, ms, poster); });
+    });
     connect(m_composer, &Composer::filesDropped, this, [this](const QStringList &paths) { attachDialog(paths, true); });
     connect(m_composer, &Composer::imagePasted, this, [this](const QImage &image) {
         if (m_current.isEmpty() || !m_current.value("can_media").toBool()) return;
@@ -1039,6 +1049,7 @@ void MainWindow::onEvent(const QJsonObject &ev)
         m_listTimer->start();
         m_messagesTimer->start();
     } else if (type == "account_selected") {
+        m_composer->cancelRecording();
         m_composer->clearReply();
         if (!m_current.isEmpty())
             Core::instance()->call("set_draft", {{"_account_id", ev.value("previous_account_id")}, {"conversation_id", m_current.value("id")}, {"text", m_composer->text()}});
@@ -1073,8 +1084,10 @@ void MainWindow::openConversation(const QString &id)
 {
     if (id.isEmpty())
         return;
-    if (!m_current.isEmpty() && m_current.value("id").toString() != id)
+    if (!m_current.isEmpty() && m_current.value("id").toString() != id) {
+        m_composer->cancelRecording();
         Core::instance()->call("set_draft", {{"conversation_id", m_current.value("id")}, {"text", m_composer->text()}});
+    }
     Core::instance()->call("get_conversation", {{"conversation_id", id}}, this, [this, id](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
             return toast(e.message);
@@ -1411,11 +1424,12 @@ void MainWindow::sendNextFile()
     const auto file = m_files.dequeue();
     const QPointer<MainWindow> guard(this);
     QThreadPool::globalInstance()->start([guard, file] {
-        const QString path = file.value("path").toString();
-        const QString type = QMimeDatabase().mimeTypeForFile(path).name();
-        QJsonObject p{{"_account_id", file.value("_account_id")}, {"conversation_id", file.value("conversation_id")}, {"path", path}, {"mime", type}};
+        const QString origin = file.value("path").toString();
+        const QString type = QMimeDatabase().mimeTypeForFile(origin).name();
+        QJsonObject p{{"_account_id", file.value("_account_id")}, {"conversation_id", file.value("conversation_id")}, {"path", origin}, {"mime", type}};
         if (file.contains("caption"))
             p["caption"] = file.value("caption");
+        QString path = origin;
         QSize size;
         const QString thumb = file.value("photo").toBool() && type.startsWith("image/") ? photoThumb(path, &size) : QString();
         if (!thumb.isEmpty()) {
@@ -1424,7 +1438,38 @@ void MainWindow::sendNextFile()
             p["height"] = size.height();
         }
         if (file.value("photo").toBool() && type.startsWith("video/")) {
-            // The first frame and the length come from the system; a video it cannot read goes as a plain file.
+            // A video sent as video is shrunk to H.264 + AAC when that is needed to fit the limit or to
+            // spare the traffic; a video sent as a file always goes as it is.
+            const QString dir = QDir::tempPath() + "/neochat-paste-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+            QDir().mkpath(dir);
+            const QString packed = dir + "/video.mp4";
+            int shown = -10;
+            static const std::atomic<bool> never{false};
+            const videocompress::Result done = videocompress::run(origin, packed, [&](int percent) {
+                if (percent - shown < 5 && percent < 100)
+                    return;
+                shown = percent;
+                if (guard)
+                    QMetaObject::invokeMethod(guard, [guard, percent] { if (guard) guard->toast(QStringLiteral("Сжимаем видео… %1%").arg(percent)); }, Qt::QueuedConnection);
+            }, never);
+            if (!done.ok) {
+                dropPasted(packed);
+                if (guard)
+                    QMetaObject::invokeMethod(guard, [guard, error = done.error] {
+                        if (!guard) return;
+                        guard->toast(error.isEmpty() ? QStringLiteral("Не удалось подготовить видео") : error);
+                        guard->sendNextFile();
+                    }, Qt::QueuedConnection);
+                return;
+            }
+            if (done.compressed) {
+                path = packed;
+                p["path"] = packed;
+                p["name"] = QFileInfo(origin).completeBaseName() + QStringLiteral(".mp4");
+                p["mime"] = QStringLiteral("video/mp4");
+            } else {
+                dropPasted(packed);
+            }
             const videoinfo::Info clip = videoinfo::read(path);
             if (!clip.thumb.isEmpty())
                 p["thumb"] = clip.thumb;
@@ -1446,6 +1491,50 @@ void MainWindow::sendNextFile()
                 guard->sendNextFile();
             });
         }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::sendVoice(const QString &path, qint64 durationMs, const QByteArray &wave, const QString &replyTo)
+{
+    if (m_current.isEmpty() || !m_current.value("can_media").toBool()) {
+        QFile::remove(path);
+        return;
+    }
+    if (durationMs < 600) {
+        QFile::remove(path);
+        return toast(QStringLiteral("Сообщение слишком короткое"));
+    }
+    QJsonObject p{{"conversation_id", m_current.value("id")}, {"path", path}, {"mime", "audio/mp4"}, {"kind", "voice"}, {"name", "voice.m4a"},
+                  {"duration", durationMs}, {"wave", QString::fromLatin1(wave.toBase64())}};
+    if (!replyTo.isEmpty())
+        p["reply_to"] = replyTo;
+    m_composer->clearReply();
+    Core::instance()->call("send_file", p, this, [this, path](const QJsonValue &, const CoreError &e) {
+        QFile::remove(path);
+        if (!e.ok())
+            toast(e.message);
+    });
+}
+
+void MainWindow::sendCircle(const QString &path, qint64 durationMs, const QImage &poster)
+{
+    if (m_current.isEmpty() || !m_current.value("can_media").toBool()) {
+        QFile::remove(path);
+        return;
+    }
+    if (durationMs < 600) {
+        QFile::remove(path);
+        return toast(QStringLiteral("Видеосообщение слишком короткое"));
+    }
+    QJsonObject p{{"conversation_id", m_current.value("id")}, {"path", path}, {"mime", "video/mp4"}, {"kind", "circle"}, {"name", "circle.mp4"},
+                  {"duration", durationMs}, {"width", poster.width()}, {"height", poster.height()}, {"thumb", mf::thumbBase64(poster)}};
+    if (const QString reply = m_composer->replyId(); !reply.isEmpty())
+        p["reply_to"] = reply;
+    m_composer->clearReply();
+    Core::instance()->call("send_file", p, this, [this, path](const QJsonValue &, const CoreError &e) {
+        QFile::remove(path);
+        if (!e.ok())
+            toast(e.message);
     });
 }
 

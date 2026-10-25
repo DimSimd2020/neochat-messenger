@@ -92,6 +92,10 @@ jobs:
         # x86_64 NDK r26 cannot assemble OpenSSL SM3; phones need arm64.
         run: cargo ndk -t arm64-v8a --platform 26 -o ../apps/android/app/src/main/jniLibs build --release --lib
 
+      # sherpa-onnx (Apache-2.0) recognizes speech of voice messages on the phone; pinned by hash.
+      - name: Speech recognition libraries
+        run: scripts/fetch-sherpa.sh android
+
       - name: Firebase configuration
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
