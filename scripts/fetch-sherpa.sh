@@ -14,11 +14,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CACHE="${NEOCHAT_FETCH_CACHE:-${TMPDIR:-/tmp}/neochat-sherpa}"
 mkdir -p "$CACHE"
 
+# The hash of a file, with the tool the host has (GNU on Linux and Windows, shasum on macOS).
+hash_of() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi; }
+
 fetch() { # name url sha256
   local file="$CACHE/$1"
-  if [ -f "$file" ] && echo "$3  $file" | sha256sum -c --status 2>/dev/null; then return; fi
+  if [ -f "$file" ] && [ "$(hash_of "$file")" = "$3" ]; then return; fi
   curl -fsSL --retry 4 --retry-delay 3 -o "$file" "$2"
-  echo "$3  $file" | sha256sum -c --status || { echo "Контрольная сумма $1 не совпала" >&2; rm -f "$file"; exit 1; }
+  [ "$(hash_of "$file")" = "$3" ] || { echo "Контрольная сумма $1 не совпала" >&2; rm -f "$file"; exit 1; }
 }
 
 case "${1:-}" in
