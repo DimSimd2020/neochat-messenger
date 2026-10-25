@@ -49,9 +49,10 @@ class SheetViewController: UIViewController {
         return row
     }
 
-    func personRow(_ name: String, _ sub: String, seed: String, avatar: String = "", subColor: UIColor = Theme.muted, nameColor: UIColor? = nil, action: (() -> Void)? = nil) -> UIView {
+    func personRow(_ name: String, _ sub: String, seed: String, avatar: String = "", subColor: UIColor = Theme.muted, nameColor: UIColor? = nil, online: Bool = false, action: (() -> Void)? = nil) -> UIView {
         let av = AvatarView(size: 44)
         av.set(name, seed: seed, avatar: avatar)
+        av.online = online
         let t = label(name, 16, .semibold, color: nameColor ?? Theme.text)
         let s = label(sub, 14, color: subColor)
         let col = UIStackView(arrangedSubviews: [t, s])
@@ -805,10 +806,15 @@ final class ConversationInfoViewController: SheetViewController, PHPickerViewCon
                 if !m.str("tag").isEmpty { sub += " · " + m.str("tag") }
                 let muted = m.int64("muted_until") != 0
                 if muted { sub += " · не может писать" }
+                let presence = m.obj("presence")
+                if !me, let seen = presence?.str("text"), !seen.isEmpty { sub += " · " + seen }
                 if warn { sub = "Ключ изменился — сверьте код в личном чате" }
                 let name = m.str("display_name")
-                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, avatar: m.str("avatar_path"), subColor: warn ? Theme.warning : Theme.muted, nameColor: ProfileStyle.name(m.str("name_color")), action: admin && !gone ? {
+                // A plain member goes straight to the profile; an admin's menu has it as the first entry.
+                let openProfile: () -> Void = { self.navigationController?.pushViewController(PersonProfileViewController(userId: me ? nil : uid), animated: !Theme.reducedMotion) }
+                self.stack.addArrangedSubview(self.personRow(name, sub, seed: uid, avatar: m.str("avatar_path"), subColor: warn ? Theme.warning : Theme.muted, nameColor: ProfileStyle.name(m.str("name_color")), online: presence?.bool("online") ?? false, action: !admin || gone ? openProfile : {
                     let a = UIAlertController(title: name, message: nil, preferredStyle: .actionSheet)
+                    a.addAction(UIAlertAction(title: "Профиль", style: .default) { _ in openProfile() })
                     a.addAction(UIAlertAction(title: "Тег…", style: .default) { _ in self.editTag(uid, name: name, current: m.str("tag")) })
                     if owner && !me {
                         if admins.contains(uid) {
@@ -840,7 +846,7 @@ final class ConversationInfoViewController: SheetViewController, PHPickerViewCon
                     }
                     a.addAction(UIAlertAction(title: "Отмена", style: .cancel))
                     self.present(a, animated: true)
-                } : nil))
+                }))
             }
             if admin && !gone {
                 let add = PillButton(channel ? "Добавить подписчиков" : "Добавить участников", primary: false)

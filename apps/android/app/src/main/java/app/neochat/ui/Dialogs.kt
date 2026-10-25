@@ -635,12 +635,21 @@ object Dialogs {
                         if (uid == ownerId) sub += " · владелец" else if (uid in admins) sub += " · админ"
                         if (m.str("tag").isNotEmpty()) sub += " · " + m.str("tag")
                         if (m.optLong("muted_until") != 0L) sub += " · не может писать"
+                        if (!m.optBoolean("me")) m.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }?.let { sub += " · $it" }
                         row.subtitle.text = sub
                     }
+                    row.avatar.online = m.optJSONObject("presence")?.optBoolean("online") == true
                     row.contentDescription = "${row.title.text}, ${row.subtitle.text}"
                     val me = m.optBoolean("me")
-                    if (admin && !gone) row.setOnClickListener {
+                    // A plain member goes straight to the profile; an admin's menu has it as the first entry.
+                    val profile = {
+                        s.dismiss()
+                        act.openPage(if (me) PersonProfilePage(act) else PersonProfilePage(act, uid))
+                    }
+                    if (!admin || gone) row.setOnClickListener { profile() }
+                    else row.setOnClickListener {
                         val menu = PopupMenu(act, row)
+                        menu.add("Профиль") { profile() }
                         menu.add("Тег…") { editTag(act, cid, uid, m.str("display_name"), m.str("tag")) { reload() } }
                         if (owner && !me) {
                             if (uid in admins) menu.add("Снять права админа") {
@@ -668,7 +677,7 @@ object Dialogs {
                             setMembers(JSONObject().put("member_ids", others(without = uid)), "Исключён. Новые сообщения ему не придут")
                         }
                         menu.show()
-                    } else row.isClickable = false
+                    }
                     add(row, 2)
                 }
                 if (admin && !gone) {

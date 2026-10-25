@@ -22,8 +22,8 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 39
-        versionName = "0.7.0.2"
+        versionCode = 40
+        versionName = "0.7.0.3"
     }
 
     signingConfigs {
