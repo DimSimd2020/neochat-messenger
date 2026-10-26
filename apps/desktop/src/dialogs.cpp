@@ -1058,6 +1058,7 @@ void settings(const DialogHost &h)
     QObject::connect(moving, &QAbstractButton::toggled, sheet, [](bool on) { animatedemoji::setEnabled(on); });
     sheet->body()->addWidget(moving);
     sheet->body()->addWidget(mutedText(QStringLiteral("Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи.")));
+    sheet->body()->addWidget(mutedText(QStringLiteral("Формулы LaTeX: шрифт XITS Math, лицензия SIL OFL 1.1.")));
     // Shared by the user's devices through the core; a double click puts it on a message.
     auto *quick = new ui::Button(QStringLiteral("Быстрая реакция · ") + quickReaction(), ui::Button::Secondary);
     quick->setToolTip(QStringLiteral("Двойной щелчок по сообщению ставит эту реакцию. Настройка общая для всех ваших устройств"));

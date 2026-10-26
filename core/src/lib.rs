@@ -15,6 +15,7 @@ mod error;
 mod files;
 mod groups;
 mod markdown;
+mod math;
 mod keys;
 mod outbox;
 mod pins;

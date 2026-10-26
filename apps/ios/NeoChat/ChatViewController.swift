@@ -130,6 +130,20 @@ func richText(_ m: JSON, size: CGFloat, color: UIColor, outgoing: Bool = false) 
     let out = NSMutableAttributedString()
     let plain: [NSAttributedString.Key: Any] = [.font: base, .foregroundColor: color]
     for s in spans {
+        if let math = s.obj("math") {
+            // A display formula stands on its own centered line.
+            let display = s.bool("display")
+            if display, out.length > 0, !out.string.hasSuffix("\n") { out.append(NSAttributedString(string: "\n", attributes: plain)) }
+            let start = out.length
+            out.append(MathText.attributed(math, em: base.pointSize, color: color))
+            if display {
+                out.append(NSAttributedString(string: "\n", attributes: plain))
+                let centered = NSMutableParagraphStyle()
+                centered.alignment = .center
+                out.addAttribute(.paragraphStyle, value: centered, range: NSRange(location: start, length: out.length - start))
+            }
+            continue
+        }
         let pre = s.bool("pre")
         // A code block always stands on its own lines.
         if pre, out.length > 0, !out.string.hasSuffix("\n") { out.append(NSAttributedString(string: "\n", attributes: plain)) }

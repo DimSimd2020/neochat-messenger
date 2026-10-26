@@ -30,6 +30,7 @@ webpki-roots = "1"
 qrcode = { version = "0.14", default-features = false }
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 hkdf = "0.12"
+ttf-parser = { version = "0.25", default-features = false, features = ["std", "opentype-layout"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
