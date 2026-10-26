@@ -18,12 +18,14 @@ import android.net.Uri
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.Editable
+import android.text.Layout
 import android.text.InputType
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.text.TextPaint
+import android.text.style.AlignmentSpan
 import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
 import android.text.style.ForegroundColorSpan
@@ -109,6 +111,19 @@ fun spanned(m: JSONObject): CharSequence {
     if (spans == null || spans.length() == 0) return m.str("text")
     val b = SpannableStringBuilder()
     for (s in spans.objects()) {
+        if (s.has("math")) {
+            // A display formula stands on its own centered line.
+            val display = s.optBoolean("display")
+            if (display && b.isNotEmpty() && b[b.length - 1] != '\n') b.append('\n')
+            val st = b.length
+            b.append('\uFFFC')
+            b.setSpan(MathSpan(s.getJSONObject("math")), st, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            if (display) {
+                b.append('\n')
+                b.setSpan(AlignmentSpan.Standard(Layout.Alignment.ALIGN_CENTER), st, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            continue
+        }
         val pre = s.optBoolean("pre")
         // A code block always stands on its own lines.
         if (pre && b.isNotEmpty() && b[b.length - 1] != '\n') b.append('\n')

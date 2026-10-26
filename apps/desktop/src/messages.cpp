@@ -9,6 +9,7 @@
 #include "animatedemoji.h"
 #include "core.h"
 #include "emoji.h"
+#include "mathtext.h"
 #include "profilestyle.h"
 #include "theme.h"
 #include "widgets.h"
@@ -242,6 +243,10 @@ QTextDocument *textDoc(const QJsonObject &m)
         mono.setPointSizeF(font.pointSizeF() * 0.9);
     for (const auto &v : spans) {
         const QJsonObject s = v.toObject();
+        if (s.contains("math")) {
+            mathtext::insert(cur, s, font);
+            continue;
+        }
         QTextCharFormat f;
         if (s.value("code").toBool() || s.value("pre").toBool()) {
             f.setFont(mono);
@@ -686,9 +691,7 @@ MessageLayout MessageDelegate::layout(const MessageItem &it, qreal width, bool g
         h += L.text.height() + 2;
     } else if (!text.isEmpty()) {
         QTextDocument *d = textDoc(m);
-        if (d->textWidth() != inner)
-            d->setTextWidth(inner);
-        L.text = QRectF(0, h, qMin(inner, std::ceil(d->idealWidth()) + 1), d->size().height());
+        L.text = QRectF(0, h, mathtext::fit(d, inner), d->size().height());
         w = qMax(w, L.text.width());
         h += L.text.height() + 2;
     }
@@ -1720,10 +1723,8 @@ QString MessageView::selectedText() const
 {
     if (m_delegate->selA == m_delegate->selB || !m_selIndex.isValid())
         return {};
-    QTextCursor cur(textDoc(m_model->item(m_selIndex.row()).msg));
-    cur.setPosition(qMin(m_delegate->selA, m_delegate->selB));
-    cur.setPosition(qMax(m_delegate->selA, m_delegate->selB), QTextCursor::KeepAnchor);
-    return cur.selectedText().replace(QChar(0x2029), QChar(u'\n'));
+    return mathtext::plainText(textDoc(m_model->item(m_selIndex.row()).msg), qMin(m_delegate->selA, m_delegate->selB),
+                               qMax(m_delegate->selA, m_delegate->selB));
 }
 
 void MessageView::clearSelection()

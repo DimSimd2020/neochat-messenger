@@ -1,5 +1,6 @@
 // Renders voice and circle bubbles (with and without a transcript) into PNG files.
-// Usage: neochat_bubbletest <out dir>
+// Usage: neochat_bubbletest <out dir> [texts.json]
+// texts.json: [{"text": "...", "spans": [...]}], messages with formulas typeset by the core.
 #include "messages.h"
 #include "style.h"
 #include "theme.h"
@@ -8,6 +9,8 @@
 #include <QBuffer>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
+#include <QJsonDocument>
 #include <QImage>
 #include <QJsonArray>
 #include <QListView>
@@ -50,13 +53,27 @@ int main(int argc, char **argv)
                  message(4, true, {{"name", "circle.mp4"}, {"mime", "video/mp4"}, {"size", 900000}, {"circle", true}, {"duration", 5000}, {"thumb", thumb()}, {"transcript", ""}}),
                  message(5, false, {{"name", "voice.m4a"}, {"mime", "audio/mp4"}, {"size", 90000}, {"voice", true}, {"wave", w}, {"duration", 125000}, {"transcript", ""}})},
                 false);
+    if (argc > 2) {
+        QFile f(argv[2]);
+        f.open(QIODevice::ReadOnly);
+        QList<QJsonObject> texts;
+        int n = 100;
+        for (const auto &v : QJsonDocument::fromJson(f.readAll()).array()) {
+            const QJsonObject t = v.toObject();
+            texts << QJsonObject{{"id", QString("t%1").arg(n)}, {"local_id", n}, {"kind", "text"}, {"outgoing", n % 2 == 0}, {"status", "read"},
+                                 {"sent_at", double(QDateTime::currentMSecsSinceEpoch() - (200 - n) * 60000)}, {"sender_name", "Анна"},
+                                 {"sender_user_id", "u1"}, {"text", t.value("text")}, {"spans", t.value("spans")}};
+            ++n;
+        }
+        model.merge(texts, false);
+    }
     for (bool dark : {true, false}) {
         Theme::instance()->setMode(dark ? Theme::Dark : Theme::Light);
         QListView view;
         view.setModel(&model);
         view.setItemDelegate(new MessageDelegate(&view));
         view.setFrameShape(QFrame::NoFrame);
-        view.resize(640, 820);
+        view.resize(640, argc > 2 ? 1900 : 820);
         view.setStyleSheet(QString("QListView { background: %1; }").arg(Theme::p().canvas.name()));
         view.show();
         QApplication::processEvents();

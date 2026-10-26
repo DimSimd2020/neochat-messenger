@@ -131,6 +131,7 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
             addView(toggle("Крупные эмодзи без текста", "big_emoji", true))
             addView(toggle("Анимированные эмодзи", "animated_emoji", true))
             addView(note("Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи."))
+            addView(note("Формулы LaTeX: шрифт XITS Math, лицензия SIL OFL 1.1."))
             addView(toggle("Уменьшить анимацию", "reduce_motion", false) { Theme.forceReduced = prefs.getBoolean("reduce_motion", false) })
         }
 
