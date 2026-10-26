@@ -537,8 +537,7 @@ final class SettingsViewController: SheetViewController {
             SwitchRow("face.smiling", "Крупные эмодзи без текста", on: Prefs.bigEmoji) { Prefs.set("big_emoji", $0) },
             SwitchRow("sparkles", "Анимированные эмодзи", on: Prefs.animatedEmoji) { Prefs.set("animated_emoji", $0) },
             SwitchRow("figure.walk", "Уменьшить анимацию", on: UserDefaults.standard.bool(forKey: "reduce_motion")) { Prefs.set("reduce_motion", $0) },
-        ], footer: "Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи.
-Формулы LaTeX: шрифт XITS Math, лицензия SIL OFL 1.1.")
+        ], footer: "Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи.\nФормулы LaTeX: шрифт XITS Math, лицензия SIL OFL 1.1.")
 
         let sort = NavRow("arrow.up.arrow.down", "Сортировка чатов", value: chatSorts.first { $0.0 == Prefs.chatSort }?.1 ?? "") {}
         sort.addAction(UIAction { [weak self, weak sort] _ in
