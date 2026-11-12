@@ -322,6 +322,9 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     // history
     private val list = RecyclerView(ctx)
+
+    /** What the plates of this screen look through, blurred: the history with the button over it. */
+    private val listHolder = BackdropSource(ctx)
     private val layout = LinearLayoutManager(ctx).apply { stackFromEnd = true }
     private val adapter = MessageAdapter()
     private var messages: List<JSONObject> = emptyList()
@@ -398,6 +401,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         buildHeader()
         column.addView(header, lp().apply { setMargins(dp(12), dp(8), dp(12), 0) })
         searchWrap.addView(searchBar, FrameLayout.LayoutParams(MATCH, dp(48)))
+        searchBar.frostGlass(listHolder)
         searchWrap.visibility = View.GONE
         column.addView(searchWrap, lp().apply { setMargins(dp(12), dp(8), dp(12), 0) })
         buildNotice()
@@ -423,7 +427,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 }
             }
         })
-        val listHolder = FrameLayout(ctx)
         listHolder.addView(list, FrameLayout.LayoutParams(MATCH, MATCH))
         jump.visibility = View.GONE
         jump.elevation = ctx.dpf(4)
@@ -448,6 +451,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private fun buildHeader() {
         header.gravity = Gravity.CENTER_VERTICAL
         header.background = GlassDrawable(ctx, radius = ctx.dpf(32))
+        header.frostGlass(listHolder)
         header.setPadding(dp(4), dp(6), dp(4), dp(6))
         val back = IconButton(ctx, R.drawable.ic_back, "Вернуться к чатам")
         back.setOnClickListener { act.closeChat() }
@@ -517,6 +521,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun buildNotice() {
         notice.gravity = Gravity.CENTER_VERTICAL
+        // The warning keeps its dense fill: it has to stay readable over any history.
         notice.background = GlassDrawable(ctx, GlassDrawable.Kind.WARNING, ctx.dpf(20))
         notice.setPadding(dp(16), dp(10), dp(8), dp(10))
         notice.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
@@ -2004,6 +2009,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         // The reply preview is the top part of the same glass field, not a separate strip.
         composerBox.orientation = LinearLayout.VERTICAL
         composerBox.background = composerBg
+        composerBox.frostGlass(listHolder)
         replyBar.gravity = Gravity.CENTER_VERTICAL
         replyBar.setPadding(dp(18), dp(8), dp(4), 0)
         replyLine.background = GradientDrawable().apply { cornerRadius = ctx.dpf(2) }

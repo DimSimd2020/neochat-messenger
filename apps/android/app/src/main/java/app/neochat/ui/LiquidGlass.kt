@@ -18,10 +18,18 @@ import androidx.annotation.RequiresApi
 
 /**
  * Content that glass surfaces look through. A surface that [watch]es it repaints whenever anything
- * inside changes, e.g. while a list scrolls under it.
+ * inside changes, e.g. while a list scrolls under it. Whatever changes, and however many plates
+ * watch it, each of them is redrawn once per frame and none that is hidden at all.
  */
 class BackdropSource(ctx: Context) : FrameLayout(ctx) {
     private val watchers = ArrayList<View>()
+    private val due = ArrayList<View>()
+    private var scheduled = false
+    private val flush = Runnable {
+        scheduled = false
+        for (v in due) v.invalidate()
+        due.clear()
+    }
 
     fun watch(v: View) {
         if (v !in watchers) watchers += v
@@ -29,7 +37,11 @@ class BackdropSource(ctx: Context) : FrameLayout(ctx) {
 
     override fun onDescendantInvalidated(child: View, target: View) {
         super.onDescendantInvalidated(child, target)
-        for (v in watchers) v.invalidate()
+        for (v in watchers) if (v.visibility == View.VISIBLE && v.alpha > 0f && v !in due) due += v
+        if (due.isNotEmpty() && !scheduled) {
+            scheduled = true
+            postOnAnimation(flush)
+        }
     }
 }
 
@@ -38,6 +50,9 @@ class BackdropSource(ctx: Context) : FrameLayout(ctx) {
  * the content of [source] is recorded into a render node with a blur effect; from 13 a small shader
  * also bends it along the rim, the way thick glass does. Older systems, weak devices and any failure
  * return false, and the caller paints its denser fill instead.
+ *
+ * The surface must not lie inside [source]: while the source is being recorded, nested requests get
+ * no blur, and the surface would otherwise frost its own picture.
  */
 class BackdropBlur(private val source: BackdropSource, private val blurDp: Float = 12f) {
     private val here = IntArray(2)
@@ -47,19 +62,29 @@ class BackdropBlur(private val source: BackdropSource, private val blurDp: Float
         source.context.getSystemService(ActivityManager::class.java)?.isLowRamDevice == true
 
     fun draw(c: Canvas, host: View, bounds: Rect, path: Path, radius: Float): Boolean {
-        if (off || !c.isHardwareAccelerated || source.width == 0 || bounds.isEmpty) return false
+        if (off || recording || !c.isHardwareAccelerated || source.width == 0 || bounds.isEmpty) return false
         if (Build.VERSION.SDK_INT >= 31) {
             try {
                 val l = layer as? Layer ?: Layer(host.context, blurDp).also { layer = it }
                 host.getLocationOnScreen(here)
                 source.getLocationOnScreen(there)
-                l.draw(c, source, here[0] - there[0] + bounds.left, here[1] - there[1] + bounds.top, bounds, path, radius)
+                recording = true
+                try {
+                    l.draw(c, source, here[0] - there[0] + bounds.left, here[1] - there[1] + bounds.top, bounds, path, radius)
+                } finally {
+                    recording = false
+                }
                 return true
             } catch (e: Throwable) {
                 off = true
             }
         }
         return false
+    }
+
+    private companion object {
+        /** Set while a source is recorded, so a glass surface inside it asks for nothing. */
+        var recording = false
     }
 }
 

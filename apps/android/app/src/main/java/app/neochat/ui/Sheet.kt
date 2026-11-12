@@ -219,13 +219,13 @@ open class Sheet(protected val host: Host, title: String) {
             return
         }
         if (open) {
-            panel.springTo(Prop.Y, 0f, 0.5f, 0.8f)
+            panel.springTo(Prop.Y, 0f, 0.52f, 0.86f)
             anim = AnimatorSet().apply {
                 playTogether(
-                    ObjectAnimator.ofFloat(scrim, View.ALPHA, 1f).setDuration(220),
-                    ObjectAnimator.ofFloat(panel, View.ALPHA, 1f).setDuration(140),
+                    ObjectAnimator.ofFloat(scrim, View.ALPHA, 1f).setDuration(260),
+                    ObjectAnimator.ofFloat(panel, View.ALPHA, 1f).setDuration(180),
                 )
-                interpolator = Theme.surfaceCurve
+                interpolator = Theme.arriveCurve
                 start()
             }
             return

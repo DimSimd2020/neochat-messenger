@@ -130,7 +130,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             line.addView(info("Имя пользователя","@"+profile.str("username")) {
                 (act.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("Имя пользователя","@"+profile.str("username"))); act.toast("Имя пользователя скопировано")
             },lp(0,WRAP,1f))
-            line.addView(IconButton(act,R.drawable.ic_qr,"QR-код профиля").apply { setOnClickListener { profileQr(act,uid) } })
+            line.addView(IconButton(act,R.drawable.ic_qr,"QR-код профиля").apply { setOnClickListener { profileQr(act,uid,profile.str("display_name"),profile.str("avatar_path")) } })
             if (!own && !profile.optBoolean("is_contact")) line.addView(IconButton(act,R.drawable.ic_person_add,"Добавить в контакт").apply {
                 setOnClickListener { CoreClient.call("resolve_contact",JSONObject().put("username",profile.str("username"))) { _,err -> if(err!=null) act.toast(err.message) else { act.toast("Контакт добавлен"); load() } } }
             })
@@ -233,12 +233,12 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     }
 }
 
-fun profileQr(act:MainActivity,uid:String) {
+fun profileQr(act:MainActivity,uid:String,name:String,avatarPath:String) {
     CoreClient.call("profile_qr",JSONObject().put("user_id",uid)) { v,e ->
         if(e!=null)return@call act.toast(e.message)
         val p=v as JSONObject;val sheet=Sheet(act,"QR-код профиля");val card=QrCard(sheet.ctx)
-        card.qr.set(p.optJSONArray("qr_rows")?.let {a->(0 until a.length()).map {a.optString(it)}}.orEmpty())
-        card.handle.text="@"+p.str("username");sheet.add(card)
+        sheet.add(card)
+        card.show(p.optJSONArray("qr_rows")?.let {a->(0 until a.length()).map {a.optString(it)}}.orEmpty(),p.str("username"),name,uid,avatarPath)
         sheet.add(PillButton(sheet.ctx,"Скопировать ссылку",primary=false).apply {setOnClickListener {val clipboard=act.getSystemService(android.content.ClipboardManager::class.java);clipboard.setPrimaryClip(android.content.ClipData.newPlainText("NeoChat",p.str("link")));act.toast("Ссылка скопирована")}})
         sheet.show()
     }

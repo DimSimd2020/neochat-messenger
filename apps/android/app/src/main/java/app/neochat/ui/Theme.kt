@@ -155,6 +155,12 @@ object Theme {
     /** cubic-bezier(.22,.8,.25,1) from the motion spec. */
     val surfaceCurve = PathInterpolator(0.22f, 0.8f, 0.25f, 1f)
 
+    /**
+     * The curve of something arriving: a page, a sheet, a code. It leaves quickly and spends the
+     * rest of its time easing into place, which is what reads as smoothness rather than as speed.
+     */
+    val arriveCurve = PathInterpolator(0.16f, 1f, 0.3f, 1f)
+
     /** Reduced motion: the system animator scale is off or the app setting is on. Read live. */
     var forceReduced = false
     val reducedMotion get() = forceReduced || !ValueAnimator.areAnimatorsEnabled()

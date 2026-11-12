@@ -18,8 +18,9 @@ class InteractionInstrumentation : Instrumentation() {
     private var archive = false
     private var fixes = false
     private var push = false
+    private var art = false
     private var profileServer = ""
-    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); archive = arguments?.getString("archive") == "true"; fixes = arguments?.getString("fixes") == "true"; push = arguments?.getString("push") == "true"; profileServer=arguments?.getString("profile_server") ?: ""; start() }
+    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); archive = arguments?.getString("archive") == "true"; fixes = arguments?.getString("fixes") == "true"; push = arguments?.getString("push") == "true"; art = arguments?.getString("art") == "true"; profileServer=arguments?.getString("profile_server") ?: ""; start() }
 
     override fun onStart() {
         val result = Bundle()
@@ -67,14 +68,93 @@ class InteractionInstrumentation : Instrumentation() {
             if (archive) archiveInteraction()
             if (push) pushInteraction()
             if (fixes) screenAndFileRegressions()
+            if (art) qrArtChecks()
             result.putString("stream", "OK: reply gestures; archive follows finger, partial/cancelled pull, scroll hiding, navigation cleanup, inline undo; tab bar lens lifts, follows and lands" +
-                (if (push) "; FCM job and socket fallback" else "") + (if (profileServer.isNotEmpty()) "; verified email enrollment and native email form" else "") + "\n")
+                (if (push) "; FCM job and socket fallback" else "") + (if (art) "; QR patterns, inks and the photo hole" else "") + (if (profileServer.isNotEmpty()) "; verified email enrollment and native email form" else "") + "\n")
             finish(-1, result)
         } catch (e: Throwable) {
             result.putString("stream", "FAIL: ${e.message}\n")
             finish(0, result)
         }
     }
+
+    /**
+     * Draws every pattern, ink and the photo hole of a styled code into `qr/` of the app's external
+     * files, and checks what the picture is made of: modules are laid down on white paper, the
+     * patterns differ from one another, and the square left for the photo really holds nothing.
+     */
+    private fun qrArtChecks() {
+        val ctx = targetContext
+        val out = File(ctx.getExternalFilesDir(null), "qr").apply { mkdirs() }
+        val old = Triple(QrStyle.pattern(ctx), QrStyle.ink(ctx), QrStyle.photo(ctx))
+        val oldReduced = Theme.forceReduced
+        Theme.forceReduced = true
+        try {
+            val rows = demoRows(25)
+            /** A card with the saved style on it: the whole thing for the eye, the code for the counts. */
+            fun card(): QrCard {
+                val c = QrCard(ctx)
+                c.show(rows, "andrey", "Андрей", "u1", "")
+                return c
+            }
+            val cover = HashMap<String, Double>()
+            for (p in QrPattern.values()) {
+                QrStyle.save(ctx, pattern = p, ink = QrInk.OCEAN, photo = false)
+                val c = card()
+                save(render(c, 340, 340), File(out, "pattern-${p.id}.png"))
+                cover[p.id] = ink(render(c.qr, 320, 320))
+            }
+            check(cover.values.all { it > 0.05 }) { "A pattern drew almost nothing: $cover" }
+            check(cover.values.toSet().size == cover.size) { "Patterns drew the same picture: $cover" }
+            for (i in QrInk.ALL) {
+                QrStyle.save(ctx, pattern = QrPattern.DOTS, ink = i, photo = false)
+                save(render(card(), 340, 340), File(out, "ink-${i.id}.png"))
+            }
+            // A code is read from white paper, so no ink may be pale — in any palette.
+            for (p in listOf(Palette.DARK, Palette.LIGHT)) {
+                val cs = QrInk.THEME.colors(p)
+                check(cs.all { lightness(it) < 0.6 }) { "The theme ink is too pale to scan in ${if (p.dark) "dark" else "light"}: ${cs.map { Integer.toHexString(it) }}" }
+            }
+            QrStyle.save(ctx, pattern = QrPattern.DOTS, ink = QrInk.OCEAN, photo = false)
+            val plain = ink(render(card().qr, 320, 320))
+            QrStyle.save(ctx, photo = true)
+            val withPhoto = card()
+            save(render(withPhoto, 340, 340), File(out, "photo.png"))
+            val hole = ink(render(withPhoto.qr, 320, 320))
+            check(hole < plain - 0.01) { "The photo left no room in the code: $plain then $hole" }
+            save(render(BottomNav(ctx, listOf("Все", "Личные", "Группы").map { 0 to it }, textOnly = true), ctx.dp(344), ctx.dp(64)), File(out, "filters.png"))
+        } finally {
+            Theme.forceReduced = oldReduced
+            QrStyle.save(ctx, pattern = old.first, ink = old.second, photo = old.third)
+        }
+    }
+
+    /** Measures, lays out and draws a view that is not on the screen. */
+    private fun render(v: View, w: Int, h: Int): Bitmap {
+        v.measure(
+            View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY),
+        )
+        v.layout(0, 0, w, h)
+        val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        v.draw(Canvas(b))
+        return b
+    }
+
+    private fun save(b: Bitmap, f: File) = f.outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
+
+    /** Share of the paper that carries a module. */
+    private fun ink(b: Bitmap): Double {
+        var dark = 0
+        var seen = 0
+        for (y in 0 until b.height step 2) for (x in 0 until b.width step 2) {
+            seen++
+            if (lightness(b.getPixel(x, y)) < 0.72) dark++
+        }
+        return dark.toDouble() / seen
+    }
+
+    private fun lightness(color: Int) = (0.2126 * (color shr 16 and 0xFF) + 0.7152 * (color shr 8 and 0xFF) + 0.0722 * (color and 0xFF)) / 255.0
 
     private fun pushInteraction() {
         val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).apply {

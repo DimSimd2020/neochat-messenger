@@ -3,12 +3,8 @@ package app.neochat.ui
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.graphics.Canvas
-import android.graphics.LinearGradient
-import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
-import android.graphics.Shader
 import android.graphics.Typeface
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -211,78 +207,9 @@ object Emoji {
 }
 
 /**
- * Telegram-style contact QR: rounded dots, rounded finder eyes and the avatar
- * in the middle (the code uses error correction Q, the center is left empty).
+ * QR codes of the account: the own one on a card that can be styled (see QrArt.kt), and the camera
+ * that reads a code back.
  */
-class PrettyQrView(ctx: Context) : View(ctx) {
-    private var rows: List<String> = emptyList()
-    private val paint = Paint()
-    var dark = 0xFF16233C.toInt()
-
-    init {
-        contentDescription = "QR-код профиля"
-    }
-
-    fun set(r: List<String>) {
-        rows = r
-        invalidate()
-    }
-
-    override fun onMeasure(w: Int, h: Int) {
-        val s = MeasureSpec.getSize(w)
-        setMeasuredDimension(s, s)
-    }
-
-    override fun onDraw(c: Canvas) {
-        val n = rows.size
-        if (n == 0) return
-        c.drawColor(android.graphics.Color.WHITE)
-        val cell = (minOf(width,height) / (n+8)).coerceAtLeast(1).toFloat()
-        val left = (width-n*cell)/2
-        val top = (height-n*cell)/2
-        paint.color = dark
-        for (y in 0 until n) for (x in 0 until n) {
-            if (rows[y][x] == '1') c.drawRect(left+x*cell,top+y*cell,left+(x+1)*cell,top+(y+1)*cell,paint)
-        }
-    }
-}
-
-/** Card with a soft accent gradient behind the QR, like Telegram's. */
-class QrCard(ctx: Context) : FrameLayout(ctx), Themed {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    val qr = PrettyQrView(ctx)
-    val handle = ctx.label("", 18f, 700)
-
-    init {
-        setWillNotDraw(false)
-        val inner = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(ctx.dp(24), ctx.dp(24), ctx.dp(24), ctx.dp(20))
-        }
-        val white = FrameLayout(ctx).apply {
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(android.graphics.Color.WHITE)
-                cornerRadius = ctx.dpf(28)
-            }
-            setPadding(ctx.dp(18), ctx.dp(18), ctx.dp(18), ctx.dp(18))
-            addView(qr, LayoutParams(MATCH, WRAP))
-        }
-        inner.addView(white, lp(MATCH, WRAP))
-        handle.gravity = Gravity.CENTER
-        handle.setTextColor(android.graphics.Color.WHITE)
-        inner.addView(handle, lp(WRAP, WRAP).apply { topMargin = ctx.dp(16) })
-        addView(inner, LayoutParams(MATCH, WRAP))
-    }
-
-    override fun onDraw(c: Canvas) {
-        paint.shader = LinearGradient(0f, 0f, width.toFloat(), height.toFloat(), 0xFF3B6EF5.toInt(), 0xFF7A4BE8.toInt(), Shader.TileMode.CLAMP)
-        c.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), dpf(32), dpf(32), paint)
-    }
-
-    override fun applyTheme() = invalidate()
-}
-
 object Qr {
     const val CONTACT_PREFIX = "neochat://u/"
 
@@ -292,26 +219,44 @@ object Qr {
         val card = QrCard(ctx)
         s.add(card, 4)
         s.add(ctx.label("Покажите код собеседнику: он отсканирует его в NeoChat и сразу добавит вас в контакты. Совпадение кода с ключом заодно сверяет шифрование.", 13.5f, 400, Theme.Role.MUTED), 12)
-        val row = LinearLayout(ctx)
+        val style = PillButton(ctx, "Оформить", primary = false)
         val share = PillButton(ctx, "Поделиться", primary = false)
         val scan = PillButton(ctx, "Сканировать")
-        row.addView(share, lp(0, WRAP, 1f).apply { marginEnd = ctx.dp(5) })
-        row.addView(scan, lp(0, WRAP, 1f).apply { marginStart = ctx.dp(5) })
+        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((i, b) in listOf(style, share, scan).withIndex()) {
+            row.addView(b, lp(0, WRAP, 1f).apply { if (i > 0) marginStart = ctx.dp(5) })
+        }
         s.add(row, 14)
         var link = ""
-        CoreClient.call("my_qr") { v, e ->
-            if (e != null) return@call act.toast(e.message)
-            val o = v as JSONObject
-            link = o.str("link")
-            val rows = o.optJSONArray("qr_rows")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList()
-            card.qr.set(rows)
-            card.handle.text = "@" + o.str("username")
+        var rows: List<String> = emptyList()
+        var username = ""
+        var me = JSONObject()
+        style.isEnabled = false
+        /** Shows the code as soon as both the code and the account behind it are known. */
+        fun paint() {
+            if (rows.isEmpty()) return
+            style.isEnabled = true
+            card.show(rows, username, me.str("display_name"), me.str("user_id"), me.str("avatar_path"))
+        }
+        style.setOnClickListener {
+            QrStyles.show(act, rows, username, me.str("display_name"), me.str("user_id"), me.str("avatar_path")) {
+                card.readStyle().play()
+            }
         }
         share.setOnClickListener {
             if (link.isEmpty()) return@setOnClickListener
             act.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, link), "Поделиться"))
         }
         scan.setOnClickListener { s.dismiss(); scanContact(act) }
+        CoreClient.call("status") { v, _ -> me = (v as? JSONObject) ?: JSONObject(); paint() }
+        CoreClient.call("my_qr") { v, e ->
+            if (e != null) return@call act.toast(e.message)
+            val o = v as JSONObject
+            link = o.str("link")
+            username = o.str("username")
+            rows = o.optJSONArray("qr_rows")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList()
+            paint()
+        }
         s.show()
     }
 

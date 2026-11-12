@@ -6,6 +6,8 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.ColorFilter
 import android.graphics.LinearGradient
@@ -151,9 +153,13 @@ class GlassDrawable(
         val blurred = through != null && owner != null && level > 0f &&
             through.draw(c, owner, bounds, path, minOf(cr?.max() ?: radius, rect.width() / 2, rect.height() / 2))
         if (color != 0 && level > 0f) {
+            val thin = if (blurred) THIN else if (kind == Kind.ACTION) FROSTED else 1f
             fill.color = color
-            fill.alpha = (fill.alpha * level.coerceAtMost(1f) * (if (blurred) THIN else 1f)).toInt()
+            fill.alpha = (fill.alpha * level.coerceAtMost(1f) * thin).toInt()
             c.drawPath(path, fill)
+            // Without a backdrop to blur, the frost of the fill itself is what makes the surface
+            // read as ground glass rather than as a flat colour.
+            if (!blurred && kind == Kind.ACTION) Frost.draw(c, path)
         }
         if (pressed > 0f) {
             fill.color = if (p.dark) 0x22FFFFFF else 0x14000000
@@ -165,7 +171,7 @@ class GlassDrawable(
             fill.alpha = 41
             c.drawPath(path, fill)
         }
-        if (rim && level > 0f && (blurred || (kind == Kind.GLASS && radius >= ctx.dpf(14)))) {
+        if (rim && level > 0f && (blurred || ((kind == Kind.GLASS || kind == Kind.ACTION) && radius >= ctx.dpf(14)))) {
             // Light caught along the top edge of the glass.
             val band = minOf(rect.height() / 2, ctx.dpf(24))
             val key = (rect.top.toInt() * 31 + band.toInt()) * 2 + (if (p.dark) 1 else 0)
@@ -179,7 +185,7 @@ class GlassDrawable(
             c.drawRect(rect.left, rect.top, rect.right, rect.top + band, sheen)
             c.restore()
         }
-        if (rim && kind != Kind.ACTION && kind != Kind.OUTGOING && level > 0f) {
+        if (rim && kind != Kind.OUTGOING && level > 0f) {
             // Brightest at the corners the light falls on, and the colour of the palette between them.
             val key = (((rect.left.toInt() * 31 + rect.top.toInt()) * 31 + rect.right.toInt()) * 31 + rect.bottom.toInt()) * 31 + p.rim + (if (p.dark) 1 else 0)
             if (stroke.shader == null || key != rimKey) {
@@ -196,12 +202,56 @@ class GlassDrawable(
     private companion object {
         /** Share of the fill that stays over blurred content, which already tints the surface. */
         const val THIN = 0.55f
+
+        /** Share of the fill left on an accent surface with nothing to blur behind it. */
+        const val FROSTED = 0.8f
     }
 
     override fun setAlpha(alpha: Int) {}
     override fun setColorFilter(cf: ColorFilter?) {}
     @Deprecated("Deprecated in Java")
     override fun getOpacity() = PixelFormat.TRANSLUCENT
+}
+
+/**
+ * The grain of ground glass: one fixed tile of random alpha, light on a dark palette and dark on a
+ * light one. [GlassDrawable] lays it over a filled surface that has no backdrop to blur, so the
+ * translucency reads as frosting rather than as a colour that lost its opacity.
+ */
+private object Frost {
+    private const val TILE = 64
+    private const val SPECKLE = 46
+
+    private fun noise(color: Int) = Bitmap.createBitmap(TILE, TILE, Bitmap.Config.ARGB_8888).also { b ->
+        val rnd = java.util.Random(70717L)
+        val px = IntArray(TILE * TILE)
+        for (i in px.indices) px[i] = (color and 0x00FFFFFF) or (rnd.nextInt(SPECKLE) shl 24)
+        b.setPixels(px, 0, TILE, 0, 0, TILE, TILE)
+    }
+
+    private val light by lazy { BitmapShader(noise(0xFFFFFF), Shader.TileMode.REPEAT, Shader.TileMode.REPEAT) }
+    private val dark by lazy { BitmapShader(noise(0x0A1A2E.toInt()), Shader.TileMode.REPEAT, Shader.TileMode.REPEAT) }
+    private val paint = Paint()
+
+    fun draw(c: Canvas, path: Path) {
+        paint.shader = if (Theme.p.dark) light else dark
+        c.save()
+        c.clipPath(path)
+        c.drawPaint(paint)
+        c.restore()
+    }
+}
+
+/**
+ * Lays the glass this view draws over [source], so the source shows through it blurred. The view
+ * must sit outside [source]: a surface cannot frost itself.
+ */
+fun View.frostGlass(source: BackdropSource) {
+    (background as? GlassDrawable)?.let {
+        it.backdrop = BackdropBlur(source)
+        it.host = this
+        source.watch(this)
+    }
 }
 
 /**
@@ -229,7 +279,7 @@ fun View.pressFeedback() {
             }
         }
         val sink = 1f - (dpf(5) / maxOf(width, height, 1)).coerceAtMost(0.1f)
-        if (on) springTo(Prop.SCALE, sink, 0.2f, 1f) else springTo(Prop.SCALE, 1f, 0.42f, 0.5f)
+        if (on) springTo(Prop.SCALE, sink, 0.2f, 1f) else springTo(Prop.SCALE, 1f, 0.44f, 0.68f)
     }
     fun cancelPending() {
         pending?.let { removeCallbacks(it) }
@@ -366,7 +416,7 @@ class PillButton(ctx: Context, text: String, private var primary: Boolean = true
 /** Small selectable chip ("Все / Личные / Группы"); the glass fades in on a spring and the chip pops. */
 class Chip(ctx: Context, text: String) : TextView(ctx), Themed {
     private val glass = GlassDrawable(ctx, GlassDrawable.Kind.GLASS, dpf(22)).apply { level = 0f }
-    private val shown = Spring(0.32f, 0.9f) { glass.level = it; applyTheme() }
+    private val shown = Spring(0.36f, 0.92f) { glass.level = it; applyTheme() }
 
     init {
         this.text = text

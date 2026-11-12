@@ -244,17 +244,15 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private fun dp(v: Int) = ctx.dp(v)
 
     /**
-     * Two glass capsules float over the content, the name of the app and the actions. Nothing
+     * The wordmark and one glass capsule with the actions float over the content. Nothing
      * fills the strip between them, so a page below, the cover of a profile for one, reaches the
      * top of the screen and shows through the glass.
      */
     private fun buildHeader() {
         brandPill.gravity = Gravity.CENTER_VERTICAL
-        brandPill.setPadding(dp(14), 0, dp(20), 0)
-        brandPill.background = capsule(brandPill)
         brandPill.addView(ImageView(ctx).apply { setImageResource(R.drawable.logo); importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, lp(dp(28), dp(28)))
         brandPill.addView(ctx.label("NeoChat", 22f, 700).apply { heading() }, lp(WRAP, WRAP).apply { marginStart = dp(10) })
-        header.addView(brandPill, FrameLayout.LayoutParams(WRAP, dp(48), Gravity.TOP or Gravity.START).apply { marginStart = dp(12) })
+        header.addView(brandPill, FrameLayout.LayoutParams(WRAP, dp(48), Gravity.TOP or Gravity.START).apply { marginStart = dp(16) })
         actionsPill.gravity = Gravity.CENTER_VERTICAL
         actionsPill.background = capsule(actionsPill)
         val compose = IconButton(ctx, R.drawable.ic_compose, "Новый чат")
@@ -307,7 +305,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
             filter = i
             applyChats(true)
         }
-        chips.addView(filterTabs, lp(0, dp(68), 1f))
+        chips.addView(filterTabs, lp(0, dp(64), 1f))
         val sortBtn = IconButton(ctx, R.drawable.ic_sort, "Сортировка чатов")
         sortBtn.setOnClickListener {
             val cur = Prefs.of(ctx).getString("chat_sort", "activity")
@@ -319,7 +317,9 @@ class HomeScreen(private val act: MainActivity) : Screen {
             m.show()
         }
         chips.addView(sortBtn, lp(dp(44), dp(44)))
-        chatsPage.addView(chips, lp().apply { setMargins(dp(12), dp(10), dp(12), dp(4)) })
+        // The bar is drawn BAR_INSET_X inside its view, so the row starts that far left of the search box
+        // for the two to share an edge; the sort button keeps its place at the end of the row.
+        chatsPage.addView(chips, lp().apply { setMargins(dp(16 - BottomNav.BAR_INSET_X), 0, dp(12), dp(4)) })
         list(chatList, chatAdapter)
         androidx.core.view.ViewCompat.addAccessibilityAction(chatList, "Показать архив") { _, _ ->
             chatList.scrollToPosition(0)
@@ -591,8 +591,8 @@ class HomeScreen(private val act: MainActivity) : Screen {
             to.translationX = 0f
             return
         }
-        val shift = ctx.dpf(28) * dir
-        from.animate().alpha(0f).translationX(-shift / 2).setDuration(150).setInterpolator(Theme.surfaceCurve).withEndAction {
+        val shift = ctx.dpf(32) * dir
+        from.animate().alpha(0f).translationX(-shift / 2).setDuration(160).setInterpolator(Theme.surfaceCurve).withEndAction {
             from.visibility = View.GONE
             from.alpha = 1f
             from.translationX = 0f
@@ -600,8 +600,8 @@ class HomeScreen(private val act: MainActivity) : Screen {
         to.visibility = View.VISIBLE
         to.alpha = 0f
         if (!to.spring(Prop.X).running) to.translationX = shift
-        to.springTo(Prop.X, 0f, 0.42f, 0.86f)
-        to.animate().alpha(1f).setDuration(200).setInterpolator(Theme.surfaceCurve).withEndAction(null).start()
+        to.springTo(Prop.X, 0f, 0.46f, 0.9f)
+        to.animate().alpha(1f).setDuration(240).setInterpolator(Theme.arriveCurve).withEndAction(null).start()
     }
 
     private fun fadeIn(v: View) {
@@ -743,10 +743,10 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
     private var lensX = 0f
     private var lensWidth = 0f
     private var lift = 0f
-    private val slide = Spring(0.42f, 0.72f, 0.5f) { lensX = it; invalidate() }
-    private val sizing = Spring(0.42f, 0.72f, 0.5f) { lensWidth = it; invalidate() }
-    private val lifting = Spring(0.34f, 0.72f) { lift = it; invalidate() }
-    private val hops = List(count) { Spring(0.38f, 0.42f) { _ -> invalidate() } }
+    private val slide = Spring(0.44f, 0.82f, 0.5f) { lensX = it; invalidate() }
+    private val sizing = Spring(0.44f, 0.82f, 0.5f) { lensWidth = it; invalidate() }
+    private val lifting = Spring(0.36f, 0.86f) { lift = it; invalidate() }
+    private val hops = List(count) { Spring(0.4f, 0.54f) { _ -> invalidate() } }
     private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
     private var downX = 0f
     private var downY = 0f
@@ -789,7 +789,7 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
     init {
         orientation = HORIZONTAL
         setWillNotDraw(false)
-        val pad = ctx.dp(4)
+        val pad = ctx.dp(PAD)
         setPadding(roomX.toInt() + pad, roomY.toInt() + pad, roomX.toInt() + pad, roomY.toInt() + pad)
         hops.forEach { it.snap(1f) }
         titles.forEachIndexed { i, text ->
@@ -810,8 +810,8 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
         if (i !in 0 until count) return
         if (i == selected) return
         mark(i)
-        slide.response = 0.44f
-        slide.damping = 0.72f
+        slide.response = 0.46f
+        slide.damping = 0.84f
         if (animated) { slide.to(center(i)); sizing.to(itemWidth(i)) }
         else { slide.snap(center(i)); sizing.snap(itemWidth(i)) }
         if (animated && isLaidOut) reveal(i)
@@ -923,8 +923,8 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
 
     /** The lifted lens trails the finger a little, which reads as weight. */
     private fun follow(x: Float) {
-        slide.response = if (dragging) 0.16f else 0.22f
-        slide.damping = 0.86f
+        slide.response = if (dragging) 0.19f else 0.24f
+        slide.damping = 0.9f
         slide.to(x.coerceIn(center(0), center(count - 1)))
         sizing.to(widthAt(x))
     }
@@ -945,8 +945,8 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
         removeCallbacks(pull)
         parent.requestDisallowInterceptTouchEvent(false)
         if (i != near) Haptics.select(this)
-        slide.response = 0.42f
-        slide.damping = 0.7f
+        slide.response = 0.46f
+        slide.damping = 0.82f
         slide.to(center(i))
         sizing.to(itemWidth(i))
         lifting.to(0f)
@@ -1040,5 +1040,11 @@ class BottomNav(ctx: Context, items: List<Pair<Int, String>>, private val textOn
     companion object {
         const val ROOM_X = 14
         const val ROOM_Y = 10
+
+        /** The padding the bar keeps inside its room, on every side. */
+        const val PAD = 4
+
+        /** How far the drawn bar sits from the edge of this view; callers use it to line the bar up. */
+        const val BAR_INSET_X = ROOM_X + PAD
     }
 }
