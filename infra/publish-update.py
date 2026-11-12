@@ -149,8 +149,10 @@ def main():
         beta.update(built)
         kept_notes = (current or {}).get('notes', '')
     else:
-        platforms = built
-        stable = built
+        # Only the platforms with a fresh artifact move. Replacing the whole section would drop
+        # the others, and a client whose platform is missing simply never sees an update again.
+        platforms.update(built)
+        stable.update(built)
         for platform, entry in built.items():
             old = beta.get(platform) or {}
             if newer(entry['version'], old.get('version', '0')):
