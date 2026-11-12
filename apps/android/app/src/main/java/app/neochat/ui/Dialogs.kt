@@ -58,9 +58,8 @@ object Dialogs {
     }
 
     /**
-     * Once, after the first start ever: calls in the background need the battery limit lifted, and on
-     * Android 14 a ringing call needs its own permission to appear on a locked screen.
-     * Settings keeps both switches for later.
+     * Once, after the first start ever: on Android 14 a ringing call needs its own permission to
+     * appear on a locked screen. Settings keeps the switch for later.
      */
     fun callReadiness(act: MainActivity) {
         if (act.readinessPrompted) return
@@ -74,21 +73,12 @@ object Dialogs {
     }
 
     private fun callReadinessSettings(act: MainActivity) {
-        val battery = !act.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(act.packageName)
-        val screen = !app.neochat.calls.CallNotifications.canShowOnLockScreen(act)
-        if (!battery && !screen) return
+        if (app.neochat.calls.CallNotifications.canShowOnLockScreen(act)) return
         val s = Sheet(act, "Чтобы звонки приходили сразу")
-        s.muted("Без этих разрешений Android может задержать входящий звонок или не показать его на заблокированном экране.", 4)
-        if (battery) {
-            val b = PillButton(s.ctx, "Работа в фоне без ограничений")
-            b.setOnClickListener { SettingsPage.openBatterySettings(act) }
-            s.add(b, 16)
-        }
-        if (screen) {
-            val b = PillButton(s.ctx, "Показывать звонки на заблокированном экране", primary = !battery)
-            b.setOnClickListener { SettingsPage.openLockScreenCalls(act) }
-            s.add(b, 10)
-        }
+        s.muted("Без этого разрешения Android может не показать входящий звонок на заблокированном экране.", 4)
+        val b = PillButton(s.ctx, "Показывать звонки на заблокированном экране")
+        b.setOnClickListener { SettingsPage.openLockScreenCalls(act) }
+        s.add(b, 16)
         val later = PillButton(s.ctx, "Позже", primary = false)
         later.setOnClickListener { s.dismiss() }
         s.add(later, 10)

@@ -22,23 +22,22 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 42
-        versionName = "0.7.1"
+        versionCode = 47
+        versionName = "0.7.2.4"
     }
 
     signingConfigs {
-        create("release") {
-            if (signingProps != null) {
+        // Only a real key from NEOCHAT_SIGNING signs a release. There is deliberately no in-repository
+        // fallback key: a committed keystore is public, and every build signed with it shares whatever
+        // reputation that public key picks up. Without the secret the release APK comes out unsigned.
+        if (signingProps != null) {
+            create("release") {
                 storeFile = file(signingProps.getProperty("storeFile"))
                 storePassword = signingProps.getProperty("storePassword")
                 keyAlias = signingProps.getProperty("keyAlias")
                 keyPassword = signingProps.getProperty("keyPassword")
-            } else {
-                // Sideload keystore so CI/local release APKs install when NEOCHAT_SIGNING is unset.
-                storeFile = file("${rootDir}/keystore/sideload.keystore")
-                storePassword = "android"
-                keyAlias = "sideload"
-                keyPassword = "android"
+                // v3 proves the signing key was never rotated; v1 is off by itself at minSdk 26.
+                enableV3Signing = true
             }
         }
     }
@@ -51,7 +50,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 

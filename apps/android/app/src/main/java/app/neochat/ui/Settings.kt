@@ -28,7 +28,6 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
     private val lockBox = LinearLayout(ctx)
     private val cacheValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val lastSeenValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
-    private val batteryValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val lockScreenValue = ctx.label("", 14f, 400, Theme.Role.MUTED)
     private val quickValue = ctx.label(QuickReaction.current(ctx), 14f, 400, Theme.Role.MUTED)
 
@@ -106,9 +105,8 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
         section("Уведомления").apply {
             addView(toggle("Уведомления о сообщениях", "notifications", true))
             addView(note("В уведомлении видно только название чата, текст не показывается."))
-            addView(toggle("Резервное соединение в фоне", "realtime", app.neochat.RealtimeService.enabled(ctx)) { app.neochat.RealtimeService.sync(ctx) })
-            addView(note("Сообщения и звонки приходят через push без постоянного уведомления. Резервное соединение нужно, если push недоступен: с ним в шторке появляется «NeoChat на связи». Без push и резервного соединения сообщения проверяются примерно раз в 15 минут."))
-            addView(nav(R.drawable.ic_shield, "Работа в фоне", batteryValue) { requestUnrestricted() })
+            addView(toggle("Держать соединение открытым", "realtime", app.neochat.RealtimeService.enabled(ctx)) { app.neochat.RealtimeService.sync(ctx) })
+            addView(note("Работает, пока NeoChat открыт, и держит связь с сервером даже с погасшим экраном: с ним в шторке появляется «NeoChat на связи». Когда приложение закрыто, сообщения и звонки приходят через push; без push телефон проверяет их примерно раз в 15 минут."))
             if (Build.VERSION.SDK_INT >= 34) addView(nav(R.drawable.ic_phone, "Звонки на заблокированном экране", lockScreenValue) { openLockScreenCalls(act) })
             addView(nav(R.drawable.ic_bell, "Звук и вибрация") {
                 act.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName))
@@ -235,7 +233,6 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
     }
 
     fun load() {
-        batteryValue.text = if (unrestricted()) "Без ограничений" else "Ограничена"
         lockScreenValue.text = if (app.neochat.calls.CallNotifications.canShowOnLockScreen(ctx)) "Разрешены" else "Запрещены"
         QuickReaction.load(ctx) { quickValue.text = QuickReaction.current(ctx) }
         CoreClient.call("status") { v, _ ->
@@ -302,19 +299,7 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
         menu.show()
     }
 
-    private fun unrestricted() = ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
-
-    private fun requestUnrestricted() = openBatterySettings(act)
-
     companion object {
-        /** Battery optimization may cut the background connection while the phone sleeps. */
-        fun openBatterySettings(act: MainActivity) {
-            val unrestricted = act.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(act.packageName)
-            val intent = if (unrestricted) Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-            else Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:" + act.packageName))
-            runCatching { act.startActivity(intent) }.onFailure { act.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-        }
-
         /** Android 14 asks for the right to take over a locked screen with a ringing call. */
         fun openLockScreenCalls(act: MainActivity) {
             val intent = if (Build.VERSION.SDK_INT >= 34)

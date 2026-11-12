@@ -30,7 +30,7 @@ NEOCHAT_SIGNING=E:/dev/keys/signing.properties ./gradlew assembleRelease
 # app/build/outputs/apk/release/app-release.apk
 ```
 
-Без `NEOCHAT_SIGNING` release-сборка подписывается sideload-ключом из `keystore/`. Им подписаны все опубликованные версии, поэтому пакет для автообновления собирается именно так: с другим ключом Android не установит обновление поверх. Debug-сборка: `./gradlew assembleDebug`.
+Без `NEOCHAT_SIGNING` release-сборка остаётся неподписанной и не ставится: ключей в репозитории больше нет — подпись публичным ключом делала все сборки недоверенными для Play Protect. Релизный ключ `neochat` — тот же сертификат, что у сборок 0.1.0–0.5.0; версиям 0.6.0–0.7.2.2, подписанным публичным sideload-ключом, нужна одна установка вручную, дальше обновления снова встают поверх. Debug-сборка: `./gradlew assembleDebug`.
 
 ## Проверка
 

@@ -17,9 +17,9 @@ import app.neochat.ui.Prefs
 import org.json.JSONObject
 
 /**
- * Keeps the core's WebSocket open while NeoChat is in the background, so
- * messages and calls arrive at once even without Google Play services.
- * FCM and the periodic job remain independent wake-up paths.
+ * Keeps the core's WebSocket open while NeoChat is open — including with the screen off, when the
+ * activity is still started — so calls and messages arrive without waiting for the next push.
+ * Background delivery belongs to FCM, with [SyncJob] as the fallback when push is unavailable.
  * A background socket does not mark the user as online.
  */
 class RealtimeService : Service() {
@@ -54,7 +54,8 @@ class RealtimeService : Service() {
             return START_NOT_STICKY
         }
         CoreClient.call("set_background_connection", JSONObject().put("enabled", true))
-        return START_STICKY
+        // Nothing recreates it on its own: the next foreground start does that.
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -77,17 +78,16 @@ class RealtimeService : Service() {
             if (!enabled(ctx)) stop(ctx)
         }
 
-        /** Starts or stops the service to match the setting and the sign-in state. */
+        /** Runs the service only while the app is open; anything else stops it again. */
         fun sync(ctx: Context, done: () -> Unit = {}) {
             val app = ctx.applicationContext
-            if (!enabled(app)) {
+            if (!enabled(app) || !(app as App).inForeground) {
                 stop(app)
                 return done()
             }
             CoreClient.call("list_accounts") { v, _ ->
                 val accounts = v as? org.json.JSONArray
                 if (accounts != null && (0 until accounts.length()).any { accounts.optJSONObject(it)?.optBoolean("logged_in") == true }) {
-                    // Starting from the background is refused on Android 12+; the next foreground start retries.
                     runCatching { app.startForegroundService(Intent(app, RealtimeService::class.java)) }
                 } else stop(app)
                 done()
@@ -100,11 +100,13 @@ class RealtimeService : Service() {
     }
 }
 
-/** Restores the background connection after a reboot or an app update. */
+/**
+ * Re-arms the periodic fallback after an update replaces the app. Nothing is started at boot:
+ * while NeoChat is closed delivery comes from push, and the job wakes it on its own schedule.
+ */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
-        val pending = goAsync()
-        RealtimeService.sync(ctx) { pending.finish() }
+        if (intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
+        App.scheduleSync(ctx)
     }
 }

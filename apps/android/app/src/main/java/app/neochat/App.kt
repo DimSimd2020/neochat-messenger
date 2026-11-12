@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.job.JobInfo
 import android.app.job.JobScheduler
 import android.content.ComponentName
+import android.content.Context
 import android.os.Bundle
 import app.neochat.calls.CallManager
 import app.neochat.calls.CallNotifications
@@ -46,7 +47,11 @@ class App : Application() {
             }
 
             override fun onActivityStopped(a: Activity) {
-                if (--started == 0) CoreClient.call("set_foreground", JSONObject().put("active", false))
+                if (--started == 0) {
+                    CoreClient.call("set_foreground", JSONObject().put("active", false))
+                    // Closed apps keep no socket open: push and the periodic job do the delivering.
+                    RealtimeService.stop(this@App)
+                }
             }
 
             override fun onActivityCreated(a: Activity, b: Bundle?) {}
@@ -55,7 +60,8 @@ class App : Application() {
             override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
             override fun onActivityDestroyed(a: Activity) {}
         })
-        scheduleSync()
+        // The last-resort delivery path: neither a push nor an open socket brought a hint.
+        scheduleSync(this)
     }
 
     fun openCore() {
@@ -64,20 +70,25 @@ class App : Application() {
         CoreClient.open(dir.absolutePath, DbKey.loadOrCreate(this), android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID).orEmpty())
     }
 
-    /** Periodic fallback when neither a push nor the background socket has delivered a sync hint. */
-    private fun scheduleSync() {
-        val js = getSystemService(JobScheduler::class.java)
-        if (js.getPendingJob(SyncJob.ID) != null) return
-        js.schedule(
-            JobInfo.Builder(SyncJob.ID, ComponentName(this, SyncJob::class.java))
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setPeriodic(15 * 60 * 1000L)
-                .build()
-        )
-    }
-
     companion object {
         lateinit var instance: App
             private set
+
+        /**
+         * The periodic sync. Re-armed after an update by [BootReceiver]; scheduling it twice is a
+         * no-op. It is persisted so a reboot does not leave push-less devices without delivery:
+         * JobScheduler re-registers the job itself, without starting NeoChat at boot.
+         */
+        fun scheduleSync(ctx: Context) {
+            val js = ctx.getSystemService(JobScheduler::class.java)
+            if (js.getPendingJob(SyncJob.ID) != null) return
+            js.schedule(
+                JobInfo.Builder(SyncJob.ID, ComponentName(ctx, SyncJob::class.java))
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                    .setPersisted(true)
+                    .setPeriodic(15 * 60 * 1000L)
+                    .build()
+            )
+        }
     }
 }
