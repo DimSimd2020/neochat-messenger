@@ -6,8 +6,10 @@ import android.animation.AnimatorListenerAdapter
 import android.app.Activity
 import android.content.Intent
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
@@ -61,6 +63,8 @@ class MainActivity : Activity(), Sheet.Host {
     private var updateBanner: View? = null
     private var dismissedUpdate = ""
     private var lastUpdateCheck = 0L
+    private var pendingInstallApk: File? = null
+    private var waitingForInstallPermission = false
     private var slideAnim: android.animation.ValueAnimator? = null
     var readinessPrompted = false
 
@@ -496,6 +500,15 @@ class MainActivity : Activity(), Sheet.Host {
 
     override fun onResume() {
         super.onResume()
+        if (waitingForInstallPermission) {
+            waitingForInstallPermission = false
+            val apk = pendingInstallApk
+            pendingInstallApk = null
+            if (apk != null) {
+                if (packageManager.canRequestPackageInstalls()) installUpdate(apk)
+                else toast("Разрешите NeoChat установку приложений и нажмите «Установить»")
+            }
+        }
         chat?.onResumed()
         // At most once an hour; the download runs in the background.
         val now = System.currentTimeMillis()
@@ -567,6 +580,18 @@ class MainActivity : Activity(), Sheet.Host {
     }
 
     private fun installUpdate(apk: File) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            pendingInstallApk = apk
+            waitingForInstallPermission = true
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            } catch (_: android.content.ActivityNotFoundException) {
+                pendingInstallApk = null
+                waitingForInstallPermission = false
+                toast("Разрешите NeoChat устанавливать приложения в системных настройках")
+            }
+            return
+        }
         val i = Intent(Intent.ACTION_VIEW)
             .setDataAndType(FilesProvider.uriFor(this, apk), "application/vnd.android.package-archive")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -574,6 +599,8 @@ class MainActivity : Activity(), Sheet.Host {
             startActivity(i)
         } catch (_: android.content.ActivityNotFoundException) {
             toast("Не удалось открыть установщик")
+        } catch (_: SecurityException) {
+            toast("Android не разрешил открыть установщик. Проверьте разрешение установки приложений для NeoChat")
         }
     }
 
