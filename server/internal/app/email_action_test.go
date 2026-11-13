@@ -12,12 +12,13 @@ import (
 func TestCustomEmailAction(t *testing.T) {
 	s, ts, mailbox := emailTestServer(t)
 	c := &client{t: t, base: ts.URL}
-	var ticket map[string]any
-	if status, _ := c.do("POST", "/v1/accounts/email", map[string]string{"email": "action@example.test"}, &ticket); status != 200 {
-		t.Fatal("verification request failed")
+	ticket := randomToken()
+	linkToken := randomToken()
+	if _, err := s.db.Exec(context.Background(), `INSERT INTO email_links(id,email,ticket_hash,link_hash,expires_at,sent_at) VALUES($1,$2,$3,$4,now()+interval '30 minutes',now())`, newUUID(), "action@example.test", emailHash(ticket), emailHash(linkToken)); err != nil {
+		t.Fatal("verification fixture failed")
 	}
 	mailbox.actionEmail = "action@example.test"
-	link := mailbox.latest()
+	link := ts.URL + "/v1/accounts/email/confirm?t=" + url.QueryEscape(linkToken)
 	action := func(mode, code, continuation string) string {
 		return ts.URL + "/v1/accounts/email/action?" + url.Values{"mode": {mode}, "oobCode": {code}, "continueUrl": {continuation}}.Encode()
 	}
@@ -39,14 +40,13 @@ func TestCustomEmailAction(t *testing.T) {
 		t.Fatal("missing combined confirmation form")
 	}
 	var state map[string]any
-	c.do("POST", "/v1/accounts/email/status", map[string]any{"ticket": ticket["ticket"]}, &state)
+	c.do("POST", "/v1/accounts/email/status", map[string]any{"ticket": ticket}, &state)
 	if state["verified"] != false {
 		t.Fatal("GET confirmed email")
 	}
 	get(action("resetPassword", "resetPassword-valid", link), 400)
 	get(action("verifyEmail", "verifyEmail-valid", "https://example.invalid/v1/accounts/email/confirm?t="+strings.Repeat("a", 43)), 400)
-	u, _ := url.Parse(link)
-	form := url.Values{"mode": {"verifyEmail"}, "oobCode": {"invalid"}, "t": {u.Query().Get("t")}}
+	form := url.Values{"mode": {"verifyEmail"}, "oobCode": {"invalid"}, "t": {linkToken}}
 	response, err := http.PostForm(ts.URL+"/v1/accounts/email/action", form)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestCustomEmailAction(t *testing.T) {
 	if response.StatusCode != 200 {
 		t.Fatal("combined confirmation failed")
 	}
-	c.do("POST", "/v1/accounts/email/status", map[string]any{"ticket": ticket["ticket"]}, &state)
+	c.do("POST", "/v1/accounts/email/status", map[string]any{"ticket": ticket}, &state)
 	if state["verified"] != true {
 		t.Fatal("combined confirmation did not verify email")
 	}
@@ -77,7 +77,7 @@ func TestCustomEmailAction(t *testing.T) {
 	resetLink := mailbox.latest()
 	get(action("resetPassword", "invalid", resetLink), 400)
 	page = get(action("resetPassword", "resetPassword-valid", resetLink), 200)
-	if !strings.Contains(page, "Скопировать код восстановления") || strings.Contains(page, "Подтвердить почту") {
+	if !strings.Contains(page, "Скопировать код сброса пароля") || strings.Contains(page, "Подтвердить почту") {
 		t.Fatal("reset used verification page")
 	}
 	get(action("verifyEmail", "verifyEmail-valid", resetLink), 400)

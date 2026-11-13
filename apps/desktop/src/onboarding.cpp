@@ -135,7 +135,7 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_username = new ui::TextField(QStringLiteral("Никнейм или почта"));
     m_password = new ui::TextField(QStringLiteral("Пароль"));
     m_password->setPassword(true);
-    m_code = new ui::TextField(QStringLiteral("Код восстановления"));
+    m_code = new ui::TextField(QStringLiteral("Аварийный код сброса"));
     m_resetToken = new ui::TextField(QStringLiteral("Код из письма"));
     m_loginCode = new ui::TextField(QStringLiteral("Код из чата «NeoChat уведомления»"));
     m_loginCode->hide();
@@ -185,10 +185,9 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     auto *rl = new QVBoxLayout(rec);
     rl->setContentsMargins(0, 4, 0, 0);
     rl->setSpacing(12);
-    rl->addWidget(new ui::Label(QStringLiteral("Сохраните код восстановления"), 17, QFont::DemiBold));
-    auto *recHint = new ui::Label(QStringLiteral("Код вернёт доступ к аккаунту, если все устройства потеряны. "
-                                                 "Переписка этим кодом не восстанавливается: её копия зашифрована паролем, а пароль меняется. "
-                                                 "Запишите код и храните отдельно от компьютера."),
+    rl->addWidget(new ui::Label(QStringLiteral("Сохраните аварийный код сброса"), 17, QFont::DemiBold));
+    auto *recHint = new ui::Label(QStringLiteral("Если потеряны все устройства, код восстановит ключи и переписки, сохранит вашу личность и отключит старые устройства. "
+                                                 "Храните код отдельно от компьютера."),
                                   13.5, 400, ui::Label::Muted);
     recHint->setWordWrap(true);
     rl->addWidget(recHint);
@@ -196,7 +195,7 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_recoveryCode->setMono(true);
     m_recoveryCode->setWordWrap(true);
     m_recoveryCode->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-    m_recoveryCode->setAccessibleName(QStringLiteral("Код восстановления"));
+    m_recoveryCode->setAccessibleName(QStringLiteral("Аварийный код сброса аккаунта"));
     rl->addWidget(m_recoveryCode);
     auto *copy = new ui::Button(QStringLiteral("Скопировать код"), ui::Button::Secondary);
     connect(copy, &QAbstractButton::clicked, this, [this] {
@@ -209,9 +208,12 @@ Onboarding::Onboarding(QWidget *parent) : QWidget(parent)
     m_continue->setEnabled(false);
     connect(m_saved, &QAbstractButton::toggled, m_continue, &QWidget::setEnabled);
     connect(m_continue, &QAbstractButton::clicked, this, [this] {
-        // Clear the code from memory-backed widgets as soon as it is confirmed.
-        m_recoveryCode->clear();
-        emit finished();
+        Core::instance()->call("recovery_ack", {}, this, [this](const QJsonValue &, const CoreError &e) {
+            if (!e.ok())
+                return showError(e.message);
+            m_recoveryCode->clear();
+            emit finished();
+        });
     });
     rl->addWidget(m_continue);
     m_pages->addWidget(rec);
@@ -320,9 +322,9 @@ void Onboarding::setMode(int mode)
         m_username->setLabel(QStringLiteral("Никнейм"));
         break;
     case Recover:
-        m_heading->setText(QStringLiteral("Восстановление доступа"));
-        m_hint->setText(QStringLiteral("Остальные устройства будут отключены, переписка не перенесётся."));
-        m_submit->setText(QStringLiteral("Восстановить"));
+        m_heading->setText(QStringLiteral("Восстановление аккаунта"));
+        m_hint->setText(QStringLiteral("Код восстановит ключи и переписки, сохранив вашу личность. Старые устройства отключатся."));
+        m_submit->setText(QStringLiteral("Восстановить аккаунт"));
         m_username->setLabel(QStringLiteral("Никнейм"));
         break;
     case ResetRequest:
@@ -333,7 +335,7 @@ void Onboarding::setMode(int mode)
         break;
     case ResetComplete:
         m_heading->setText(QStringLiteral("Новый пароль"));
-        m_hint->setText(QStringLiteral("Введите код со страницы из письма и новый пароль. Это не восстановление аккаунта."));
+        m_hint->setText(QStringLiteral("Введите одноразовый код сброса из письма и новый пароль. Сброс пароля не меняет личность аккаунта."));
         m_submit->setText(QStringLiteral("Сменить пароль"));
         m_username->setLabel(QStringLiteral("Никнейм или почта"));
         break;
@@ -409,7 +411,7 @@ void Onboarding::submit()
         break;
     case Recover:
         if (m_code->text().trimmed().isEmpty())
-            return showError(QStringLiteral("Введите код восстановления"));
+            return showError(QStringLiteral("Введите аварийный код сброса аккаунта"));
         method = "recover";
         p["new_password"] = password;
         p["recovery_code"] = m_code->text().trimmed();
@@ -459,8 +461,9 @@ void Onboarding::submit()
         m_code->edit()->clear();
         m_loginCode->edit()->clear();
         m_loginCode->hide();
-        if (mode == Register || mode == Recover)
-            showRecoveryCode(v.toObject().value("recovery_code").toString());
+        const QString recoveryCode = v.toObject().value("recovery_code").toString();
+        if (mode != Login || !recoveryCode.isEmpty())
+            showRecoveryCode(recoveryCode);
         else
             emit finished();
     });

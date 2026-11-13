@@ -3,47 +3,30 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Only test binaries contain this mailbox. It simulates the owner following the
 // verification email; the HTTP API, one-time proof and crypto remain real.
-type nativeMailbox struct{ server *Server }
+type nativeMailbox struct{}
 
 func (m nativeMailbox) SendPasswordReset(context.Context, string, string) error { return errBadRequest }
 func (m nativeMailbox) CompleteAction(context.Context, string, string) (string, error) {
 	return "", errBadRequest
 }
 
-func (m nativeMailbox) SendVerification(ctx context.Context, email, link string) error {
+func (m nativeMailbox) SendVerification(_ context.Context, email, _ string) error {
 	if !strings.HasSuffix(email, "@example.test") {
 		return errBadRequest
 	}
-	go func() {
-		u, _ := url.Parse(link)
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			var sent bool
-			if m.server.db.QueryRow(context.Background(), `SELECT sent_at IS NOT NULL FROM email_links WHERE link_hash=$1`, emailHash(u.Query().Get("t"))).Scan(&sent) != nil {
-				return
-			}
-			if sent {
-				response, err := http.PostForm(u.Scheme+"://"+u.Host+u.Path, url.Values{"t": {u.Query().Get("t")}})
-				if err == nil {
-					response.Body.Close()
-				}
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
 	return nil
+}
+
+func (m nativeMailbox) IsEmailVerified(_ context.Context, email string) (bool, error) {
+	return strings.HasSuffix(email, "@example.test"), nil
 }
 
 // NEOCHAT_NATIVE_TEST_COMMAND is a JSON argument array, e.g. [".../neochat_uitest.exe"].
@@ -58,7 +41,7 @@ func TestNativeEmailFlow(t *testing.T) {
 		t.Fatal("invalid native test command")
 	}
 	s, ts := testServer(t)
-	s.cfg.Email = nativeMailbox{server: s}
+	s.cfg.Email = nativeMailbox{}
 	s.cfg.EmailBaseURL = ts.URL
 	for i, arg := range args {
 		args[i] = strings.ReplaceAll(strings.ReplaceAll(arg, "{android_server}", strings.Replace(ts.URL, "127.0.0.1", "10.0.2.2", 1)), "{server}", ts.URL)

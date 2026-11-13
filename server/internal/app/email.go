@@ -8,7 +8,6 @@ import (
 	"html/template"
 	"net/http"
 	"net/mail"
-	"net/url"
 	"strings"
 	"time"
 
@@ -39,7 +38,7 @@ func (s *Server) handleLinkEmail(w http.ResponseWriter, r *http.Request, a *auth
 }
 
 func (s *Server) startEmail(w http.ResponseWriter, r *http.Request, a *authCtx) {
-	if s.cfg.Email == nil || s.cfg.EmailBaseURL == "" {
+	if s.cfg.Email == nil {
 		s.fail(w, r, errf(503, "email_unavailable", "Подтверждение почты временно недоступно"))
 		return
 	}
@@ -97,8 +96,7 @@ func (s *Server) startEmail(w http.ResponseWriter, r *http.Request, a *authCtx) 
 		s.fail(w, r, err)
 		return
 	}
-	continuation := strings.TrimRight(s.cfg.EmailBaseURL, "/") + "/v1/accounts/email/confirm?t=" + url.QueryEscape(link)
-	if err := s.cfg.Email.SendVerification(r.Context(), email, continuation); err != nil {
+	if err := s.cfg.Email.SendVerification(r.Context(), email, ""); err != nil {
 		_, _ = s.db.Exec(r.Context(), `DELETE FROM email_links WHERE id=$1`, id)
 		s.fail(w, r, errf(503, "email_send_failed", "Не удалось отправить письмо. Попробуйте позже"))
 		return
@@ -126,9 +124,9 @@ func (s *Server) handleEmailTicket(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, errRateLimited(time.Minute))
 		return
 	}
-	var email string
+	var id, email string
 	var confirmed bool
-	err := s.db.QueryRow(r.Context(), `SELECT email,confirmed_at IS NOT NULL FROM email_links WHERE ticket_hash=$1 AND sent_at IS NOT NULL AND consumed_at IS NULL AND expires_at>now()`, emailHash(req.Ticket)).Scan(&email, &confirmed)
+	err := s.db.QueryRow(r.Context(), `SELECT id,email,confirmed_at IS NOT NULL FROM email_links WHERE ticket_hash=$1 AND sent_at IS NOT NULL AND consumed_at IS NULL AND expires_at>now()`, emailHash(req.Ticket)).Scan(&id, &email, &confirmed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.fail(w, r, errf(410, "email_link_expired", "Срок подтверждения истёк. Отправьте новое письмо"))
 		return
@@ -137,10 +135,94 @@ func (s *Server) handleEmailTicket(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	if !confirmed {
+		if s.cfg.Email == nil {
+			s.fail(w, r, errf(503, "email_unavailable", "Подтверждение почты временно недоступно"))
+			return
+		}
+		verified, err := s.cfg.Email.IsEmailVerified(r.Context(), email)
+		if err != nil {
+			s.fail(w, r, errf(503, "email_unavailable", "Не удалось проверить подтверждение почты"))
+			return
+		}
+		if verified {
+			_, err = s.db.Exec(r.Context(), `UPDATE email_links SET confirmed_at=now() WHERE id=$1 AND confirmed_at IS NULL AND sent_at IS NOT NULL AND consumed_at IS NULL AND expires_at>now()`, id)
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
+		}
+		err = s.db.QueryRow(r.Context(), `SELECT confirmed_at IS NOT NULL FROM email_links WHERE id=$1 AND sent_at IS NOT NULL AND consumed_at IS NULL AND expires_at>now()`, id).Scan(&confirmed)
+		if errors.Is(err, pgx.ErrNoRows) {
+			s.fail(w, r, errf(410, "email_link_expired", "Срок подтверждения истёк. Отправьте новое письмо"))
+			return
+		}
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
 	writeJSON(w, 200, map[string]any{"email": email, "verified": confirmed})
 }
 
+func (s *Server) syncPendingEmailBinding(r *http.Request, a *authCtx) error {
+	if s.cfg.Email == nil {
+		return nil
+	}
+	var id, email string
+	err := s.db.QueryRow(r.Context(), `SELECT id,email FROM email_links WHERE user_id=$1 AND device_id=$2 AND sent_at IS NOT NULL AND confirmed_at IS NULL AND consumed_at IS NULL AND expires_at>now() ORDER BY created_at DESC LIMIT 1`, a.UserID, a.DeviceID).Scan(&id, &email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	verified, err := s.cfg.Email.IsEmailVerified(r.Context(), email)
+	if err != nil || !verified {
+		return err
+	}
+	return s.inTx(r.Context(), func(tx pgx.Tx) error {
+		var pendingEmail string
+		err := tx.QueryRow(r.Context(), `SELECT email FROM email_links WHERE id=$1 AND user_id=$2 AND device_id=$3 AND sent_at IS NOT NULL AND confirmed_at IS NULL AND consumed_at IS NULL AND expires_at>now() FOR UPDATE`, id, a.UserID, a.DeviceID).Scan(&pendingEmail)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var active bool
+		if err := tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM devices WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL)`, a.DeviceID, a.UserID).Scan(&active); err != nil {
+			return err
+		}
+		if !active {
+			return nil
+		}
+		result, err := tx.Exec(r.Context(), `UPDATE users SET email=$2,email_verified_at=now() WHERE id=$1 AND email IS NULL`, a.UserID, pendingEmail)
+		if err != nil {
+			if isUniqueViolation(err) {
+				return errf(409, "email_already_linked", "Адрес уже привязан к другому аккаунту")
+			}
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			var current *string
+			if err := tx.QueryRow(r.Context(), `SELECT email FROM users WHERE id=$1`, a.UserID).Scan(&current); err != nil {
+				return err
+			}
+			if current == nil || *current != pendingEmail {
+				return errBadRequest
+			}
+		}
+		_, err = tx.Exec(r.Context(), `UPDATE email_links SET confirmed_at=COALESCE(confirmed_at,now()),consumed_at=now() WHERE id=$1 AND consumed_at IS NULL`, id)
+		return err
+	})
+}
+
 func (s *Server) handleEmailStatus(w http.ResponseWriter, r *http.Request, a *authCtx) {
+	if err := s.syncPendingEmailBinding(r, a); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	var email *string
 	if err := s.db.QueryRow(r.Context(), `SELECT email FROM users WHERE id=$1`, a.UserID).Scan(&email); err != nil {
 		s.fail(w, r, err)
@@ -170,6 +252,31 @@ type emailPageData struct {
 
 func (s *Server) handleEmailConfirm(w http.ResponseWriter, r *http.Request) {
 	s.emailConfirm(w, r, "")
+}
+
+func (s *Server) handleEmailConfirmWeb(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	allowedOrigin := s.cfg.EmailVerifyBaseURL
+	if origin != "" && allowedOrigin != "" && origin != allowedOrigin {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if origin != "" && allowedOrigin != "" && origin == allowedOrigin {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Add("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "600")
+	}
+	if r.Method == http.MethodOptions {
+		if origin == "" || allowedOrigin == "" || origin != allowedOrigin {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	s.handleEmailConfirm(w, r)
 }
 
 func (s *Server) emailConfirm(w http.ResponseWriter, r *http.Request, firebaseCode string) {

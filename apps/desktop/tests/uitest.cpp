@@ -186,7 +186,7 @@ private slots:
     void calls();
     void phonePeer();
     void themeSettingsAndSidebar();
-    void keyChangeBlocksSending();
+    void recoveryRestoresHistoryAndKeepsIdentity();
     void chatSelectionAndClear();
     void cleanupTestCase();
 
@@ -1214,29 +1214,26 @@ void UiTest::themeSettingsAndSidebar()
     Theme::instance()->setMode(Theme::Dark);
 }
 
-void UiTest::keyChangeBlocksSending()
+void UiTest::recoveryRestoresHistoryAndKeepsIdentity()
 {
-    // Alice recovers her account on a new device: Bob must see the key change and stop sending.
+    // Alice recovers on a new device; the same identity and server history must return.
+    const QString originalUserID = m_alice->call("status").toObject().value("user_id").toString();
     Peer alice2(m_dir.path() + "/alice2");
     QVERIFY(!alice2.call("recover", {{"server", m_server}, {"username", m_aliceName}, {"recovery_code", m_aliceCode}, {"new_password", "another long pass"},
                                       {"device_name", "new"}, {"platform", "android"}})
                  .isNull());
+    QCOMPARE(alice2.call("status").toObject().value("user_id").toString(), originalUserID);
+    QVERIFY(!alice2.call("list_messages", {{"conversation_id", m_conv}}).toArray().isEmpty());
     auto *panel = find<ChatPanel>([](ChatPanel *) { return true; });
     panel->select(m_conv);
     emit panel->activated(m_conv);
     Core::instance()->call("sync_now", {});
-    QTRY_VERIFY_WITH_TIMEOUT(button("Сверить код"), 20000);
+    QTRY_VERIFY_WITH_TIMEOUT(button("Сверить код") == nullptr, 20000);
     auto *composer = find<Composer>([](Composer *) { return true; });
     auto *edit = composer->findChild<ComposerEdit *>();
-    typeText(edit, "Это точно ты?");
+    typeText(edit, "Аккаунт восстановлен, личность прежняя.");
     QTRY_VERIFY(button("Отправить"));
-    QVERIFY(!button("Отправить")->isEnabled());
-    shot("16-key-changed");
-    button("Сверить код")->click();
-    QTRY_VERIFY(button("Конфиденциальность"));
-    button("Конфиденциальность")->click();
-    QTRY_VERIFY(button("Код сверен, принять новый ключ"));
-    shot("17-safety-number");
+    QVERIFY(button("Отправить")->isEnabled());
 }
 
 void UiTest::chatSelectionAndClear()

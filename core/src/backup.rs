@@ -1,11 +1,10 @@
-//! Password-protected account backup. The account identity and an encrypted copy of
-//! the chat history live on the server, so a new device signs in with the password
-//! alone and gets the old conversations.
+//! The server stores a password-encrypted key bundle and an encrypted copy of history,
+//! so a new device can restore the account with the password. A second envelope wraps
+//! the same identity and history key with the high-entropy recovery code.
 //!
-//! Two keys come from the password (Argon2id, then HKDF): `auth` goes to the server
-//! in place of the password, `backup` never leaves devices. The server cannot read
-//! the backup directly, but whoever holds its database can guess passwords offline;
-//! this is the accepted cost of signing in without another device.
+//! `auth` and the key-bundle wrapping key come from the password (Argon2id, then HKDF).
+//! The random history key stays client-encrypted in both envelopes. The server cannot
+//! read either envelope, but its password-wrapped copy allows offline password guesses.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -81,14 +80,62 @@ pub fn open(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
         .map_err(|_| Error::Crypto("Неверный пароль или повреждённая копия".into()))
 }
 
-/// The account identity sealed for the server.
-pub fn seal_keys(backup: &[u8; 32], account_identity: &[u8]) -> Result<Vec<u8>> {
+#[cfg(test)]
+fn seal_keys(backup: &[u8; 32], account_identity: &[u8]) -> Result<Vec<u8>> {
     seal(&subkey(backup, "keys")?, json!({"account_identity": b64(account_identity)}).to_string().as_bytes())
 }
 
-pub fn open_keys(backup: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
+#[cfg(test)]
+fn open_keys(backup: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
     let v: Value = serde_json::from_slice(&open(&subkey(backup, "keys")?, blob)?)?;
     crate::keys::unb64(v["account_identity"].as_str().unwrap_or_default())
+}
+
+pub struct KeyBundle {
+    pub account_identity: Vec<u8>,
+    pub history_key: Option<[u8; 32]>,
+}
+
+pub fn seal_key_bundle(backup: &[u8; 32], account_identity: &[u8], history_key: &[u8; 32]) -> Result<Vec<u8>> {
+    seal(
+        &subkey(backup, "keys")?,
+        json!({"account_identity": b64(account_identity), "history_key": b64(history_key)}).to_string().as_bytes(),
+    )
+}
+
+/// Older password envelopes contain only the identity; their history key comes from the password.
+pub fn open_key_bundle(backup: &[u8; 32], blob: &[u8]) -> Result<KeyBundle> {
+    let v: Value = serde_json::from_slice(&open(&subkey(backup, "keys")?, blob)?)?;
+    let account_identity = crate::keys::unb64(v["account_identity"].as_str().unwrap_or_default())?;
+    let history_key = v["history_key"]
+        .as_str()
+        .map(crate::keys::unb64)
+        .transpose()?
+        .map(|key| key.try_into().map_err(|_| Error::Crypto("Повреждён ключ копии переписки".into())))
+        .transpose()?;
+    Ok(KeyBundle { account_identity, history_key })
+}
+
+fn recovery_backup_key(secret: &[u8; 32]) -> Result<[u8; 32]> {
+    let mut key = [0u8; 32];
+    Hkdf::<Sha256>::new(None, secret)
+        .expand(b"neochat-recovery-backup-v1", &mut key)
+        .map_err(|_| Error::Crypto("Ошибка шифрования".into()))?;
+    Ok(key)
+}
+
+pub fn seal_recovery(secret: &[u8; 32], account_identity: &[u8], history_key: &[u8; 32]) -> Result<Vec<u8>> {
+    let payload = json!({"account_identity": b64(account_identity), "history_key": b64(history_key)});
+    seal(&recovery_backup_key(secret)?, payload.to_string().as_bytes())
+}
+
+pub fn open_recovery(secret: &[u8; 32], blob: &[u8]) -> Result<KeyBundle> {
+    let v: Value = serde_json::from_slice(&open(&recovery_backup_key(secret)?, blob)?)?;
+    let account_identity = crate::keys::unb64(v["account_identity"].as_str().unwrap_or_default())?;
+    let history_key: [u8; 32] = crate::keys::unb64(v["history_key"].as_str().unwrap_or_default())?
+        .try_into()
+        .map_err(|_| Error::Crypto("Повреждён ключ копии переписки".into()))?;
+    Ok(KeyBundle { account_identity, history_key: Some(history_key) })
 }
 
 impl Inner {

@@ -16,7 +16,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private let name = Field("Имя")
     private let username = Field("Никнейм или почта")
     private let password = Field("Пароль", secure: true)
-    private let code = Field("Код восстановления")
+    private let code = Field("Аварийный код сброса")
     private let resetToken = Field("Код из письма")
     private let loginCode = Field("Код из чата «NeoChat уведомления»")
     private let email = EmailVerificationView(registration:true)
@@ -119,9 +119,9 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         switch m {
         case .login: set("Вход", "", "Войти")
         case .register: set("Регистрация", "Пароль — не меньше 8 символов.", "Создать аккаунт")
-        case .recover: set("Восстановление доступа", "Остальные устройства будут отключены, переписка не перенесётся.", "Восстановить")
+        case .recover: set("Восстановление аккаунта", "Код вернёт ключи и переписки, сохранив вашу личность. Старые устройства отключатся.", "Восстановить аккаунт")
         case .resetRequest: set("Сброс пароля", "Ссылка уйдёт на привязанную почту. Пароль входа сменится; ключи и история на ваших устройствах сохранятся.", "Отправить ссылку")
-        case .resetComplete: set("Новый пароль", "Введите код со страницы из письма и новый пароль. Это не восстановление аккаунта.", "Сменить пароль")
+        case .resetComplete: set("Новый пароль", "Введите одноразовый код сброса из письма и новый пароль. Сброс пароля не меняет личность аккаунта.", "Сменить пароль")
         }
         switch m {
         case .resetRequest, .resetComplete: switchMode.setTitle("Назад ко входу", for: .normal)
@@ -197,7 +197,7 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
             p["display_name"] = n
         case .recover:
             let c = (code.text ?? "").trimmingCharacters(in: .whitespaces)
-            if c.isEmpty { return showError("Введите код восстановления") }
+            if c.isEmpty { return showError("Введите аварийный код сброса аккаунта") }
             method = "recover"
             p["new_password"] = pass
             p["recovery_code"] = c
@@ -236,19 +236,18 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
                     self.resetToken.text = ""
                     self.setMode(.login)
                     self.showError("Пароль изменён. Войдите с новым паролем.")
-                case .register, .recover:
+                case .register, .recover, .login:
                     self.password.text = ""
                     self.code.text = ""
                     self.loginCode.text = ""
                     self.loginCode.isHidden = true
                     let res = v as? JSON ?? [:]
-                    self.showRecovery(res.str("recovery_code"))
-                case .login:
-                    self.password.text = ""
-                    self.code.text = ""
-                    self.loginCode.text = ""
-                    self.loginCode.isHidden = true
-                    self.done()
+                    let recoveryCode = res.str("recovery_code")
+                    if m != .login || !recoveryCode.isEmpty {
+                        self.showRecovery(recoveryCode)
+                    } else {
+                        self.done()
+                    }
                 }
             }
         }
@@ -259,11 +258,11 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
     private func showRecovery(_ codeText: String) {
         reset()
         setSecure(true)
-        stack.addArrangedSubview(label("Сохраните код восстановления", 24, .bold))
-        stack.addArrangedSubview(label("Код вернёт доступ к аккаунту, если все устройства потеряны. Переписка этим кодом не восстанавливается: её копия зашифрована паролем. Запишите код и храните отдельно от телефона.", 15, color: Theme.muted))
+        stack.addArrangedSubview(label("Сохраните аварийный код сброса", 24, .bold))
+        stack.addArrangedSubview(label("Если потеряны все устройства, код восстановит ключи и переписки, сохранит вашу личность и отключит старые устройства. Храните его отдельно от телефона.", 15, color: Theme.muted))
         let c = label(codeText, 20, .semibold, color: Theme.accent)
         c.font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .monospacedSystemFont(ofSize: 20, weight: .semibold))
-        c.accessibilityLabel = "Код восстановления: " + codeText
+        c.accessibilityLabel = "Аварийный код сброса аккаунта: " + codeText
         let box = UIView()
         box.glass(20)
         c.translatesAutoresizingMaskIntoConstraints = false
@@ -289,7 +288,19 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
         proceed.isEnabled = false
         proceed.alpha = 0.5
         saved.addAction(UIAction { _ in proceed.isEnabled = saved.isOn; proceed.alpha = saved.isOn ? 1 : 0.5 }, for: .valueChanged)
-        proceed.addAction(UIAction { [weak self] _ in self?.setSecure(false); self?.done() }, for: .touchUpInside)
+        proceed.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            Core.shared.call("recovery_ack") { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.setSecure(false)
+                    self.done()
+                case .failure(let error):
+                    self.showError(error.message)
+                }
+            }
+        }, for: .touchUpInside)
         stack.addArrangedSubview(proceed)
     }
 

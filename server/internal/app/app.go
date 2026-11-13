@@ -17,15 +17,16 @@ import (
 )
 
 type Config struct {
-	DataDir        string // encrypted attachment objects
-	ArgonMemoryKiB uint32
-	ArgonTime      uint32
-	ArgonParallel  int        // concurrent password hashes
-	TurnSecret     string     // coturn static-auth-secret; empty disables TURN
-	TurnURIs       []string   // e.g. turn:host:3478?transport=udp
-	FCM            *FCMClient // nil keeps push delivery disabled
-	Email          EmailSender
-	EmailBaseURL   string // public HTTPS origin for email confirmation
+	DataDir            string // encrypted attachment objects
+	ArgonMemoryKiB     uint32
+	ArgonTime          uint32
+	ArgonParallel      int        // concurrent password hashes
+	TurnSecret         string     // coturn static-auth-secret; empty disables TURN
+	TurnURIs           []string   // e.g. turn:host:3478?transport=udp
+	FCM                *FCMClient // nil keeps push delivery disabled
+	Email              EmailSender
+	EmailBaseURL       string // public HTTPS origin for password-reset pages
+	EmailVerifyBaseURL string // legacy confirmation continuation origin and CORS allowlist
 }
 
 type Server struct {
@@ -80,7 +81,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/accounts/email", s.handleRegistrationEmail)
 	m.HandleFunc("POST /v1/accounts/email/status", s.handleEmailTicket)
 	m.HandleFunc("GET /v1/accounts/email/confirm", s.handleEmailConfirm)
-	m.HandleFunc("POST /v1/accounts/email/confirm", s.handleEmailConfirm)
+	m.HandleFunc("POST /v1/accounts/email/confirm", s.handleEmailConfirmWeb)
+	m.HandleFunc("OPTIONS /v1/accounts/email/confirm", s.handleEmailConfirmWeb)
 	m.HandleFunc("GET /v1/accounts/email/action", s.handleEmailAction)
 	m.HandleFunc("POST /v1/accounts/email/action", s.handleEmailAction)
 	m.HandleFunc("GET /v1/accounts/current/email", s.authed(s.handleEmailStatus))
@@ -90,6 +92,9 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/accounts/password-reset/confirm", s.handlePasswordResetConfirm)
 	m.HandleFunc("POST /v1/accounts/password-reset/complete", s.handlePasswordResetComplete)
 	m.HandleFunc("PUT /v1/accounts/current/key-backup", s.authed(s.handlePutKeyBackup))
+	m.HandleFunc("GET /v1/accounts/current/recovery-backup", s.authed(s.handleGetRecoveryBackupStatus))
+	m.HandleFunc("PUT /v1/accounts/current/recovery-backup", s.authed(s.handlePutRecoveryBackup))
+	m.HandleFunc("POST /v1/accounts/recover/prepare", s.handleRecoverPrepare)
 	m.HandleFunc("POST /v1/accounts/recover", s.handleRecover)
 	m.HandleFunc("POST /v1/accounts/password-salt", s.handlePasswordSalt)
 	m.HandleFunc("POST /v1/sessions", s.handleLogin)

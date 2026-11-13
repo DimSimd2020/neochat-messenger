@@ -36,7 +36,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
     private val name = FloatingField(ctx, "Имя")
     private val username = FloatingField(ctx, "Никнейм или почта")
     private val password = FloatingField(ctx, "Пароль", password = true)
-    private val code = FloatingField(ctx, "Код восстановления")
+    private val code = FloatingField(ctx, "Аварийный код сброса")
     private val resetToken = FloatingField(ctx, "Код из письма")
     private val loginCode = FloatingField(ctx, "Код из чата «NeoChat уведомления»")
     private val email = EmailVerification(act, registration = true)
@@ -120,16 +120,16 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
 
     private fun buildRecovery() {
         recovery.orientation = LinearLayout.VERTICAL
-        recovery.addView(ctx.label("Сохраните код восстановления", 22f, 700), lp().apply { topMargin = dp(22) })
+        recovery.addView(ctx.label("Сохраните аварийный код сброса", 22f, 700), lp().apply { topMargin = dp(22) })
         recovery.addView(
             ctx.label(
-                "Код вернёт доступ к аккаунту, если все устройства потеряны и пароль забыт. Переписка этим кодом не восстанавливается: " +
-                    "её копия зашифрована паролем. Запишите код и храните отдельно от телефона.", 14.5f, 400, Theme.Role.MUTED
+                "Если потеряны все устройства, код восстановит ключи и переписки, сохранит вашу личность и отключит старые устройства. " +
+                    "Храните его отдельно от телефона.", 14.5f, 400, Theme.Role.MUTED
             ), lp().apply { topMargin = dp(8) }
         )
         recoveryCode.typeface = android.graphics.Typeface.MONOSPACE
         recoveryCode.setTextIsSelectable(true)
-        recoveryCode.contentDescription = "Код восстановления"
+        recoveryCode.contentDescription = "Аварийный код сброса аккаунта"
         val box = FrameLayout(ctx).apply {
             background = GlassDrawable(ctx, radius = ctx.dpf(20))
             setPadding(dp(18), dp(16), dp(18), dp(16))
@@ -153,8 +153,11 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         recovery.addView(saved, lp().apply { topMargin = dp(8) })
         proceed.isEnabled = false
         proceed.setOnClickListener {
-            recoveryCode.text = ""
-            done()
+            CoreClient.call("recovery_ack") { _, e ->
+                if (e != null) return@call showError(e.message)
+                recoveryCode.text = ""
+                done()
+            }
         }
         recovery.addView(proceed, lp().apply { topMargin = dp(12) })
     }
@@ -186,9 +189,9 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
         when (m) {
             Mode.LOGIN -> set("Вход", "", "Войти")
             Mode.REGISTER -> set("Регистрация", "Пароль — не меньше 8 символов.", "Создать аккаунт")
-            Mode.RECOVER -> set("Восстановление доступа", "Остальные устройства будут отключены, переписка не перенесётся.", "Восстановить")
+            Mode.RECOVER -> set("Восстановление аккаунта", "Код вернёт ключи и переписки, сохранив вашу личность. Старые устройства отключатся.", "Восстановить аккаунт")
             Mode.RESET_REQUEST -> set("Сброс пароля", "Ссылка уйдёт на привязанную почту. Пароль входа сменится; ключи и история на ваших устройствах сохранятся.", "Отправить ссылку")
-            Mode.RESET_COMPLETE -> set("Новый пароль", "Введите код со страницы из письма и новый пароль. Это не восстановление аккаунта.", "Сменить пароль")
+            Mode.RESET_COMPLETE -> set("Новый пароль", "Введите одноразовый код сброса из письма и новый пароль. Сброс пароля не меняет личность аккаунта.", "Сменить пароль")
         }
         switchMode.text = when (m) {
             Mode.RESET_REQUEST, Mode.RESET_COMPLETE -> "Назад ко входу"
@@ -246,7 +249,7 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
                 "register"
             }
             Mode.RECOVER -> {
-                if (code.text.isBlank()) return showError("Введите код восстановления")
+                if (code.text.isBlank()) return showError("Введите аварийный код сброса аккаунта")
                 p.put("new_password", pass).put("recovery_code", code.text.trim())
                 "recover"
             }
@@ -283,22 +286,20 @@ class OnboardingScreen(private val act: MainActivity, status: JSONObject, privat
                     setMode(Mode.LOGIN)
                     showError("Пароль изменён. Войдите с новым паролем.")
                 }
-                Mode.REGISTER, Mode.RECOVER -> {
+                Mode.REGISTER, Mode.RECOVER, Mode.LOGIN -> {
                     password.setText("")
                     code.setText("")
                     loginCode.setText("")
                     loginCode.visibility = View.GONE
                     val res = v as? JSONObject ?: JSONObject()
-                    recoveryCode.text = res.str("recovery_code")
-                    saved.isChecked = false
-                    page(recovery)
-                }
-                else -> {
-                    password.setText("")
-                    code.setText("")
-                    loginCode.setText("")
-                    loginCode.visibility = View.GONE
-                    done()
+                    val recovery = res.str("recovery_code")
+                    if (m != Mode.LOGIN || recovery.isNotBlank()) {
+                        recoveryCode.text = recovery
+                        saved.isChecked = false
+                        page(this.recovery)
+                    } else {
+                        done()
+                    }
                 }
             }
         }

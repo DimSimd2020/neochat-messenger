@@ -42,7 +42,7 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Почта подтверждена"].waitForExistence(timeout:10))
         shot("02-register")
         app.buttons["Создать аккаунт"].tap()
-        if !app.staticTexts["Сохраните код восстановления"].waitForExistence(timeout: 30) {
+        if !app.staticTexts["Сохраните аварийный код сброса"].waitForExistence(timeout: 30) {
             shot("03-submit-failed")
             XCTFail("recovery page did not appear")
         }

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -260,6 +259,7 @@ type registerReq struct {
 	AccountIdentityKey []byte   `json:"account_identity_key"`
 	RecoveryHash       []byte   `json:"recovery_hash"`
 	KeyBackup          []byte   `json:"key_backup"`
+	RecoveryBackup     []byte   `json:"recovery_backup"`
 	Device             deviceIn `json:"device"`
 	Roster             rosterIn `json:"roster"`
 }
@@ -289,7 +289,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if len(req.AccountIdentityKey) != identityLen || len(req.RecoveryHash) != sha256.Size || len(req.KeyBackup) == 0 || len(req.KeyBackup) > maxBackup {
+	if len(req.AccountIdentityKey) != identityLen || len(req.RecoveryHash) != sha256.Size || len(req.KeyBackup) == 0 || len(req.KeyBackup) > maxBackup || len(req.RecoveryBackup) > maxBackup {
 		s.fail(w, r, errBadRequest)
 		return
 	}
@@ -314,8 +314,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash, key_backup, nickname, display_name, email, email_verified_at)
-			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7,$8,$9,$10,$11,now())`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup,
+		var recoveryBackup any
+		if len(req.RecoveryBackup) > 0 {
+			recoveryBackup = req.RecoveryBackup
+		}
+		_, err = tx.Exec(r.Context(), `INSERT INTO users(id, username, password_hash, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig, recovery_hash, key_backup, recovery_backup, nickname, display_name, email, email_verified_at)
+			VALUES ($1,$2,$3,$4,1,1,$5,$6,$7,$8,$9,$10,$11,$12,now())`, userID, req.Username, pwHash, req.AccountIdentityKey, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup, recoveryBackup,
 			nickname, displayName, email)
 		if isUniqueViolation(err) {
 			if constraintName(err) == "users_email" {
@@ -499,14 +503,86 @@ type recoverReq struct {
 	RecoverySecret     []byte   `json:"recovery_secret"`
 	NewPassword        string   `json:"new_password"`
 	RecoveryHash       []byte   `json:"recovery_hash"`
+	RecoveryBackup     []byte   `json:"recovery_backup"`
 	AccountIdentityKey []byte   `json:"account_identity_key"`
 	KeyBackup          []byte   `json:"key_backup"`
 	Device             deviceIn `json:"device"`
 	Roster             rosterIn `json:"roster"`
 }
 
-// handleRecover replaces the account identity: all old devices and sessions are revoked
-// and every related user receives an identity change event. History is not restored.
+func (s *Server) handleRecoverPrepare(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username       string `json:"username"`
+		RecoverySecret []byte `json:"recovery_secret"`
+	}
+	if err := readJSON(w, r, 8<<10, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
+	if len(req.RecoverySecret) != 32 || !s.limits.allow("recover-prepare-ip:"+clientIP(r), 10, time.Hour) || !s.limits.allow("recover-prepare-user:"+req.Username, 5, time.Hour) {
+		s.fail(w, r, errRateLimited(time.Minute))
+		return
+	}
+	invalid := errf(401, "invalid_recovery", "Неверное имя пользователя или аварийный код восстановления")
+	var stored, recoveryBackup, accountKey, rosterBlob, rosterSig []byte
+	var epoch, revision int64
+	err := s.db.QueryRow(r.Context(), `SELECT recovery_hash, recovery_backup, account_identity_key, identity_epoch, roster_revision, roster_blob, roster_sig
+		FROM users WHERE username=$1`, req.Username).Scan(&stored, &recoveryBackup, &accountKey, &epoch, &revision, &rosterBlob, &rosterSig)
+	if errors.Is(err, pgx.ErrNoRows) {
+		s.fail(w, r, invalid)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	got := sha256.Sum256(req.RecoverySecret)
+	if subtle.ConstantTimeCompare(got[:], stored) != 1 {
+		s.fail(w, r, invalid)
+		return
+	}
+	if len(recoveryBackup) == 0 {
+		s.fail(w, r, errf(409, "recovery_backup_missing", "Сначала войдите на устройстве, где аккаунт ещё открыт, и сохраните новый код восстановления"))
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"recovery_backup": recoveryBackup, "account_identity_key": accountKey, "identity_epoch": strconv.FormatInt(epoch, 10),
+		"roster": map[string]any{"revision": strconv.FormatInt(revision, 10), "blob": rosterBlob, "signature": rosterSig},
+	})
+}
+
+func (s *Server) handleGetRecoveryBackupStatus(w http.ResponseWriter, r *http.Request, a *authCtx) {
+	var ready bool
+	var recoveryHash []byte
+	if err := s.db.QueryRow(r.Context(), `SELECT recovery_backup IS NOT NULL, recovery_hash FROM users WHERE id=$1`, a.UserID).Scan(&ready, &recoveryHash); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ready": ready, "recovery_hash": recoveryHash})
+}
+
+func (s *Server) handlePutRecoveryBackup(w http.ResponseWriter, r *http.Request, a *authCtx) {
+	var req struct {
+		RecoveryHash   []byte `json:"recovery_hash"`
+		RecoveryBackup []byte `json:"recovery_backup"`
+	}
+	if err := readJSON(w, r, 16<<10, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if len(req.RecoveryHash) != sha256.Size || len(req.RecoveryBackup) == 0 || len(req.RecoveryBackup) > maxBackup {
+		s.fail(w, r, errBadRequest)
+		return
+	}
+	if _, err := s.db.Exec(r.Context(), `UPDATE users SET recovery_hash=$2, recovery_backup=$3 WHERE id=$1`, a.UserID, req.RecoveryHash, req.RecoveryBackup); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(204)
+}
+
+// Recovery keeps the same account identity and its server-side encrypted history.
 func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 	var req recoverReq
 	if err := readJSON(w, r, 256<<10, &req); err != nil {
@@ -522,7 +598,7 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if len(req.AccountIdentityKey) != identityLen || len(req.RecoveryHash) != sha256.Size || len(req.RecoverySecret) != 32 || len(req.KeyBackup) == 0 || len(req.KeyBackup) > maxBackup {
+	if len(req.AccountIdentityKey) != identityLen || len(req.RecoveryHash) != sha256.Size || len(req.RecoverySecret) != 32 || len(req.KeyBackup) == 0 || len(req.KeyBackup) > maxBackup || len(req.RecoveryBackup) == 0 || len(req.RecoveryBackup) > maxBackup {
 		s.fail(w, r, errBadRequest)
 		return
 	}
@@ -540,16 +616,15 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	invalid := errf(401, "invalid_recovery", "Неверное имя пользователя или код восстановления")
+	invalid := errf(401, "invalid_recovery", "Неверное имя пользователя или аварийный код восстановления")
 	var out tokensOut
 	var oldDevices, notify []string
-	var recovered string
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
 		var userID string
-		var stored []byte
-		var epoch, rosterRev int64
-		err := tx.QueryRow(r.Context(), `SELECT id, recovery_hash, identity_epoch, roster_revision FROM users WHERE username=$1 FOR UPDATE`, req.Username).
-			Scan(&userID, &stored, &epoch, &rosterRev)
+		var stored, accountKey, recoveryBackup []byte
+		var rosterRev int64
+		err := tx.QueryRow(r.Context(), `SELECT id, recovery_hash, recovery_backup, account_identity_key, roster_revision FROM users WHERE username=$1 FOR UPDATE`, req.Username).
+			Scan(&userID, &stored, &recoveryBackup, &accountKey, &rosterRev)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return invalid
 		}
@@ -559,6 +634,12 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		got := sha256.Sum256(req.RecoverySecret)
 		if subtle.ConstantTimeCompare(got[:], stored) != 1 {
 			return invalid
+		}
+		if len(recoveryBackup) == 0 {
+			return errf(409, "recovery_backup_missing", "Сначала войдите на устройстве, где аккаунт ещё открыт, и сохраните новый код восстановления")
+		}
+		if subtle.ConstantTimeCompare(req.AccountIdentityKey, accountKey) != 1 {
+			return errf(400, "bad_request", "Ключ восстановленной личности не совпадает с аккаунтом")
 		}
 		if rev <= rosterRev {
 			return errf(409, "roster_revision_conflict", "Список устройств устарел, обновите его")
@@ -576,15 +657,14 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(r.Context(), `UPDATE sessions SET revoked_at=now() WHERE revoked_at IS NULL AND device_id IN (SELECT id FROM devices WHERE user_id=$1)`, userID); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(r.Context(), `DELETE FROM device_links WHERE user_id=$1`, userID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(r.Context(), `DELETE FROM one_time_prekeys WHERE device_id IN (SELECT id FROM devices WHERE user_id=$1)`, userID); err != nil {
 			return err
 		}
-		// The account state was sealed with keys that no longer exist.
-		if _, err := tx.Exec(r.Context(), `DELETE FROM account_state WHERE user_id=$1`, userID); err != nil {
-			return err
-		}
-		_, err = tx.Exec(r.Context(), `UPDATE users SET password_salt=username, password_hash=$2, account_identity_key=$3, identity_epoch=$4, roster_revision=$5, roster_blob=$6, roster_sig=$7, recovery_hash=$8, key_backup=$9 WHERE id=$1`,
-			userID, pwHash, req.AccountIdentityKey, epoch+1, rev, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup)
+		_, err = tx.Exec(r.Context(), `UPDATE users SET password_salt=username, password_hash=$2, roster_revision=$3, roster_blob=$4, roster_sig=$5, recovery_hash=$6, key_backup=$7, recovery_backup=$8 WHERE id=$1`,
+			userID, pwHash, rev, req.Roster.Blob, req.Roster.Signature, req.RecoveryHash, req.KeyBackup, req.RecoveryBackup)
 		if err != nil {
 			return err
 		}
@@ -595,16 +675,13 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		notify, err = s.emitToRelated(r.Context(), tx, userID, "identity", map[string]any{"user_id": userID, "identity_epoch": strconv.FormatInt(epoch+1, 10)})
-		recovered = userID
+		notify, err = s.emitToRelated(r.Context(), tx, userID, "roster", map[string]any{"user_id": userID})
 		return err
 	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	// The old history copy was sealed with keys that no longer exist.
-	os.Remove(s.historyPath(recovered))
 	for _, d := range oldDevices {
 		s.hub.disconnect(d)
 	}

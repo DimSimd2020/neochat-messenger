@@ -40,7 +40,11 @@ func (s *Server) handleEmailAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		continuation, err := url.Parse(values.Get("continueUrl"))
-		base, baseErr := url.Parse(s.cfg.EmailBaseURL)
+		baseURL := s.cfg.EmailBaseURL
+		if mode == "verifyEmail" && s.cfg.EmailVerifyBaseURL != "" {
+			baseURL = s.cfg.EmailVerifyBaseURL
+		}
+		base, baseErr := url.Parse(baseURL)
 		path := "/v1/accounts/email/confirm"
 		if mode == "resetPassword" {
 			path = "/v1/accounts/password-reset/confirm"

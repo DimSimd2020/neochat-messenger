@@ -5,10 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -30,6 +27,7 @@ type testMailbox struct {
 	fail        bool
 	reset       bool
 	actionEmail string
+	verified    map[string]bool
 }
 
 func (m *testMailbox) SendPasswordReset(ctx context.Context, email, link string) error {
@@ -44,15 +42,35 @@ func (m *testMailbox) CompleteAction(_ context.Context, mode, code string) (stri
 	return m.actionEmail, nil
 }
 
-func (m *testMailbox) SendVerification(_ context.Context, _ string, link string) error {
+func (m *testMailbox) SendVerification(_ context.Context, email string, link string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fail {
 		return errors.New("fictional delivery failure")
 	}
+	if m.verified == nil {
+		m.verified = map[string]bool{}
+	}
+	m.verified[email] = false
 	m.links = append(m.links, link)
 	return nil
 }
+
+func (m *testMailbox) IsEmailVerified(_ context.Context, email string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.verified[email], nil
+}
+
+func (m *testMailbox) setEmailVerified(email string, verified bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.verified == nil {
+		m.verified = map[string]bool{}
+	}
+	m.verified[email] = verified
+}
+
 func (m *testMailbox) latest() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -65,26 +83,6 @@ func emailTestServer(t *testing.T) (*Server, *httptest.Server, *testMailbox) {
 	s.cfg.Email = m
 	s.cfg.EmailBaseURL = ts.URL
 	return s, ts, m
-}
-
-func confirmTestEmail(t *testing.T, link string, post bool) int {
-	t.Helper()
-	var response *http.Response
-	var err error
-	if post {
-		u, _ := url.Parse(link)
-		response, err = http.PostForm(u.Scheme+"://"+u.Host+u.Path, url.Values{"t": {u.Query().Get("t")}})
-	} else {
-		response, err = http.Get(link)
-	}
-	if err != nil {
-		t.Fatal("email confirmation request failed")
-	}
-	defer response.Body.Close()
-	if response.Header.Get("Referrer-Policy") != "no-referrer" {
-		t.Fatal("email link could leak in referrer")
-	}
-	return response.StatusCode
 }
 
 func TestEmailRegistrationProof(t *testing.T) {
@@ -105,21 +103,18 @@ func TestEmailRegistrationProof(t *testing.T) {
 	if st, _ := c.do("POST", "/v1/accounts", req, nil); st != 400 {
 		t.Fatal("unconfirmed email allowed registration")
 	}
-	link := mailbox.latest()
-	if strings.Contains(link, start.Ticket) {
-		t.Fatal("mail and app use the same secret")
-	}
-	if st := confirmTestEmail(t, link, false); st != 200 {
-		t.Fatal("mail landing page failed")
+	if mailbox.latest() != "" {
+		t.Fatal("verification email should not redirect to a continuation page")
 	}
 	var state struct {
 		Verified bool `json:"verified"`
 	}
 	if st, _ := c.do("POST", "/v1/accounts/email/status", map[string]string{"ticket": start.Ticket}, &state); st != 200 || state.Verified {
-		t.Fatal("GET from a link scanner confirmed the email")
+		t.Fatal("unverified Firebase email was accepted")
 	}
-	if st := confirmTestEmail(t, link, true); st != 200 {
-		t.Fatal("confirmation failed")
+	mailbox.setEmailVerified("alice@example.test", true)
+	if st, _ := c.do("POST", "/v1/accounts/email/status", map[string]string{"ticket": start.Ticket}, &state); st != 200 || !state.Verified {
+		t.Fatal("Firebase verification was not recorded for the app ticket")
 	}
 	// A failed registration must leave the proof usable for a corrected nickname.
 	register(t, s, ts, "mail_taken")
@@ -150,10 +145,7 @@ func TestEmailLinkExistingAndRevokedDevice(t *testing.T) {
 	if st, _ := a.do("POST", "/v1/accounts/current/email", map[string]string{"email": "linked@example.test"}, nil); st != 200 {
 		t.Fatal("cannot start binding")
 	}
-	link := mailbox.latest()
-	if st := confirmTestEmail(t, link, true); st != 200 {
-		t.Fatal("binding failed")
-	}
+	mailbox.setEmailVerified("linked@example.test", true)
 	var state struct {
 		Verified bool   `json:"verified"`
 		Email    string `json:"email"`
@@ -161,17 +153,23 @@ func TestEmailLinkExistingAndRevokedDevice(t *testing.T) {
 	if st, _ := a.do("GET", "/v1/accounts/current/email", nil, &state); st != 200 || !state.Verified || state.Email != "linked@example.test" {
 		t.Fatal("binding state missing")
 	}
-	if st := confirmTestEmail(t, link, true); st != 400 {
-		t.Fatal("consumed binding link reused")
+	var consumed bool
+	if err := s.db.QueryRow(context.Background(), `SELECT consumed_at IS NOT NULL FROM email_links WHERE email='linked@example.test'`).Scan(&consumed); err != nil || !consumed {
+		t.Fatal("confirmed binding ticket was not consumed")
 	}
 	b := register(t, s, ts, "bob")
 	_, _ = s.db.Exec(context.Background(), `UPDATE users SET email=NULL,email_verified_at=NULL WHERE id=$1`, b.userID)
 	if st, _ := b.do("POST", "/v1/accounts/current/email", map[string]string{"email": "revoked@example.test"}, nil); st != 200 {
 		t.Fatal("cannot start binding before revocation")
 	}
+	mailbox.setEmailVerified("revoked@example.test", true)
 	_, _ = s.db.Exec(context.Background(), `UPDATE devices SET revoked_at=now() WHERE id=$1`, b.deviceID)
-	if st := confirmTestEmail(t, mailbox.latest(), true); st != 409 {
-		t.Fatal("revoked device could bind an email")
+	if st, _ := b.do("GET", "/v1/accounts/current/email", nil, nil); st != 401 {
+		t.Fatal("revoked device could poll email status")
+	}
+	var revokedEmail *string
+	if err := s.db.QueryRow(context.Background(), `SELECT email FROM users WHERE id=$1`, b.userID).Scan(&revokedEmail); err != nil || revokedEmail != nil {
+		t.Fatal("revoked device bound an email")
 	}
 }
 

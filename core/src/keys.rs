@@ -218,7 +218,7 @@ pub fn recovery_encode(secret: &[u8; 32]) -> String {
 }
 
 pub fn recovery_decode(code: &str) -> Result<[u8; 32]> {
-    let bad = || Error::Invalid("Неверный код восстановления".into());
+    let bad = || Error::Invalid("Неверный аварийный код сброса аккаунта".into());
     let mut bits = 0u64;
     let mut nbits = 0;
     let mut out = Vec::with_capacity(32);

@@ -51,7 +51,7 @@ void EmailVerification::send()
         m_sent.start(); m_address->setEnabled(false);
         m_send->setText(QStringLiteral("Отправить повторно"));
         m_check->show(); m_change->setVisible(m_registration);
-        m_info->setText(QStringLiteral("Письмо отправлено. Откройте ссылку, нажмите «Продолжить», подтвердите привязку и вернитесь в NeoChat."));
+        m_info->setText(QStringLiteral("Откройте письмо и нажмите «Завершить проверку» на странице Firebase. Затем вернитесь сюда и нажмите «Я подтвердил почту»."));
     });
 }
 
@@ -64,7 +64,7 @@ void EmailVerification::refresh()
     Core::instance()->call(m_registration ? "registration_email_status" : "email_status",params,this,[this](const QJsonValue &value,const CoreError &error) {
         setBusy(false);
         if (!error.ok()) { m_info->setText(error.message); return; }
-        if (!value.toObject().value("verified").toBool()) { m_info->setText(QStringLiteral("Адрес ещё не подтверждён. Откройте письмо и завершите подтверждение.")); return; }
+        if (!value.toObject().value("verified").toBool()) { m_info->setText(QStringLiteral("Адрес ещё не подтверждён. Завершите проверку на странице Firebase и попробуйте ещё раз.")); return; }
         m_verified=true;
         m_info->setText(QStringLiteral("Почта подтверждена"));
         m_send->hide(); m_check->hide();

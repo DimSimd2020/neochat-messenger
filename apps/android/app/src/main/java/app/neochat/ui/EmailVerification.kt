@@ -57,7 +57,7 @@ class EmailVerification(private val act: MainActivity, private val registration:
             send.setText("Отправить повторно")
             check.visibility = View.VISIBLE
             change.visibility = if (registration) View.VISIBLE else View.GONE
-            info.text = "Письмо отправлено. Откройте ссылку, нажмите «Продолжить», подтвердите привязку и вернитесь в NeoChat."
+            info.text = "Откройте письмо и нажмите «Завершить проверку» на странице Firebase. Затем вернитесь сюда и нажмите «Я подтвердил почту»."
         }
     }
 
@@ -67,7 +67,7 @@ class EmailVerification(private val act: MainActivity, private val registration:
         CoreClient.call(if (registration) "registration_email_status" else "email_status", params().put("ticket",ticket)) { value,error ->
             busy = false; check.isEnabled = true
             if (error != null) { info.text = error.message; return@call }
-            if ((value as? JSONObject)?.optBoolean("verified") != true) { info.text = "Адрес ещё не подтверждён. Откройте письмо и завершите подтверждение."; return@call }
+            if ((value as? JSONObject)?.optBoolean("verified") != true) { info.text = "Адрес ещё не подтверждён. Завершите проверку на странице Firebase и попробуйте ещё раз."; return@call }
             verified = true
             info.text = "Почта подтверждена"
             send.visibility = View.GONE; check.visibility = View.GONE

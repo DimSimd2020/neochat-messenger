@@ -274,6 +274,7 @@ impl Inner {
             "password_reset_request" => self.password_reset_request(p),
             "password_reset_complete" => self.password_reset_complete(p),
             "recover" => self.recover(p),
+            "recovery_ack" => self.recovery_ack(),
             "logout" => self.logout(),
             "qr_login_start" => self.qr_login_start(p),
             "qr_login_poll" => self.qr_login_poll(),
@@ -413,7 +414,7 @@ impl Inner {
     }
 
     fn wipe_account(&self, conn: &rusqlite::Connection) -> Result<()> {
-        // Used only before creating a fresh identity on this installation.
+        // Clear local account keys before installing restored account keys.
         conn.execute_batch(
             "DELETE FROM kv WHERE k<>'history_owner'; DELETE FROM sessions; DELETE FROM identities; DELETE FROM prekeys; DELETE FROM signed_prekeys;
              DELETE FROM kyber_prekeys; DELETE FROM kyber_used; DELETE FROM known_devices; DELETE FROM outbox; DELETE FROM processed; DELETE FROM undecrypted;",
@@ -433,6 +434,7 @@ impl Inner {
         let device = keys::new_device()?;
         let account = IdentityKeyPair::generate(&mut rand::rng());
         let secret = keys::random_bytes::<32>();
+        let history_key = keys::random_bytes::<32>();
         let roster = Roster {
             username: username.clone(),
             epoch: 1,
@@ -447,7 +449,8 @@ impl Inner {
             "username": nickname,
             "display_name": display,
             "password": pw.auth,
-            "key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?),
+            "key_backup": b64(&backup::seal_key_bundle(&pw.backup, &account.serialize(), &history_key)?),
+            "recovery_backup": b64(&backup::seal_recovery(&secret, &account.serialize(), &history_key)?),
             "account_identity_key": b64(&account.identity_key().serialize()),
             "recovery_hash": b64(&keys::sha256(&secret)),
             "device": self.device_upload(&device, p)?,
@@ -460,7 +463,8 @@ impl Inner {
         device.persist(&tx)?;
         self.store_account(&tx, &server, &out, &username, true)?;
         kv_set(&tx, "account_identity", &account.serialize())?;
-        kv_set(&tx, "backup_key", &pw.backup[..])?;
+        kv_set(&tx, "backup_key", &history_key)?;
+        kv_set(&tx, "pending_recovery_secret", &secret)?;
         self.store_own_roster(&tx, "1", &blob, &sig, &account.identity_key().serialize())?;
         tx.commit()?;
         drop(db);
@@ -564,26 +568,64 @@ impl Inner {
         {
             let db = self.db();
             kv_set(&db.conn, "server", server.trim_end_matches('/').as_bytes())?;
-            kv_set(&db.conn, "backup_key", &pw.backup[..])?;
+            if kv_get(&db.conn, "backup_key")?.is_none() {
+                kv_set(&db.conn, "backup_key", &pw.backup[..])?;
+            }
             self.store_tokens(&db.conn, &out)?;
         }
         // After a password reset the server-side key_backup may still be sealed with the
         // old password; re-upload from this already-unlocked device.
         let _ = self.upload_key_backup(&pw);
+        let recovery_code = self.ensure_recovery_backup()?;
         self.after_login();
-        Ok(Value::Null)
+        Ok(recovery_code.map(|code| json!({"recovery_code": code})).unwrap_or(Value::Null))
     }
 
     fn upload_key_backup(&self, pw: &backup::PasswordKeys) -> Result<()> {
         let Some(account) = keys::account_keypair(&self.db().conn)? else {
             return Ok(());
         };
+        let history_key = self.backup_key()?.unwrap_or(*pw.backup);
         self.authed(
             "PUT",
             "/v1/accounts/current/key-backup",
-            Some(&json!({"key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?)})),
+            Some(&json!({"key_backup": b64(&backup::seal_key_bundle(&pw.backup, &account.serialize(), &history_key)?)})),
         )?;
         Ok(())
+    }
+
+    fn ensure_recovery_backup(&self) -> Result<Option<String>> {
+        let status = self.authed("GET", "/v1/accounts/current/recovery-backup", None)?;
+        let ready = status["ready"].as_bool().unwrap_or(false);
+        let current_hash = status["recovery_hash"].as_str().map(unb64).transpose()?;
+        let pending = kv_get(&self.db().conn, "pending_recovery_secret")?;
+        let secret = pending.and_then(|b| <[u8; 32]>::try_from(b).ok());
+        if let Some(secret) = secret {
+            if current_hash.as_deref().is_some_and(|h| h == keys::sha256(&secret)) {
+                return Ok(Some(keys::recovery_encode(&secret)));
+            }
+            kv_del(&self.db().conn, "pending_recovery_secret")?;
+        }
+        if ready {
+            return Ok(None);
+        }
+
+        let account = keys::account_keypair(&self.db().conn)?.ok_or(Error::NotLoggedIn)?;
+        let history_key = self.backup_key()?.ok_or(Error::NotLoggedIn)?;
+        let secret = keys::random_bytes::<32>();
+        let recovery_backup = backup::seal_recovery(&secret, &account.serialize(), &history_key)?;
+        kv_set(&self.db().conn, "pending_recovery_secret", &secret)?;
+        self.authed(
+            "PUT",
+            "/v1/accounts/current/recovery-backup",
+            Some(&json!({"recovery_hash": b64(&keys::sha256(&secret)), "recovery_backup": b64(&recovery_backup)})),
+        )?;
+        Ok(Some(keys::recovery_encode(&secret)))
+    }
+
+    fn recovery_ack(&self) -> Result<Value> {
+        kv_del(&self.db().conn, "pending_recovery_secret")?;
+        Ok(Value::Null)
     }
 
     fn password_reset_request(&self, p: &Value) -> Result<Value> {
@@ -612,9 +654,7 @@ impl Inner {
         // If this installation already holds the account keys, refresh the sealed backup now.
         let same = kv_get_str(&self.db().conn, "username")?.map(|u| u.eq_ignore_ascii_case(&username)).unwrap_or(false);
         if same && kv_get(&self.db().conn, "account_identity")?.is_some() {
-            kv_set(&self.db().conn, "backup_key", &pw.backup[..])?;
             let _ = self.upload_key_backup(&pw);
-            let _ = self.upload_history(&pw.backup);
         }
         Ok(json!({"status": "ok", "username": username}))
     }
@@ -631,7 +671,7 @@ impl Inner {
         }
         let st = api.call("POST", "/v1/devices/new/start", None, Some(&start))?;
         let account_key = unb64(s(&st, "account_identity_key")?)?;
-        let opened = match backup::open_keys(&pw.backup, &unb64(s(&st, "key_backup")?)?) {
+        let bundle = match backup::open_key_bundle(&pw.backup, &unb64(s(&st, "key_backup")?)?) {
             Ok(v) => v,
             // Password was accepted but backup is still sealed with an older password
             // (after email reset before another device re-uploaded). Use QR or an existing device.
@@ -641,10 +681,11 @@ impl Inner {
                 ))
             }
         };
-        let account = IdentityKeyPair::try_from(opened.as_slice())?;
+        let account = IdentityKeyPair::try_from(bundle.account_identity.as_slice())?;
         if account.identity_key().serialize()[..] != account_key[..] {
             return Err(Error::Crypto("Копия ключей не подходит к аккаунту".into()));
         }
+        let history_key = bundle.history_key.unwrap_or(*pw.backup);
         let blob = unb64(st["roster"]["blob"].as_str().unwrap_or_default())?;
         let sig = unb64(st["roster"]["signature"].as_str().unwrap_or_default())?;
         let mut r = keys::verify_roster(&account_key, &blob, &sig)?;
@@ -676,15 +717,17 @@ impl Inner {
             device.persist(&tx)?;
             self.store_account(&tx, server, &out, username, true)?;
             kv_set(&tx, "account_identity", &account.serialize())?;
-            kv_set(&tx, "backup_key", &pw.backup[..])?;
+            kv_set(&tx, "backup_key", &history_key)?;
             self.store_own_roster(&tx, &r.revision.to_string(), &nb, &ns, &account_key)?;
             tx.commit()?;
         }
-        if let Err(e) = self.restore_history(&pw.backup) {
+        let _ = self.upload_key_backup(pw);
+        if let Err(e) = self.restore_history(&history_key) {
             self.emit(json!({"type": "warning", "message": format!("Переписку не удалось перенести: {}", e.message())}));
         }
+        let recovery_code = self.ensure_recovery_backup()?;
         self.after_login();
-        Ok(Value::Null)
+        Ok(recovery_code.map(|code| json!({"recovery_code": code})).unwrap_or(Value::Null))
     }
 
     fn logout(&self) -> Result<Value> {
@@ -698,49 +741,69 @@ impl Inner {
         Ok(Value::Null)
     }
 
-    /// New account identity from the offline recovery code. Old devices are revoked
-    /// and contacts see an identity change; past history is not restored.
+    /// Restores the existing account identity and history using the offline recovery code.
     fn recover(&self, p: &Value) -> Result<Value> {
         let server = p["server"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_string();
         let username = s(p, "username")?.trim().trim_start_matches('@').to_lowercase();
         let old_secret = keys::recovery_decode(s(p, "recovery_code")?)?;
         let pw = backup::derive(&username, s(p, "new_password")?)?;
+        let api = Api::new(&server);
+        let prepared = api.call(
+            "POST",
+            "/v1/accounts/recover/prepare",
+            None,
+            Some(&json!({"username": username, "recovery_secret": b64(&old_secret)})),
+        )?;
+        let account_key = unb64(s(&prepared, "account_identity_key")?)?;
+        let bundle = backup::open_recovery(&old_secret, &unb64(s(&prepared, "recovery_backup")?)?)?;
+        let account = IdentityKeyPair::try_from(bundle.account_identity.as_slice())?;
+        if account.identity_key().serialize().as_ref() != account_key.as_slice() {
+            return Err(Error::Crypto("Код не подходит к ключам аккаунта".into()));
+        }
+        let history_key = bundle.history_key.ok_or_else(|| Error::Crypto("В копии нет ключа переписки".into()))?;
+        let old_blob = unb64(s(&prepared["roster"], "blob")?)?;
+        let old_sig = unb64(s(&prepared["roster"], "signature")?)?;
+        let mut roster = keys::verify_roster(&account_key, &old_blob, &old_sig)?;
+        let old_revision = s(&prepared["roster"], "revision")?.parse::<u64>().map_err(|_| Error::Crypto("Повреждён список устройств".into()))?;
+        let epoch = s(&prepared, "identity_epoch")?.parse::<u64>().map_err(|_| Error::Crypto("Повреждена версия личности".into()))?;
+        if roster.username != username || roster.revision != old_revision || roster.epoch != epoch {
+            return Err(Error::Crypto("Копия ключей не совпадает с аккаунтом".into()));
+        }
         let device = keys::new_device()?;
-        let account = IdentityKeyPair::generate(&mut rand::rng());
         let secret = keys::random_bytes::<32>();
-        // The previous roster revision is unknown on a fresh install; a timestamp is
-        // always above any counter-based revision and stays monotonic afterwards.
-        let rev = now_ms() as u64;
-        let roster = Roster {
-            username: username.clone(),
-            epoch: rev,
-            revision: rev,
-            prev_hash: [0; 32],
-            account_key: account.identity_key().serialize().to_vec(),
-            devices: vec![device.roster_entry()],
-        };
+        roster.devices = vec![device.roster_entry()];
+        roster.prev_hash = keys::sha256(&old_blob);
+        roster.revision += 1;
+        let rev = roster.revision;
         let (blob, sig) = roster.sign(&account)?;
+        let key_backup = backup::seal_key_bundle(&pw.backup, &account.serialize(), &history_key)?;
+        let recovery_backup = backup::seal_recovery(&secret, &account.serialize(), &history_key)?;
         let body = json!({
             "username": username,
             "recovery_secret": b64(&old_secret),
             "new_password": pw.auth,
-            "key_backup": b64(&backup::seal_keys(&pw.backup, &account.serialize())?),
+            "key_backup": b64(&key_backup),
+            "recovery_backup": b64(&recovery_backup),
             "recovery_hash": b64(&keys::sha256(&secret)),
             "account_identity_key": b64(&account.identity_key().serialize()),
             "device": self.device_upload(&device, p)?,
             "roster": {"revision": rev.to_string(), "blob": b64(&blob), "signature": b64(&sig)},
         });
-        let out = Api::new(&server).call("POST", "/v1/accounts/recover", None, Some(&body))?;
+        let out = api.call("POST", "/v1/accounts/recover", None, Some(&body))?;
         let mut db = self.db();
         let tx = db.conn.transaction()?;
         self.wipe_account(&tx)?;
         device.persist(&tx)?;
         self.store_account(&tx, &server, &out, &username, true)?;
         kv_set(&tx, "account_identity", &account.serialize())?;
-        kv_set(&tx, "backup_key", &pw.backup[..])?;
+        kv_set(&tx, "backup_key", &history_key)?;
+        kv_set(&tx, "pending_recovery_secret", &secret)?;
         self.store_own_roster(&tx, &rev.to_string(), &blob, &sig, &account.identity_key().serialize())?;
         tx.commit()?;
         drop(db);
+        if let Err(e) = self.restore_history(&history_key) {
+            self.emit(json!({"type": "warning", "message": format!("Переписку не удалось восстановить: {}", e.message())}));
+        }
         self.after_login();
         Ok(json!({"recovery_code": keys::recovery_encode(&secret)}))
     }

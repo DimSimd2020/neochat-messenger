@@ -62,7 +62,7 @@ final class EmailVerificationView: UIStackView {
                 self.address.isEnabled = false
                 self.send.setTitle("Отправить повторно", for: .normal)
                 self.check.isHidden = false; self.change.isHidden = !self.registration
-                self.info.text = "Письмо отправлено. Откройте ссылку, нажмите «Продолжить», подтвердите привязку и вернитесь в NeoChat."
+                self.info.text = "Откройте письмо и нажмите «Завершить проверку» на странице Firebase. Затем вернитесь сюда и нажмите «Я подтвердил почту»."
             }
         }
     }
@@ -76,7 +76,7 @@ final class EmailVerificationView: UIStackView {
             switch result {
             case .failure(let error): self.info.text = error.message
             case .success(let value):
-                guard (value as? JSON)?.bool("verified") == true else { self.info.text = "Адрес ещё не подтверждён. Откройте письмо и завершите подтверждение."; return }
+                guard (value as? JSON)?.bool("verified") == true else { self.info.text = "Адрес ещё не подтверждён. Завершите проверку на странице Firebase и попробуйте ещё раз."; return }
                 self.verified = true
                 self.info.text = "Почта подтверждена"
                 self.send.isHidden = true; self.check.isHidden = true

@@ -21,6 +21,7 @@ type EmailSender interface {
 	SendVerification(context.Context, string, string) error
 	SendPasswordReset(context.Context, string, string) error
 	CompleteAction(context.Context, string, string) (string, error)
+	IsEmailVerified(context.Context, string) (bool, error)
 }
 
 type FirebaseEmailSender struct {
@@ -87,7 +88,7 @@ func (f *FirebaseEmailSender) SendVerification(ctx context.Context, email, conti
 			return errors.New("cannot prepare Firebase email delivery")
 		}
 	}
-	// A Firebase session exists only here, to deliver the continueUrl.
+	// A Firebase session exists only here to send the verification email.
 	// NeoChat passwords, recovery keys and sessions never go to Firebase.
 	token, err := f.auth.CustomToken(ctx, user.UID)
 	if err != nil {
@@ -102,7 +103,25 @@ func (f *FirebaseEmailSender) SendVerification(ctx context.Context, email, conti
 	if session.IDToken == "" {
 		return errors.New("missing Firebase email session")
 	}
-	return f.call(ctx, "sendOobCode", map[string]any{"requestType": "VERIFY_EMAIL", "idToken": session.IDToken, "email": email, "continueUrl": continuation, "canHandleCodeInApp": false}, nil)
+	request := map[string]any{"requestType": "VERIFY_EMAIL", "idToken": session.IDToken, "email": email}
+	if continuation != "" {
+		request["continueUrl"] = continuation
+		request["canHandleCodeInApp"] = false
+	}
+	return f.call(ctx, "sendOobCode", request, nil)
+}
+
+func (f *FirebaseEmailSender) IsEmailVerified(ctx context.Context, email string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	user, err := f.auth.GetUserByEmail(ctx, email)
+	if auth.IsUserNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, errors.New("cannot check Firebase email verification")
+	}
+	return user.EmailVerified, nil
 }
 
 func (f *FirebaseEmailSender) SendPasswordReset(ctx context.Context, email, continuation string) error {
