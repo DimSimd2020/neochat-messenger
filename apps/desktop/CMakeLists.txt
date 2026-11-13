@@ -74,7 +74,7 @@ if(NEOCHAT_TAG)
 endif()
 target_compile_definitions(neochat_ui PUBLIC NEOCHAT_VERSION="${PROJECT_VERSION}" NEOCHAT_VERSION_LABEL="${NEOCHAT_VERSION_LABEL}" NEOCHAT_TAG="${NEOCHAT_TAG}" UNICODE _UNICODE NOMINMAX)
 target_link_libraries(neochat_ui PUBLIC Qt6::Widgets Qt6::Svg "${NEOCORE_LIB}"
-    crypt32 bcrypt advapi32 gdi32 user32 ws2_32 ntdll userenv dbghelp legacy_stdio_definitions)
+    crypt32 bcrypt advapi32 synchronization gdi32 user32 ws2_32 ntdll userenv dbghelp legacy_stdio_definitions)
 if(MSVC)
     target_compile_options(neochat_ui PUBLIC /utf-8 /W3)
 endif()
