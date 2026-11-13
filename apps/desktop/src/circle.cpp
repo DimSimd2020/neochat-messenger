@@ -67,6 +67,43 @@ void frameSize(IMFMediaType *type, UINT32 *w, UINT32 *h)
     MFGetAttributeSize(type, MF_MT_FRAME_SIZE, w, h);
 }
 
+// The reader of the first video stream, asked for RGB32; the size it will hand over and the
+// rotation the file carries come back too. False when there is no video or no decoder for it.
+bool openVideoReader(const QString &path, ComPtr<IMFSourceReader> &reader, int *w, int *h, UINT32 *rotation)
+{
+    if (!mf::init())
+        return false;
+    const std::wstring name = QDir::toNativeSeparators(path).toStdWString();
+    ComPtr<IMFAttributes> opts;
+    MFCreateAttributes(&opts, 1);
+    opts->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    const DWORD stream = (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
+    if (FAILED(MFCreateSourceReaderFromURL(name.c_str(), opts.Get(), &reader)))
+        return false;
+    reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    reader->SetStreamSelection(stream, TRUE);
+    *rotation = 0;
+    ComPtr<IMFMediaType> native;
+    if (SUCCEEDED(reader->GetNativeMediaType(stream, 0, &native)))
+        native->GetUINT32(MF_MT_VIDEO_ROTATION, rotation);
+    ComPtr<IMFMediaType> want;
+    MFCreateMediaType(&want);
+    want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    want->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+    if (FAILED(reader->SetCurrentMediaType(stream, nullptr, want.Get())))
+        return false;
+    ComPtr<IMFMediaType> cur;
+    if (FAILED(reader->GetCurrentMediaType(stream, &cur)))
+        return false;
+    UINT32 fw = 0, fh = 0;
+    frameSize(cur.Get(), &fw, &fh);
+    if (fw == 0 || fh == 0)
+        return false;
+    *w = int(fw);
+    *h = int(fh);
+    return true;
+}
+
 }
 
 // ---- recording ----
@@ -396,45 +433,14 @@ QImage CircleDecoder::frameAt(qint64 ms)
 
 void CircleDecoder::run()
 {
-    if (!mf::init()) {
-        m_failed = true;
-        return;
-    }
-    const std::wstring name = QDir::toNativeSeparators(m_path).toStdWString();
-    ComPtr<IMFAttributes> opts;
-    MFCreateAttributes(&opts, 1);
-    opts->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
     ComPtr<IMFSourceReader> reader;
-    const DWORD stream = (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
-    if (FAILED(MFCreateSourceReaderFromURL(name.c_str(), opts.Get(), &reader))) {
-        m_failed = true;
-        return;
-    }
-    reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
-    reader->SetStreamSelection(stream, TRUE);
+    int w = 0, h = 0;
     UINT32 rotation = 0;
-    ComPtr<IMFMediaType> native;
-    if (SUCCEEDED(reader->GetNativeMediaType(stream, 0, &native)))
-        native->GetUINT32(MF_MT_VIDEO_ROTATION, &rotation);
-    ComPtr<IMFMediaType> want;
-    MFCreateMediaType(&want);
-    want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    want->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-    if (FAILED(reader->SetCurrentMediaType(stream, nullptr, want.Get()))) {
+    if (!openVideoReader(m_path, reader, &w, &h, &rotation)) {
         m_failed = true;
         return;
     }
-    ComPtr<IMFMediaType> cur;
-    UINT32 w = 0, h = 0;
-    if (FAILED(reader->GetCurrentMediaType(stream, &cur))) {
-        m_failed = true;
-        return;
-    }
-    frameSize(cur.Get(), &w, &h);
-    if (w == 0 || h == 0) {
-        m_failed = true;
-        return;
-    }
+    const DWORD stream = (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
     while (!m_cancel) {
         {
             QMutexLocker lock(&m_lock);
@@ -452,7 +458,7 @@ void CircleDecoder::run()
         if (flags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR))
             break;
         QImage img;
-        if (!sample || !sampleImage(sample.Get(), int(w), int(h), 360, int(rotation), &img))
+        if (!sample || !sampleImage(sample.Get(), w, h, 360, int(rotation), &img))
             continue;
         QMutexLocker lock(&m_lock);
         m_queue.push_back({ts / 10000, std::move(img)});

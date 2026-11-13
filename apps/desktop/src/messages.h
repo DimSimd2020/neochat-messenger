@@ -4,6 +4,7 @@
 #include <QDate>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QImage>
 #include <QPixmap>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -11,6 +12,7 @@
 #include <QSet>
 #include <QStyledItemDelegate>
 #include <QTimer>
+#include <functional>
 
 namespace ui {
 class IconButton;
@@ -18,8 +20,9 @@ class IconButton;
 
 // The reaction a double click puts on a message. An account setting: the core
 // shares it with the user's other devices; QSettings only caches it.
-// Opens a picture inside NeoChat. Returns false when the file cannot be read.
-bool showPhotoFile(QWidget *host, const QString &path);
+// Opens a picture inside NeoChat. `actions` fills the right-click menu of the viewer; without it
+// a right click does nothing. Returns false when the file cannot be read.
+bool showPhotoFile(QWidget *host, const QString &path, std::function<void(class PopupMenu *)> actions = {});
 
 QString quickReaction();
 void loadQuickReaction(QObject *ctx);
@@ -116,6 +119,10 @@ public:
     void setCanPin(bool on) { m_canPin = on; }
     // Scrolls to a message (loading older pages until it is found) and flashes it.
     void jumpToMessage(const QString &id);
+    // Opens a picture of this conversation full-window, with the menu of its message on right click.
+    void openImage(const QJsonObject &m);
+    // The photo messages loaded for this conversation, oldest first — the album "Все фотографии".
+    QJsonArray conversationPhotos() const;
     // 0..1 while the message is flashing after a jump, else 0.
     qreal flashOf(const QString &id) const;
     // Check mode: several messages picked for a bulk action.
@@ -127,6 +134,8 @@ signals:
     void editRequested(const QJsonObject &msg);
     void forwardRequested(const QJsonArray &msgs);
     void profileRequested(const QString &userId);
+    // "Все фотографии" of an open picture: this conversation's album, starting from `photo`.
+    void photosRequested(const QJsonObject &photo, const QJsonArray &photos);
     void toast(const QString &text);
     void readable(); // the newest messages are on screen
 
@@ -150,10 +159,11 @@ private:
     void openFile(const QJsonObject &m);
     void saveFile(const QJsonObject &m);
     void retry(const QJsonObject &m);
-    void openImage(const QJsonObject &m);
     void vote(const QJsonObject &m, int option);
     void react(const QJsonObject &m, const QString &emoji);
     void showMenu(const QJsonObject &m, const QPoint &globalPos);
+    // The right-click menu of an open picture: the actions of the message it came from.
+    void viewerActions(class PopupMenu *menu, const QJsonObject &m, const QImage &img);
     QString linkAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const;
     void openMention(const QString &name);
     void placeJump();

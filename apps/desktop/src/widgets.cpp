@@ -56,6 +56,8 @@ const QHash<QString, QString> &icons()
         {"archive", R"(<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/>)"},
         {"sort", R"(<path d="M7 4v16m-4-4 4 4 4-4M17 20V4m-4 4 4-4 4 4"/>)"},
         {"qr", R"(<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3h-3zM20 14v.1M14 20h.1M17 20h4v-3"/>)"},
+        {"eye", R"(<path d="M2.6 12S6.2 5.8 12 5.8 21.4 12 21.4 12 17.8 18.2 12 18.2 2.6 12 2.6 12Z"/><circle cx="12" cy="12" r="3.2"/>)"},
+        {"grid", R"(<rect x="3.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.8"/>)"},
         {"copy", R"(<rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>)"},
         {"phone", R"(<path d="M6.2 3.5h2.6l1.6 4.3-2.1 1.5a11.5 11.5 0 0 0 6.4 6.4l1.5-2.1 4.3 1.6v2.6a2 2 0 0 1-2.2 2A16.5 16.5 0 0 1 4.2 5.7a2 2 0 0 1 2-2.2Z"/>)"},
         {"hangup", R"svg(<path transform="rotate(135 12 12)" d="M6.2 3.5h2.6l1.6 4.3-2.1 1.5a11.5 11.5 0 0 0 6.4 6.4l1.5-2.1 4.3 1.6v2.6a2 2 0 0 1-2.2 2A16.5 16.5 0 0 1 4.2 5.7a2 2 0 0 1 2-2.2Z"/>)svg"},
@@ -255,8 +257,12 @@ IconButton::IconButton(const QString &icon, const QString &label, QWidget *paren
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::StrongFocus);
     setFixedSize(size, size);
-    m_hover.setStartValue(0.0);
+    for (auto *a : {&m_hover, &m_press})
+        a->setStartValue(0.0);
     connect(&m_hover, &QVariantAnimation::valueChanged, this, [this] { update(); });
+    connect(&m_press, &QVariantAnimation::valueChanged, this, [this] { update(); });
+    connect(this, &QAbstractButton::pressed, this, [this] { animate(m_press, 1, Theme::ms(110), Theme::surfaceEasing()); });
+    connect(this, &QAbstractButton::released, this, [this] { animate(m_press, 0, Theme::ms(260), Theme::springEasing()); });
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
 }
 
@@ -268,12 +274,12 @@ void IconButton::setLabel(const QString &label)
 
 void IconButton::enterEvent(QEnterEvent *)
 {
-    animate(m_hover, 1, Theme::ms(160));
+    animate(m_hover, 1, Theme::ms(180), Theme::arriveEasing());
 }
 
 void IconButton::leaveEvent(QEvent *)
 {
-    animate(m_hover, 0, Theme::ms(160));
+    animate(m_hover, 0, Theme::ms(220), Theme::surfaceEasing());
 }
 
 void IconButton::focusInEvent(QFocusEvent *e)
@@ -296,26 +302,23 @@ void IconButton::paintEvent(QPaintEvent *)
     const QRectF r = rect();
     const qreal radius = m_rail ? 14 : r.width() / 2;
     const qreal hover = m_hover.currentValue().isValid() ? m_hover.currentValue().toReal() : 0;
-    QColor bg = Qt::transparent;
-    if (m_rail && isChecked()) {
-        bg = c.selected;
-    } else if (isDown()) {
-        bg = c.raised;
-    } else if (hover > 0) {
-        bg = c.raised;
-        bg.setAlphaF(hover * 0.85);
-    }
+    const qreal press = m_press.currentValue().isValid() ? m_press.currentValue().toReal() : 0;
     if (m_floating) {
-        QColor fill = c.surface;
-        if (isDown() || hover > 0)
-            fill = c.raised;
-        p.setPen(QPen(c.border, 1));
-        p.setBrush(fill);
-        p.drawEllipse(r.adjusted(0.5, 0.5, -0.5, -0.5));
-    } else if (bg.alpha() > 0) {
-        p.setPen(Qt::NoPen);
-        p.setBrush(bg);
-        p.drawRoundedRect(r, radius, radius);
+        // A floating button is a plate of its own: it lifts under the cursor and sinks on press.
+        paintPlate(p, r.adjusted(3, 3, -3, -5), r.width() / 2.0 - 3, c.surface, Lift::Medium, hover, press);
+    } else {
+        QColor bg = Qt::transparent;
+        if (m_rail && isChecked()) {
+            bg = c.selected;
+        } else if (hover > 0 || press > 0) {
+            bg = c.raised;
+            bg.setAlphaF(qMin(1.0, 0.85 * hover + 0.25 * press));
+        }
+        if (bg.alpha() > 0) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(bg);
+            p.drawRoundedRect(r.adjusted(press, press, -press, -press), radius, radius);
+        }
     }
     const qreal s = m_size >= 44 ? 24 : 22;
     const QColor ic = (m_rail && isChecked()) || m_floating ? c.accent : (isEnabled() ? c.text : c.muted);
@@ -337,8 +340,9 @@ Button::Button(const QString &text, Kind kind, QWidget *parent) : QAbstractButto
         a->setStartValue(0.0);
         connect(a, &QVariantAnimation::valueChanged, this, [this] { update(); });
     }
-    connect(this, &QAbstractButton::pressed, this, [this] { animate(m_press, 1, Theme::ms(140)); });
-    connect(this, &QAbstractButton::released, this, [this] { animate(m_press, 0, Theme::ms(140)); });
+    connect(this, &QAbstractButton::pressed, this, [this] { animate(m_press, 1, Theme::ms(110), Theme::surfaceEasing()); });
+    // Letting go returns with a little overshoot: the plate comes back up against the finger.
+    connect(this, &QAbstractButton::released, this, [this] { animate(m_press, 0, Theme::ms(260), Theme::springEasing()); });
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
     connect(Theme::instance(), &Theme::fontChanged, this, [this] { setFont(Theme::instance()->font(14.5, QFont::DemiBold)); updateGeometry(); });
 }
@@ -351,12 +355,12 @@ QSize Button::sizeHint() const
 
 void Button::enterEvent(QEnterEvent *)
 {
-    animate(m_hover, 1, Theme::ms(160));
+    animate(m_hover, 1, Theme::ms(180), Theme::arriveEasing());
 }
 
 void Button::leaveEvent(QEvent *)
 {
-    animate(m_hover, 0, Theme::ms(160));
+    animate(m_hover, 0, Theme::ms(220), Theme::surfaceEasing());
 }
 
 void Button::focusInEvent(QFocusEvent *e)
@@ -378,43 +382,53 @@ void Button::paintEvent(QPaintEvent *)
     p.setRenderHint(QPainter::Antialiasing);
     const qreal hover = m_hover.currentValue().isValid() ? m_hover.currentValue().toReal() : 0;
     const qreal press = m_press.currentValue().isValid() ? m_press.currentValue().toReal() : 0;
-    const qreal inset = press * 1.0;
-    const QRectF r = QRectF(rect()).adjusted(inset, inset, -inset, -inset);
     QColor bg, fg;
+    Lift lift = Lift::Low;
     switch (m_kind) {
     case Primary:
         bg = c.action;
         fg = c.onAccent;
-        bg = bg.lighter(100 + int(hover * 8));
         break;
     case Secondary:
         bg = c.raised;
         fg = c.text;
-        bg = Theme::instance()->isDark() ? bg.lighter(100 + int(hover * 14)) : bg.darker(100 + int(hover * 5));
         break;
     case Danger:
         bg = c.warningBg;
         fg = c.warning;
-        bg = bg.lighter(100 + int(hover * 10));
         break;
     case Flat:
         bg = c.raised;
-        bg.setAlphaF(hover * 0.8);
+        bg.setAlphaF(0.35 + hover * 0.45);
         fg = c.accent;
+        lift = Lift::None;
         break;
     }
     if (!isEnabled()) {
         bg.setAlphaF(bg.alphaF() * 0.5);
         fg = c.muted;
+        lift = Lift::None;
     }
-    p.setPen(Qt::NoPen);
-    p.setBrush(bg);
-    p.drawRoundedRect(r, 12, 12);
+    // The last pixels of the widget belong to the shadow: the plate itself is drawn inside them.
+    const QRectF area = QRectF(rect()).adjusted(2, 2, -2, -5);
+    paintPlate(p, area, 12, bg, lift, hover, press, m_kind != Flat);
     p.setPen(fg);
     p.setFont(font());
-    p.drawText(r, Qt::AlignCenter, text());
+    p.drawText(area, Qt::AlignCenter, text());
     if (hasFocus() && m_keyboardFocus)
-        paintFocusRing(&p, rect(), 12);
+        paintFocusRing(&p, area, 12);
+}
+
+// A text field is a plate let into the surface: it rests on a short shadow, and while it has
+// focus the ring around it is the accent colour rather than the border.
+static void paintFieldPlate(QPainter &p, const QRectF &rect, const QColor &fill, bool focused)
+{
+    const Palette &c = Theme::p();
+    const QRectF r = rect.adjusted(2, 2, -2, -4);
+    paintPlate(p, r, 12, fill, Lift::Low, focused ? 1 : 0, 0, false);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(focused ? c.accent : c.border, focused ? 1.5 : 1));
+    p.drawRoundedRect(r.adjusted(0.75, 0.75, -0.75, -0.75), 12, 12);
 }
 
 // ---- SearchField ----
@@ -460,10 +474,7 @@ void SearchField::paintEvent(QPaintEvent *)
     const Palette &c = Theme::p();
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-    p.setPen(m_edit->hasFocus() ? QPen(c.accent, 1.5) : Qt::NoPen);
-    p.setBrush(Theme::instance()->isDark() ? c.raised : c.raised);
-    p.drawRoundedRect(r, 12, 12);
+    paintFieldPlate(p, rect(), c.raised, m_edit->hasFocus());
     paintIcon(&p, QRectF(14, (height() - 18) / 2.0, 18, 18), "search", c.muted);
     int right = 12;
     if (!m_hint.isEmpty() && m_edit->text().isEmpty()) {
@@ -547,10 +558,7 @@ void TextField::paintEvent(QPaintEvent *)
     const Palette &c = Theme::p();
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    const QRectF r = QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75);
-    p.setPen(QPen(m_edit->hasFocus() ? c.accent : c.border, m_edit->hasFocus() ? 1.5 : 1));
-    p.setBrush(c.surface);
-    p.drawRoundedRect(r, 12, 12);
+    paintFieldPlate(p, rect(), c.surface, m_edit->hasFocus());
     const qreal t = m_float.currentValue().isValid() ? m_float.currentValue().toReal() : 0.0;
     const qreal px = 14.5 - t * (14.5 * 0.15);
     p.setFont(Theme::instance()->font(px));
@@ -638,10 +646,7 @@ void TextArea::paintEvent(QPaintEvent *)
     const Palette &c = Theme::p();
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    const QRectF r = QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75);
-    p.setPen(QPen(m_edit->hasFocus() ? c.accent : c.border, m_edit->hasFocus() ? 1.5 : 1));
-    p.setBrush(c.surface);
-    p.drawRoundedRect(r, 12, 12);
+    paintFieldPlate(p, rect(), c.surface, m_edit->hasFocus());
     const qreal t = m_float.currentValue().isValid() ? m_float.currentValue().toReal() : 0.0;
     const qreal px = 14.5 - t * (14.5 * 0.15);
     p.setFont(Theme::instance()->font(px));
@@ -829,7 +834,8 @@ void Toggle::checkStateSet()
 void Toggle::nextCheckState()
 {
     setChecked(!isChecked());
-    animate(m_anim, isChecked() ? 1 : 0, Theme::ms(220), Theme::surfaceEasing());
+    // The knob travels with a spring: it arrives a hair past its stop and settles back.
+    animate(m_anim, isChecked() ? 1 : 0, Theme::ms(260), Theme::springEasing());
 }
 
 void Toggle::focusInEvent(QFocusEvent *e)
@@ -853,16 +859,23 @@ void Toggle::paintEvent(QPaintEvent *)
     p.setPen(c.text);
     p.drawText(QRectF(0, 0, width() - 60, height()), Qt::AlignLeft | Qt::AlignVCenter, text());
     const qreal t = m_anim.currentValue().isValid() ? m_anim.currentValue().toReal() : (isChecked() ? 1 : 0);
+    const qreal k = qBound(0.0, t, 1.0);
     const QRectF track(width() - 46, (height() - 26) / 2.0, 46, 26);
     QColor off = c.border;
     QColor on("#367FF4");
-    QColor bg = QColor::fromRgbF(off.redF() + (on.redF() - off.redF()) * t, off.greenF() + (on.greenF() - off.greenF()) * t,
-                                 off.blueF() + (on.blueF() - off.blueF()) * t);
+    QColor bg = QColor::fromRgbF(off.redF() + (on.redF() - off.redF()) * k, off.greenF() + (on.greenF() - off.greenF()) * k,
+                                 off.blueF() + (on.blueF() - off.blueF()) * k);
     p.setPen(Qt::NoPen);
     p.setBrush(bg);
     p.drawRoundedRect(track, 13, 13);
+    const qreal cx = track.left() + 13 + t * 20;
+    // The knob sits above the track on its own shadow, which is what makes the switch look
+    // like something you can push rather than a painted rectangle.
+    QColor knobShadow(0, 0, 0, Theme::instance()->isDark() ? 80 : 45);
+    p.setBrush(knobShadow);
+    p.drawEllipse(QPointF(cx, track.center().y() + 1.5), 10, 10);
     p.setBrush(Qt::white);
-    p.drawEllipse(QPointF(track.left() + 13 + t * 20, track.center().y()), 10, 10);
+    p.drawEllipse(QPointF(cx, track.center().y()), 10, 10);
     if (hasFocus() && m_keyboardFocus)
         paintFocusRing(&p, track.adjusted(-3, -3, 3, 3), 16);
 }
@@ -912,7 +925,7 @@ void Toast::show(const QString &text, const QString &actionTitle, std::function<
     place();
     QWidget::show();
     raise();
-    animate(m_anim, 1, Theme::ms(180));
+    animate(m_anim, 1, Theme::ms(220), Theme::arriveEasing());
     m_timer->start(m_callback ? 5000 : 3200);
     QAccessibleEvent ev(this, QAccessible::Alert);
     setAccessibleName(text);
@@ -941,9 +954,7 @@ void Toast::paintEvent(QPaintEvent *)
     const Palette &c = Theme::p();
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.setPen(QPen(c.border, 1));
-    p.setBrush(c.raised);
-    p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 14, 14);
+    paintPlate(p, QRectF(rect()).adjusted(6, 2, -6, -8), 14, c.raised, Lift::Medium);
     p.setPen(c.text);
     p.setFont(Theme::instance()->font(14));
     const int actionW = !m_action->isHidden() ? m_action->width() : 0;

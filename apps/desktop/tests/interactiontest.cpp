@@ -4,6 +4,8 @@
 #include "popupmenu.h"
 #include "sheet.h"
 #include "theme.h"
+#include "videoplayer.h"
+#include "widgets.h"
 
 #include <QApplication>
 #include <QAbstractButton>
@@ -21,6 +23,7 @@
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QTest>
+#include <QImage>
 
 class InteractionTest : public QObject {
     Q_OBJECT
@@ -285,6 +288,66 @@ private slots:
         QTRY_VERIFY(dynamic_cast<PopupMenu *>(QApplication::activePopupWidget()));
         QTest::keyClick(QApplication::activePopupWidget(), Qt::Key_Escape);
         QTRY_VERIFY(QApplication::activePopupWidget() == nullptr);
+    }
+
+    // A right click on an open picture is its menu, not a way out; Esc leaves the menu, not the picture.
+    void photoViewerRightClickOpensMenu() {
+        QWidget window;
+        window.resize(900, 640);
+        window.show();
+        const QString file = QDir(QDir::tempPath()).filePath(QStringLiteral("neochat-viewer-test.png"));
+        QImage image(64, 48, QImage::Format_ARGB32);
+        image.fill(Qt::blue);
+        QVERIFY(image.save(file));
+        QVERIFY(showPhotoFile(&window, file, [](PopupMenu *menu) {
+            menu->addAction(QStringLiteral("Перейти к сообщению"), menu, [] {});
+            menu->addAction(QStringLiteral("Копировать"), menu, [] {});
+            menu->addAction(QStringLiteral("Переслать"), menu, [] {});
+            menu->addAction(QStringLiteral("Удалить"), menu, [] {});
+            menu->addAction(QStringLiteral("Сохранить как…"), menu, [] {});
+            menu->addAction(QStringLiteral("Все фотографии"), menu, [] {});
+        }));
+        QWidget *viewer = nullptr;
+        for (auto *child : window.findChildren<QWidget *>())
+            if (child->accessibleName().startsWith(QStringLiteral("Просмотр фото"))) viewer = child;
+        QVERIFY(viewer);
+        QContextMenuEvent event(QContextMenuEvent::Mouse, viewer->rect().center(), viewer->mapToGlobal(viewer->rect().center()));
+        QApplication::sendEvent(viewer, &event);
+        // The menu is open and the picture stays where it was: a right click is not a way out.
+        PopupMenu *menu = nullptr;
+        for (int i = 0; i < 40 && !menu; ++i) {
+            menu = dynamic_cast<PopupMenu *>(QApplication::activePopupWidget());
+            if (!menu)
+                QTest::qWait(50);
+        }
+        QVERIFY(menu);
+        QVERIFY(viewer->isVisible());
+        QStringList titles;
+        for (auto *action : menu->actions())
+            titles << action->text();
+        QCOMPARE(titles, (QStringList{QStringLiteral("Перейти к сообщению"), QStringLiteral("Копировать"), QStringLiteral("Переслать"),
+                                      QStringLiteral("Удалить"), QStringLiteral("Сохранить как…"), QStringLiteral("Все фотографии")}));
+        // The first Escape closes the menu and leaves the picture, the second one leaves the picture.
+        QTest::keyClick(menu, Qt::Key_Escape);
+        QTRY_VERIFY(QApplication::activePopupWidget() == nullptr);
+        QVERIFY(viewer->isVisible());
+        QTest::keyClick(viewer, Qt::Key_Escape);
+        QTRY_VERIFY(!viewer->isVisible());
+        QFile::remove(file);
+    }
+
+    // The built-in player must not be silent about a file it cannot open, and Esc always gets out.
+    void videoViewerReportsErrorAndCloses() {
+        QWidget window;
+        window.resize(900, 640);
+        window.show();
+        QVERIFY(showVideoFile(&window, QStringLiteral("Z:/neochat/no-such-video.mp4"), QStringLiteral("no-such-video.mp4")));
+        auto *viewer = window.findChild<QWidget *>(QStringLiteral("videoViewer"));
+        QVERIFY(viewer);
+        QTRY_VERIFY(!static_cast<VideoViewer *>(viewer)->errorString().isEmpty());
+        QVERIFY(static_cast<VideoViewer *>(viewer)->note()->isVisible());
+        QTest::keyClick(viewer, Qt::Key_Escape);
+        QTRY_VERIFY(window.findChild<QWidget *>(QStringLiteral("videoViewer")) == nullptr);
     }
 
     void replyKeepsInputFocusAfterMenuCloses() {

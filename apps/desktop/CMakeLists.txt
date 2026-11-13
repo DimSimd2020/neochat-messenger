@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NeoChat VERSION 0.7.1 LANGUAGES CXX)
+project(NeoChat VERSION 0.7.2.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,6 +48,8 @@ add_library(neochat_ui STATIC
     src/speech.cpp src/speech.h
     src/circle.cpp src/circle.h
     src/videocompress.cpp src/videocompress.h
+    src/videoplayer.cpp src/videoplayer.h
+    src/mediagallery.h
     src/playback.cpp src/playback.h
     src/transcriber.cpp src/transcriber.h
     src/circlesheet.cpp src/circlesheet.h
@@ -100,8 +102,9 @@ target_include_directories(neochat_ui PUBLIC neocall)
 target_link_libraries(neochat_ui PUBLIC neocall winmm delayimp shell32 ole32 propsys uuid gdi32)
 target_link_options(neochat_ui INTERFACE /DELAYLOAD:neocall.dll)
 
-# Voice messages, circles and compression use Windows Media Foundation and WinMM.
-target_link_libraries(neochat_ui PUBLIC mf mfplat mfreadwrite mfuuid wmcodecdspuuid)
+# Voice messages, circles and compression use Windows Media Foundation and WinMM; whole videos
+# play through MFPlay, which streams picture and sound itself.
+target_link_libraries(neochat_ui PUBLIC mf mfplat mfreadwrite mfplay mfuuid wmcodecdspuuid)
 
 # Speech to text: sherpa-onnx (Apache-2.0), fetched by scripts/fetch-sherpa.sh. Without it the
 # build works and the "Расшифровать" action is simply not offered. Its DLLs load lazily, so the

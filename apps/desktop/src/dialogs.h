@@ -42,6 +42,9 @@ void profileStyle(const DialogHost &h, const QJsonObject &profile, std::function
 void myQr(const DialogHost &h);
 void profileQr(const DialogHost &h, const QString &userId = {});
 void conversationInfo(const DialogHost &h, const QString &conversationId);
+// The album an open picture came from: `photos` are the conversation's photo messages, `current`
+// is the one being viewed. `open` shows a picked picture with the same right-click menu.
+void conversationPhotos(const DialogHost &h, const QJsonArray &photos, const QJsonObject &current, std::function<void(const QJsonObject &)> open);
 void newPoll(const DialogHost &h, const QString &conversationId);
 void forward(const DialogHost &h, const QJsonArray &msgs);
 // Preview of the picked files with a caption field and "send as a file" for pictures; `send` gets the final set.

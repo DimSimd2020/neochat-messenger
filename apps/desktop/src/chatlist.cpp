@@ -184,10 +184,12 @@ void ChatDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QMo
     const QRectF r = QRectF(opt.rect).adjusted(0, 2, 0, -2);
     const bool selected = opt.state & QStyle::State_Selected;
     const bool hover = opt.state & QStyle::State_MouseOver;
-    if (selected || hover) {
-        QColor bg = selected ? c.selected : c.raised;
-        if (!selected)
-            bg.setAlphaF(0.55f);
+    if (selected) {
+        // The chosen chat is a plate with light along its top edge, not merely a darker rectangle.
+        paintPlate(*p, r, 14, c.selected, Lift::None);
+    } else if (hover) {
+        QColor bg = c.raised;
+        bg.setAlphaF(0.55f);
         p->setPen(Qt::NoPen);
         p->setBrush(bg);
         p->drawRoundedRect(r, 14, 14);

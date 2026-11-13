@@ -26,8 +26,8 @@ public:
     void setChoice(bool current) { m_choice = true; m_current = current; }
     QSize sizeHint() const override { return {qMax(240, QFontMetrics(Theme::instance()->font(14)).horizontalAdvance(text()) + 64), 42}; }
 protected:
-    void enterEvent(QEnterEvent *) override { ui::animate(m_hover, 1, Theme::ms(140)); }
-    void leaveEvent(QEvent *) override { ui::animate(m_hover, 0, Theme::ms(140)); }
+    void enterEvent(QEnterEvent *) override { ui::animate(m_hover, 1, Theme::ms(160), Theme::arriveEasing()); }
+    void leaveEvent(QEvent *) override { ui::animate(m_hover, 0, Theme::ms(200), Theme::surfaceEasing()); }
     void paintEvent(QPaintEvent *) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
@@ -45,6 +45,10 @@ protected:
         else if (text().contains(QStringLiteral("Ответ"))) icon = "reply";
         else if (text().contains(QStringLiteral("Копир"))) icon = "copy";
         else if (text().contains(QStringLiteral("Пересл"))) icon = "forward";
+        else if (text().contains(QStringLiteral("Перейти"), Qt::CaseInsensitive)) icon = "eye";
+        else if (text().contains(QStringLiteral("Удалить"), Qt::CaseInsensitive)) icon = "trash";
+        else if (text().contains(QStringLiteral("Сохран"), Qt::CaseInsensitive)) icon = "download";
+        else if (text().contains(QStringLiteral("фотографии"), Qt::CaseInsensitive)) icon = "grid";
         else if (text().contains(QStringLiteral("закреп"), Qt::CaseInsensitive)) icon = "pin";
         else if (text().contains(QStringLiteral("архив"), Qt::CaseInsensitive)) icon = "archive";
         else if (danger) icon = "trash";
@@ -294,12 +298,7 @@ void PopupMenu::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.setPen(Qt::NoPen);
-    for (int i = 8; i > 0; --i) {
-        p.setBrush(QColor(0, 0, 0, 3));
-        p.drawRoundedRect(QRectF(rect()).adjusted(8 - i, 8 - i, i - 8, i - 6), 19 + i, 19 + i);
-    }
-    p.setPen(QPen(Theme::p().border, 1));
-    p.setBrush(Theme::p().surface);
-    p.drawRoundedRect(QRectF(rect()).adjusted(8.5, 8.5, -8.5, -8.5), 19, 19);
+    // The eight pixels around the menu belong to its shadow: the menu is a plate floating above
+    // what it was opened from, not a rectangle pasted onto it.
+    paintPlate(p, QRectF(rect()).adjusted(8, 8, -8, -8), 19, Theme::p().surface, Lift::Medium);
 }

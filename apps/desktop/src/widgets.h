@@ -83,6 +83,7 @@ private:
     bool m_floating = false;
     bool m_keyboardFocus = false;
     QVariantAnimation m_hover;
+    QVariantAnimation m_press;
 };
 
 class Button : public QAbstractButton {

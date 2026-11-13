@@ -5,6 +5,7 @@
 #include "playback.h"
 #include "popupmenu.h"
 #include "transcriber.h"
+#include "videoplayer.h"
 
 #include "animatedemoji.h"
 #include "core.h"
@@ -313,14 +314,17 @@ protected:
     }
 };
 
-// Full-window photo viewer: click, Esc or Space closes; fades unless motion is reduced.
+// Full-window photo viewer: a left click, Esc or Space closes it; a right click opens the actions
+// of this picture instead, when the caller passed them. Fades unless motion is reduced.
 class PhotoViewer : public QWidget {
+    Q_OBJECT
 public:
-    PhotoViewer(QWidget *win, const QImage &img) : QWidget(win), m_img(img)
+    PhotoViewer(QWidget *win, const QImage &img, std::function<void(PopupMenu *)> actions = {})
+        : QWidget(win), m_img(img), m_actions(std::move(actions))
     {
         setAttribute(Qt::WA_DeleteOnClose);
         setFocusPolicy(Qt::StrongFocus);
-        setAccessibleName(QStringLiteral("Просмотр фото. Esc — закрыть"));
+        setAccessibleName(QStringLiteral("Просмотр фото. Esc — закрыть, правая кнопка — действия"));
         setGeometry(win->rect());
         win->installEventFilter(this);
         auto *fx = new QGraphicsOpacityEffect(this);
@@ -332,6 +336,10 @@ public:
         setFocus(Qt::OtherFocusReason);
         fade(1);
     }
+
+signals:
+    // Emitted once the fade out has finished, for whoever opened the viewer and follows it.
+    void closed();
 
 protected:
     bool eventFilter(QObject *o, QEvent *e) override
@@ -350,7 +358,20 @@ protected:
         QSizeF sz = QSizeF(m_img.size()) * s;
         p.drawImage(QRectF(avail.center() - QPointF(sz.width() / 2, sz.height() / 2), sz), m_img);
     }
-    void mousePressEvent(QMouseEvent *) override { fade(0); }
+    // Only a left click is a way out: the right one belongs to the menu of the picture.
+    void mousePressEvent(QMouseEvent *e) override
+    {
+        if (e->button() == Qt::LeftButton)
+            fade(0);
+    }
+    void contextMenuEvent(QContextMenuEvent *e) override
+    {
+        if (!m_actions)
+            return;
+        auto *menu = new PopupMenu(this);
+        m_actions(menu);
+        menu->popup(e->globalPos());
+    }
     void keyPressEvent(QKeyEvent *e) override
     {
         if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Space || e->key() == Qt::Key_Return)
@@ -363,28 +384,76 @@ private:
         m_fade->stop();
         m_fade->setDuration(Theme::ms(180));
         m_fade->setEndValue(to);
-        if (to == 0)
-            connect(m_fade, &QPropertyAnimation::finished, this, &QWidget::close);
+        if (to == 0) {
+            disconnect(m_fade, &QPropertyAnimation::finished, this, nullptr);
+            connect(m_fade, &QPropertyAnimation::finished, this, [this] {
+                emit closed();
+                close();
+            });
+        }
         m_fade->start();
     }
     QImage m_img;
+    std::function<void(PopupMenu *)> m_actions;
     QPropertyAnimation *m_fade;
 };
 
-} // namespace
-
-bool showPhotoFile(QWidget *host, const QString &path)
+// Reads a picture for full-window viewing with a bound: a message can carry a photo far larger
+// than the screen, and it must not be loaded pixel for pixel.
+QImage viewerImage(const QString &path)
 {
-    if (!host)
-        return false;
     QImageReader reader(path);
     reader.setAutoTransform(true);
     if (reader.size().isValid())
         reader.setScaledSize(reader.size().scaled(4096, 4096, Qt::KeepAspectRatio));
-    const QImage img = reader.read();
+    return reader.read();
+}
+
+// The right-click menu of an open picture, shared by the chat and the album. Actions that need
+// the window back close the viewer first; "Копировать" and "Сохранить как…" leave it open.
+void viewerMenu(PopupMenu *menu, const QJsonObject &m, const QImage &img, QWidget *ctx,
+                std::function<void()> jump, std::function<void()> forward, std::function<void()> save, std::function<void()> showAlbum)
+{
+    const QString id = m.value("id").toString();
+    auto *viewer = qobject_cast<PhotoViewer *>(menu->parent());
+    auto closeViewer = [viewer] {
+        if (viewer)
+            viewer->close();
+    };
+    menu->addAction(QStringLiteral("Перейти к сообщению"), ctx, [closeViewer, jump] {
+        closeViewer();
+        jump();
+    });
+    menu->addAction(QStringLiteral("Копировать"), ctx, [img] { QApplication::clipboard()->setImage(img); });
+    menu->addAction(QStringLiteral("Переслать"), ctx, [closeViewer, forward] {
+        closeViewer();
+        forward();
+    });
+    menu->addAction(QStringLiteral("Удалить"), ctx, [ctx, id, closeViewer] {
+        closeViewer();
+        Core::instance()->call("delete_local_message", {{"message_id", id}}, ctx, [ctx](const QJsonValue &, const CoreError &e) {
+            auto *view = qobject_cast<MessageView *>(ctx);
+            if (!e.ok() && view)
+                view->toast(e.message);
+        });
+    });
+    menu->addAction(QStringLiteral("Сохранить как…"), ctx, [save] { save(); });
+    menu->addAction(QStringLiteral("Все фотографии"), ctx, [closeViewer, showAlbum] {
+        closeViewer();
+        showAlbum();
+    });
+}
+
+} // namespace
+
+bool showPhotoFile(QWidget *host, const QString &path, std::function<void(PopupMenu *)> actions)
+{
+    if (!host)
+        return false;
+    const QImage img = viewerImage(path);
     if (img.isNull())
         return false;
-    new PhotoViewer(host->window() ? host->window() : host, img);
+    new PhotoViewer(host->window() ? host->window() : host, img, std::move(actions));
     return true;
 }
 
@@ -863,9 +932,15 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
                                     : ui::roundedPath(L.bubble, it->groupStart ? R : r, R, R, r);
     const bool undecryptable = m.value("kind").toString() == "undecryptable";
     if (!L.big) {
-        p->setPen(undecryptable ? QPen(c.warning, 1, Qt::DashLine) : Qt::NoPen);
-        p->setBrush(out ? c.outgoing : c.raised);
-        p->drawPath(bubble);
+        // The bubble is a plate like the rest of the window: light along its top edge and a
+        // hairline border keep it apart from the history behind it instead of looking like a
+        // coloured sticker.
+        paintPlatePath(*p, bubble, out ? c.outgoing : c.raised);
+        if (undecryptable) {
+            p->setPen(QPen(c.warning, 1, Qt::DashLine));
+            p->setBrush(Qt::NoBrush);
+            p->drawPath(bubble);
+        }
     }
     if (opt.state & QStyle::State_Selected) {
         p->setPen(QPen(c.accent, 2));
@@ -1942,16 +2017,35 @@ void MessageView::vote(const QJsonObject &m, int option)
 
 void MessageView::openImage(const QJsonObject &m)
 {
-    Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &v, const CoreError &e) {
+    Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this, m](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
             return emit toast(e.message);
-        QImageReader reader(v.toObject().value("path").toString());
-        reader.setAutoTransform(true);
-        const QImage img = reader.read();
+        const QImage img = viewerImage(v.toObject().value("path").toString());
         if (img.isNull())
             return emit toast(QStringLiteral("Не удалось открыть фото"));
-        new PhotoViewer(window(), img);
+        new PhotoViewer(window(), img, [this, m, img](PopupMenu *menu) { viewerActions(menu, m, img); });
     });
+}
+
+// The menu of an open picture: the actions of its message, the album it came from and the way
+// back to it. The viewer stays open — a right click is not a way out.
+void MessageView::viewerActions(PopupMenu *menu, const QJsonObject &m, const QImage &img)
+{
+    viewerMenu(menu, m, img, this, [this, m] { jumpToMessage(m.value("id").toString()); },
+               [this, m] { emit forwardRequested(QJsonArray{m}); }, [this, m] { saveFile(m); },
+               [this, m] { emit photosRequested(m, conversationPhotos()); });
+}
+
+// The photo messages loaded so far, oldest first: the album the open picture came from.
+QJsonArray MessageView::conversationPhotos() const
+{
+    QJsonArray photos;
+    for (int i = 0; i < m_model->rowCount(); ++i) {
+        const MessageItem &it = m_model->item(i);
+        if (!it.isDate && isImage(it.msg))
+            photos.append(it.msg);
+    }
+    return photos;
 }
 
 void MessageView::keyPressEvent(QKeyEvent *e)
@@ -2146,11 +2240,18 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
 
 void MessageView::openFile(const QJsonObject &m)
 {
-    emit toast(isVideo(m) ? QStringLiteral("Расшифровываем видео…") : QStringLiteral("Расшифровываем файл…"));
-    Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &v, const CoreError &e) {
+    const bool video = isVideo(m);
+    emit toast(video ? QStringLiteral("Расшифровываем видео…") : QStringLiteral("Расшифровываем файл…"));
+    Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this, m, video](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
             return emit toast(e.message);
-        QDesktopServices::openUrl(QUrl::fromLocalFile(v.toObject().value("path").toString()));
+        const QString path = v.toObject().value("path").toString();
+        // A video plays inside NeoChat: there is no reason for the system player to open a message.
+        if (video) {
+            showVideoFile(this, path, m.value("file").toObject().value("name").toString());
+            return;
+        }
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
     });
 }
 
@@ -2194,3 +2295,5 @@ void loadQuickReaction(QObject *ctx)
             QSettings().setValue("chat/quickReaction", r);
     });
 }
+
+#include "messages.moc"

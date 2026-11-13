@@ -813,6 +813,9 @@ MainWindow::MainWindow()
     connect(m_view, &MessageView::editRequested, m_composer, &Composer::setEdit);
     connect(m_composer, &Composer::edited, this, &MainWindow::editText);
     connect(m_view, &MessageView::forwardRequested, this, [this](const QJsonArray &msgs) { dialogs::forward(host(), msgs); });
+    connect(m_view, &MessageView::photosRequested, this, [this](const QJsonObject &photo, const QJsonArray &photos) {
+        dialogs::conversationPhotos(host(), photos, photo, [this](const QJsonObject &m) { m_view->openImage(m); });
+    });
     connect(m_view, &MessageView::toast, this, &MainWindow::toast);
     m_pinBar->jump = [this](const QString &id) { m_view->jumpToMessage(id); };
     m_pinBar->unpinMessage = [this](const QString &id) {

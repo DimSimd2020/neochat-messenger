@@ -49,9 +49,9 @@ protected:
         const Palette &c = Theme::p();
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(QPen(c.border, 1));
-        p.setBrush(c.surface);
-        p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 20, 20);
+        // The shadow belongs to the sheet behind us; here only the plate itself: light along the
+        // top edge, shade along the bottom one, and the border.
+        paintPlate(p, QRectF(rect()).adjusted(1, 1, -1, -1), 20, c.surface, Lift::None);
         if (body)
             paintSoftPanel(p, body->geometry(), c.canvas);
     }
@@ -178,7 +178,8 @@ void Sheet::open()
     // The card is opaque from the first frame. Only the dim and the 10 px rise animate,
     // so the screen underneath never shows through the new window.
     step(0);
-    m_anim.setDuration(qMax(1, Theme::ms(220)));
+    m_anim.setEasingCurve(Theme::arriveEasing());
+    m_anim.setDuration(qMax(1, Theme::ms(260)));
     m_anim.setStartValue(0.0);
     m_anim.setEndValue(1.0);
     m_anim.start();
@@ -198,6 +199,7 @@ void Sheet::close()
     const qreal from = qMax(m_t, m_dimFloor);
     m_dimFloor = 0;
     m_anim.stop();
+    m_anim.setEasingCurve(Theme::surfaceEasing());
     m_anim.setStartValue(from);
     m_anim.setEndValue(0.0);
     m_anim.setDuration(qMax(1, int(Theme::ms(220) * from)));
@@ -237,7 +239,12 @@ void Sheet::layoutCard()
 void Sheet::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
-    p.fillRect(rect(), QColor(0, 0, 0, int(110 * qMax(m_t, m_dimFloor))));
+    const qreal t = qMax(m_t, m_dimFloor);
+    p.fillRect(rect(), QColor(0, 0, 0, int(110 * t)));
+    // The card stands over the dimmed window. Its shadow is painted here because the card itself
+    // can only draw inside its own rectangle, and it grows with the card as it settles down.
+    if (m_card->isVisible())
+        paintShadow(p, QRectF(m_card->geometry()), 20, t > 0.6 ? Lift::High : Lift::Medium);
 }
 
 void Sheet::mousePressEvent(QMouseEvent *e)

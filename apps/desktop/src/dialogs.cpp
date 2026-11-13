@@ -5,6 +5,7 @@
 #include "calls.h"
 #include "filepicker.h"
 #include "core.h"
+#include "mediagallery.h"
 #include "messages.h"
 #include "popupmenu.h"
 #include "sheet.h"
@@ -1250,6 +1251,35 @@ void conversationInfo(const DialogHost &h, const QString &cid)
         if(c.value("kind")=="direct") personProfile(h,c.value("peer_user_id").toString());
         else groupInfo(h,cid);
     });
+}
+
+// ---- the album of an open picture ----
+
+void conversationPhotos(const DialogHost &h, const QJsonArray &photos, const QJsonObject &current, std::function<void(const QJsonObject &)> open)
+{
+    auto *sheet = new Sheet(h.host, QStringLiteral("Фотографии"), 640);
+    auto *content = new QWidget;
+    auto *lay = new QVBoxLayout(content);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(12);
+    sheet->body()->addWidget(content);
+    if (photos.isEmpty()) {
+        content->layout()->addWidget(new ui::Label(QStringLiteral("В этой беседе пока нет фотографий"), 15, 400, ui::Label::Muted));
+    } else {
+        const QString currentId = current.value("id").toString();
+        auto *grid = new MediaGrid;
+        for (const auto &value : photos) {
+            const QJsonObject m = value.toObject();
+            auto *tile = new MediaTile(ImageCache::instance()->thumb(m));
+            if (m.value("id").toString() == currentId)
+                tile->setAccessibleName(QStringLiteral("Текущее фото"));
+            QObject::connect(tile, &QAbstractButton::clicked, sheet, [open, m] { open(m); });
+            grid->add(tile);
+        }
+        lay->addWidget(grid);
+        lay->addWidget(new ui::Label(QStringLiteral("Нажатие открывает фото; правая кнопка в нём — действия сообщения."), 12.5, 400, ui::Label::Muted));
+    }
+    sheet->open();
 }
 
 static void groupInfo(const DialogHost &h, const QString &cid)

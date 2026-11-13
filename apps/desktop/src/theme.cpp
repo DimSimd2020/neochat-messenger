@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QLinearGradient>
 #include <QPainter>
+#include <QPainterPath>
 #include <QRadialGradient>
 #include <QWidget>
 #include <QPalette>
@@ -393,4 +394,115 @@ void Theme::paintBackdrop(QPainter &painter, const QWidget *w, const QColor &gla
     paintBackdropIn(painter, w->rect(), QRectF(-off.x(), -off.y(), win->width(), win->height()), p());
     if (glass.isValid())
         painter.fillRect(w->rect(), glass);
+}
+
+QEasingCurve Theme::arriveEasing()
+{
+    QEasingCurve c(QEasingCurve::BezierSpline);
+    c.addCubicBezierSegment(QPointF(0.16, 1.0), QPointF(0.3, 1.0), QPointF(1.0, 1.0));
+    return c;
+}
+
+QEasingCurve Theme::springEasing()
+{
+    QEasingCurve c(QEasingCurve::OutBack);
+    c.setOvershoot(1.25);
+    return c;
+}
+
+// Light along the top edge and a shade along the bottom one: the two strokes that turn a flat
+// fill into a plate with thickness. Both are thin bands, not a gradient across the whole shape —
+// a large panel must stay the colour it was given, and only its edges may catch the light.
+// Written for an outline rather than a rectangle so a message bubble, whose corners are all
+// different, gets the same treatment as a button.
+static void paintSheen(QPainter &p, const QPainterPath &shape, bool dark)
+{
+    const QRectF r = shape.boundingRect();
+    const qreal band = qMin(r.height() / 2.0, 14.0);
+    p.save();
+    p.setClipPath(shape);
+    p.setPen(Qt::NoPen);
+    QLinearGradient top(r.topLeft(), QPointF(r.left(), r.top() + band));
+    top.setColorAt(0, QColor(255, 255, 255, dark ? 20 : 110));
+    top.setColorAt(1, QColor(255, 255, 255, 0));
+    p.setBrush(top);
+    p.drawRect(QRectF(r.left(), r.top(), r.width(), band));
+    QLinearGradient bottom(QPointF(r.left(), r.bottom()), QPointF(r.left(), r.bottom() - band));
+    bottom.setColorAt(0, QColor(0, 0, 0, dark ? 34 : 14));
+    bottom.setColorAt(1, QColor(0, 0, 0, 0));
+    p.setBrush(bottom);
+    p.drawRect(QRectF(r.left(), r.bottom() - band, r.width(), band));
+    p.restore();
+}
+
+// The shadow is a stack of faint rounded rectangles, each a little further from the plate and
+// each lighter than the one inside it. Painting them outward from the plate is what makes the
+// edge soft without a blur pass, which would cost a full offscreen image per frame.
+void paintShadow(QPainter &p, const QRectF &r, qreal radius, Lift lift)
+{
+    if (lift == Lift::None)
+        return;
+    const int layers = lift == Lift::High ? 10 : lift == Lift::Medium ? 7 : 4;
+    const int alpha = lift == Lift::High ? 7 : lift == Lift::Medium ? 5 : 4;
+    const qreal drop = lift == Lift::High ? 5.0 : lift == Lift::Medium ? 2.5 : 1.2;
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    for (int i = layers; i >= 1; --i) {
+        const qreal grow = i;
+        QColor shade(0, 0, 0, alpha);
+        p.setBrush(shade);
+        p.drawRoundedRect(r.adjusted(-grow, -grow + drop, grow, grow + drop), radius + grow, radius + grow);
+    }
+    p.restore();
+}
+
+void paintPlate(QPainter &p, const QRectF &rect, qreal radius, const QColor &fill, Lift lift,
+                qreal hover, qreal press, bool border)
+{
+    const bool dark = Theme::instance()->isDark();
+    const Palette &c = Theme::p();
+    // Hover raises the plate off its shadow, press pushes it into the surface: the plate itself
+    // shrinks by a pixel, which is what a click feels like when the control has thickness.
+    QRectF r = rect.adjusted(press, press, -press, -press);
+    if (hover > 0)
+        r.translate(0, -hover * (lift == Lift::None ? 0.0 : 1.5));
+    p.setRenderHint(QPainter::Antialiasing);
+    paintShadow(p, r, radius, lift);
+    QColor bg = fill;
+    if (hover > 0)
+        bg = dark ? bg.lighter(100 + int(hover * 10)) : bg.lighter(100 + int(hover * 5));
+    if (press > 0)
+        bg = bg.darker(100 + int(press * 10));
+    p.setPen(Qt::NoPen);
+    p.setBrush(bg);
+    QPainterPath shape;
+    shape.addRoundedRect(r, radius, radius);
+    p.drawPath(shape);
+    paintSheen(p, shape, dark);
+    if (border) {
+        p.setPen(QPen(c.border, 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(shape);
+    }
+}
+
+void paintPlatePath(QPainter &p, const QPainterPath &shape, const QColor &fill, qreal hover, qreal press, bool border)
+{
+    const bool dark = Theme::instance()->isDark();
+    QColor bg = fill;
+    if (hover > 0)
+        bg = dark ? bg.lighter(100 + int(hover * 8)) : bg.lighter(100 + int(hover * 4));
+    if (press > 0)
+        bg = bg.darker(100 + int(press * 10));
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(bg);
+    p.drawPath(shape);
+    paintSheen(p, shape, dark);
+    if (border) {
+        p.setPen(QPen(Theme::p().border, 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(shape);
+    }
 }

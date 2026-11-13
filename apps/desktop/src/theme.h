@@ -6,10 +6,12 @@
 #include <QList>
 #include <QObject>
 #include <QPointF>
+#include <QRectF>
 #include <QVariantAnimation>
 
 // Colors from docs/design/tokens.json ("themes", "appearance").
 class QPainter;
+class QPainterPath;
 class QWidget;
 
 // A soft blob of the window backdrop. `pos` is a fraction of the window and may lie outside
@@ -43,6 +45,23 @@ struct CustomTheme {
     QList<Spot> spots;
     bool valid() const { return base.isValid(); }
 };
+
+// How far a surface stands above what is behind it: the higher the lift, the wider and softer
+// its shadow and the stronger the light along its top edge.
+enum class Lift { None = 0, Low = 1, Medium = 2, High = 3 };
+
+// The shadow of a rounded rectangle, drawn under it. The caller must leave `int(lift) * 6 + 2`
+// pixels of free space around `r`, or the shadow is cut off by the widget's own edges.
+void paintShadow(QPainter &p, const QRectF &r, qreal radius, Lift lift);
+// A surface with depth: shadow, fill, light along the top edge, a shade along the bottom one and
+// a border. `hover` and `press` (0..1) brighten the fill and pull the plate in, which is what a
+// click should feel like: the button goes away from the finger, not through it.
+void paintPlate(QPainter &p, const QRectF &r, qreal radius, const QColor &fill, Lift lift,
+                qreal hover = 0, qreal press = 0, bool border = true);
+// The same plate for a shape that carries its own outline — a message bubble, whose four corners
+// are different and which no single radius describes. It has no shadow: nothing is free around it.
+void paintPlatePath(QPainter &p, const QPainterPath &shape, const QColor &fill,
+                    qreal hover = 0, qreal press = 0, bool border = true);
 
 class Theme : public QObject {
     Q_OBJECT
@@ -85,6 +104,12 @@ public:
     static int ms(int duration) { return reducedMotion() ? 0 : duration; }
     // cubic-bezier(.22,.8,.25,1) from the motion spec.
     static QEasingCurve surfaceEasing();
+    // cubic-bezier(.16,1,.3,1): leaves fast and spends the rest of its time easing into place.
+    // Surfaces that arrive use this one, which is what reads as smoothness rather than as speed.
+    static QEasingCurve arriveEasing();
+    // A short settle with a little overshoot, for things that snap to a stop: a toggle knob,
+    // a pressed control coming back up, a plate lifting under the cursor.
+    static QEasingCurve springEasing();
 
     // Paints the window backdrop into `w` in window coordinates, so neighbouring widgets
     // continue one gradient; `glass` (translucent) is laid over it when given.
