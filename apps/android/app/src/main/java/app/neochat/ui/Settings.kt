@@ -32,6 +32,9 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
     private val quickValue = ctx.label(QuickReaction.current(ctx), 14f, 400, Theme.Role.MUTED)
 
     init {
+        // Two switches left the settings screen: animated emoji always play, and the connection is
+        // decided by push registration. Their stored values would otherwise keep applying in silence.
+        prefs.edit().remove("animated_emoji").remove("realtime").apply()
         scroll.isVerticalScrollBarEnabled = false
         scroll.clipToPadding = false
         col.orientation = LinearLayout.VERTICAL
@@ -77,12 +80,11 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
 
         section("Конфиденциальность").apply {
             addView(nav(R.drawable.ic_clock, "Время последнего визита", lastSeenValue) { chooseLastSeen() })
-            addView(note("Если скрыть время, собеседники увидят «был(а) недавно», а вы тоже не будете видеть точное время других."))
             lockBox.orientation = LinearLayout.VERTICAL
             addView(lockBox)
             val secure = toggle("Запретить снимки экрана", "secure_screen", false) { Prefs.applySecure(act) }
             addView(secure)
-            val twoFactor = ToggleRow(ctx, "Подтверждение входа")
+            val twoFactor = ToggleRow(ctx, "Двухфакторная авторизация")
             twoFactor.setPadding(dp(14), 0, dp(14), 0)
             CoreClient.call("account_settings") { v, _ ->
                 val o = v as? JSONObject ?: return@call
@@ -98,15 +100,12 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
                 }
             }
             addView(twoFactor)
-            addView(note("При входе на новом устройстве понадобится код из чата «NeoChat уведомления». Отчёты о прочтении всегда включены."))
         }
         buildLock()
 
         section("Уведомления").apply {
             addView(toggle("Уведомления о сообщениях", "notifications", true))
             addView(note("В уведомлении видно только название чата, текст не показывается."))
-            addView(toggle("Держать соединение открытым", "realtime", app.neochat.RealtimeService.enabled(ctx)) { app.neochat.RealtimeService.sync(ctx) })
-            addView(note("Работает, пока NeoChat открыт, и держит связь с сервером даже с погасшим экраном: с ним в шторке появляется «NeoChat на связи». Когда приложение закрыто, сообщения и звонки приходят через push; без push телефон проверяет их примерно раз в 15 минут."))
             if (Build.VERSION.SDK_INT >= 34) addView(nav(R.drawable.ic_phone, "Звонки на заблокированном экране", lockScreenValue) { openLockScreenCalls(act) })
             addView(nav(R.drawable.ic_bell, "Звук и вибрация") {
                 act.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName))
@@ -127,9 +126,6 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
                 }
             })
             addView(toggle("Крупные эмодзи без текста", "big_emoji", true))
-            addView(toggle("Анимированные эмодзи", "animated_emoji", true))
-            addView(note("Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи."))
-            addView(note("Формулы LaTeX: шрифт XITS Math, лицензия SIL OFL 1.1."))
             addView(toggle("Уменьшить анимацию", "reduce_motion", false) { Theme.forceReduced = prefs.getBoolean("reduce_motion", false) })
         }
 
@@ -153,7 +149,6 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
                     QuickReaction.set(ctx, e) { err -> if (err != null) act.toast(err) else quickValue.text = e }
                 }
             })
-            addView(note("Свайп по чату влево убирает его в архив, вправо — закрепляет (до 3 чатов). Двойное касание сообщения ставит быструю реакцию. Контакты, закреплённые чаты, архив и быстрая реакция общие для всех ваших устройств."))
         }
 
         section("Данные").apply {
@@ -229,7 +224,6 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
         lockBox.addView(nav(R.drawable.ic_clock, "Автоблокировка", value) {
             choose(value, delays, prefs.getInt("lock_after", 0).toString()) { prefs.edit().putInt("lock_after", it.toInt()).apply() }
         })
-        lockBox.addView(note("Спрашивает система телефона: отпечаток, лицо или тот же код, что открывает экран. Своего пароля у NeoChat нет."))
     }
 
     fun load() {

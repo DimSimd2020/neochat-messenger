@@ -381,7 +381,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val composerBg = GlassDrawable(ctx, radius = ctx.dpf(31))
     private val textSp = Prefs.textSize(ctx)
     private val bigEmoji = Prefs.of(ctx).getBoolean("big_emoji", true)
-    private val animatedEmoji = Prefs.of(ctx).getBoolean("animated_emoji", true)
     private val enterSends = Prefs.of(ctx).getBoolean("enter_send", false)
     private var baseSubtitle = ""
 
@@ -1383,7 +1382,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val emoji = if (bigEmoji && rep == null && f == null) m.optInt("emoji_only") else 0
             text.setTextSize(TypedValue.COMPLEX_UNIT_SP, when (emoji) { 1 -> 52f; 2 -> 42f; 3 -> 34f; else -> textSp })
             // Where every emoji has an animation, they play in place of the text.
-            val moving = if (emoji > 0 && animatedEmoji) AnimatedEmoji.sheetsOf(ctx, body) else null
+            // Animated emoji are a feature, not a setting: a message of only emoji always plays.
+            val moving = if (emoji > 0) AnimatedEmoji.sheetsOf(ctx, body) else null
             bindEmojiRow(moving)
             if (moving != null) text.visibility = GONE
             if (emoji > 0) {

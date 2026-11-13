@@ -2451,7 +2451,7 @@ final class BubbleCell: UITableViewCell {
         }
         bindReactions(m.arr("reactions"), out: out && !big, fg: fg)
         text.isHidden = body.isEmpty || kind == "poll"
-        bindEmojiRow(big && Prefs.animatedEmoji ? AnimatedEmoji.keys(for: body) : nil)
+        bindEmojiRow(big ? AnimatedEmoji.keys(for: body) : nil)
         let st = m.str("status")
         meta.text = (m.bool("edited") ? "изменено " : "") + hhmm(m.int64("sent_at"))
         delivery.isHidden = !out

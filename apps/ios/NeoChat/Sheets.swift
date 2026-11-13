@@ -446,6 +446,8 @@ final class SettingsViewController: SheetViewController {
     }
 
     private func build() {
+        // Animated emoji left the settings screen: a stored "off" must not survive without a switch.
+        UserDefaults.standard.removeObject(forKey: "animated_emoji")
         clear()
         section("Аккаунт", [
             NavRow("person.crop.circle", "Имя и описание") { [weak self] in self?.push(EditProfileViewController()) },
@@ -500,7 +502,7 @@ final class SettingsViewController: SheetViewController {
         }
         privacy.append(SwitchRow("eye.slash", "Скрывать в переключателе приложений", on: Prefs.bool("secure_screen", false)) { Prefs.set("secure_screen", $0) })
         var tfRow: SwitchRow?
-        tfRow = SwitchRow("checkmark.shield", "Подтверждение входа", on: twoFactor) { [weak self] on in
+        tfRow = SwitchRow("checkmark.shield", "Двухфакторная авторизация", on: twoFactor) { [weak self] on in
             Core.shared.call("set_two_factor", ["enabled": on]) { r in
                 switch r {
                 case .failure(let e): self?.toast(e.message); tfRow?.toggle.setOn(!on, animated: true)
@@ -509,7 +511,7 @@ final class SettingsViewController: SheetViewController {
             }
         }
         privacy.append(tfRow!)
-        section("Конфиденциальность", privacy, footer: "Если скрыть время визита, вы тоже не увидите его у других: останется «был(а) недавно» или «давно». Код-пароль хранится только на этом телефоне. Подтверждение входа запрашивает код из чата «NeoChat уведомления» при входе на новом устройстве.")
+        section("Конфиденциальность", privacy)
 
         section("Уведомления", [
             SwitchRow("bell", "Уведомления о сообщениях", on: Prefs.bool("notifications", true)) { Prefs.set("notifications", $0) },
@@ -535,9 +537,8 @@ final class SettingsViewController: SheetViewController {
             NavRow("paintpalette", "Оформление интерфейса") { [weak self] in self?.push(AppearanceViewController()) },
             size,
             SwitchRow("face.smiling", "Крупные эмодзи без текста", on: Prefs.bigEmoji) { Prefs.set("big_emoji", $0) },
-            SwitchRow("sparkles", "Анимированные эмодзи", on: Prefs.animatedEmoji) { Prefs.set("animated_emoji", $0) },
             SwitchRow("figure.walk", "Уменьшить анимацию", on: UserDefaults.standard.bool(forKey: "reduce_motion")) { Prefs.set("reduce_motion", $0) },
-        ], footer: "Анимированные эмодзи: Animated Noto Emoji, © Google, лицензия CC BY 4.0 (изменены размер и формат). Играют только в сообщениях из одних эмодзи.\nФормулы LaTeX: шрифт XITS Math, лицензия SIL OFL 1.1.")
+        ])
 
         let sort = NavRow("arrow.up.arrow.down", "Сортировка чатов", value: chatSorts.first { $0.0 == Prefs.chatSort }?.1 ?? "") {}
         sort.addAction(UIAction { [weak self, weak sort] _ in
@@ -556,7 +557,7 @@ final class SettingsViewController: SheetViewController {
             sort,
             quick,
             SwitchRow("photo", "Автозагрузка фото", on: Prefs.autoload) { Prefs.set("autoload", $0) },
-        ], footer: "Смахните чат влево, чтобы убрать его в архив, и вправо, чтобы закрепить. Закрепить можно до 3 чатов. Двойное касание сообщения ставит быструю реакцию, смахивание сообщения влево (своего — вправо) отвечает на него. Контакты, закреплённые чаты, архив и быстрая реакция общие для всех ваших устройств.")
+        ])
 
         let cache = NavRow("trash", "Очистить кэш", value: sizeOf(cacheDirs())) {}
         cache.addAction(UIAction { [weak self, weak cache] _ in
