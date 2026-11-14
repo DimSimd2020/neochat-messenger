@@ -104,8 +104,13 @@ D=/var/lib/neochat/updates
 backup=$1
 shift
 install -d -m 755 /var/backups/neochat-releases
-tar -czf "/var/backups/neochat-releases/$backup" -C /var/lib/neochat updates
-install -d -m 755 -o neochat -g neochat "$D" "$D/alpha"
+# Only the manifests and a listing are backed up: the directory holds every build ever kept
+# (gigabytes), and tarring it froze the host through the whole publication.
+bk="/var/backups/neochat-releases/$backup"
+install -d -m 700 "$bk"
+cp -a "$D/manifest.json" "$D/manifest.sig" "$bk/" 2>/dev/null || true
+find "$D" -name 'NeoChat-*' -printf '%P %s
+' > "$bk/files.txt"
 shopt -s nullglob
 for f in /tmp/neochat-update/NeoChat-*; do install -m 644 -o neochat -g neochat "$f" "$D/alpha/"; done
 install -m 644 -o neochat -g neochat /tmp/neochat-update/manifest.sig "$D/alpha/manifest.sig.new"
@@ -172,14 +177,19 @@ def main():
         subprocess.run(['ssh', HOST, 'rm -rf /tmp/neochat-update && mkdir /tmp/neochat-update'], check=True)
         subprocess.run(['scp', '-q', *map(str, paths), str(Path(tmp) / 'manifest.json'), str(Path(tmp) / 'manifest.sig'), f'{HOST}:/tmp/neochat-update/'], check=True)
     # Files first, the manifest last: clients never see a manifest for files not yet in place.
-    # The backup is the previous updates directory, taken before the swap.
+    # The backup taken before the swap is the previous manifest and the list of builds.
     remote = '''set -euo pipefail
 D=/var/lib/neochat/updates
 backup=$1
 shift
 install -d -m 755 /var/backups/neochat-releases
-tar -czf "/var/backups/neochat-releases/$backup" -C /var/lib/neochat updates
-install -d -m 755 -o neochat -g neochat "$D"
+# The previous manifest and the list of builds are the rollback: artifacts are only added or
+# pruned here, and tarring gigabytes of them froze the host during the swap.
+bk="/var/backups/neochat-releases/$backup"
+install -d -m 700 "$bk"
+cp -a "$D/manifest.json" "$D/manifest.sig" "$bk/" 2>/dev/null || true
+find "$D" -name 'NeoChat-*' -printf '%P %s
+' > "$bk/files.txt"
 shopt -s nullglob
 for f in /tmp/neochat-update/NeoChat-*; do install -m 644 -o neochat -g neochat "$f" "$D/"; done
 install -m 644 -o neochat -g neochat /tmp/neochat-update/manifest.sig "$D/manifest.sig.new"

@@ -4,6 +4,9 @@ on:
   push:
     tags: ["v*"]
     branches: ["main"]
+    # Documentation, CI and publishing tooling cannot change a build; a push that only touches
+    # them must not rebuild and re-upload the artifacts already published under this version.
+    paths-ignore: [".github/**", "docs/**", "infra/**", "scripts/**", "*.md"]
   workflow_dispatch:
     inputs:
       tag:
