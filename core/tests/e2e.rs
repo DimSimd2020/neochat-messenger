@@ -1475,7 +1475,9 @@ fn spoilers_and_one_time_media() {
     // Leaving the chat changes nothing further: the copies were destroyed with the view.
     bob.call("burn_viewed", json!({"conversation_id": cid}));
 
-    // The author is told through the receipt and loses her own copies the same way.
+    // The author is told through the receipt and loses her own copies the same way. The
+    // receipt leaves this device through its outbox, so bob syncs first.
+    bob.sync();
     alice.sync();
     let am = find(&alice, "once.jpg");
     assert_eq!(am["file"]["viewed"], true);
@@ -1489,6 +1491,7 @@ fn spoilers_and_one_time_media() {
     bob.sync();
     let sm = find(&bob, "shot.jpg");
     bob.call("media_viewed", json!({"message_id": sm["id"], "screenshot": true}));
+    bob.sync();
     alice.sync();
     bob.sync();
     assert_eq!(find(&bob, "shot.jpg")["file"]["shot"], true);
