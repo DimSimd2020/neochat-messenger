@@ -72,17 +72,29 @@ jobs:
         working-directory: core
         run: cargo test --lib
 
-      # The e2e suite needs the test-only mailbox that lives in the Go test binary: it confirms
-      # @example.test addresses itself, so registration and E2EE stay real end to end.
+      # The e2e suite registers two accounts per test, and the server allows six confirmation
+      # mails per hour per IP. One fresh test server per Rust test therefore: the limiter and the
+      # schema start empty every time, which is also how the suite is run by hand.
       - name: Core end-to-end against the test server
-        working-directory: core
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          cd core
           BIN=$(cargo test --test e2e --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.executable != null) | .executable' | tail -n1)
           test -n "$BIN" || { echo "e2e binary not found"; exit 1; }
           echo "native test binary: $BIN"
+          NAMES=$("$BIN" --list --format=terse | sed -n 's/: test$//p')
           cd ../server
-          NEOCHAT_NATIVE_TEST_COMMAND=$(jq -cn --arg b "$BIN" '[$b, "--test-threads=3"]')
-          export NEOCHAT_NATIVE_TEST_COMMAND
-          go test ./internal/app -run '^TestNativeEmailFlow$' -count=1 -timeout=30m -v
+          failed=()
+          for t in $NAMES; do
+            cmd=$(jq -cn --arg b "$BIN" --arg t "$t" '[$b, $t, "--exact"]')
+            if NEOCHAT_NATIVE_TEST_COMMAND="$cmd" go test ./internal/app -run '^TestNativeEmailFlow$' -count=1 -timeout=10m >"/tmp/e2e-$t.log" 2>&1; then
+              echo "ok   $t"
+            else
+              echo "FAIL $t"
+              tail -n 25 "/tmp/e2e-$t.log"
+              failed+=("$t")
+            fi
+          done
+          echo "run: $(echo $NAMES | wc -w), failed: ${#failed[@]}"
+          test "${#failed[@]}" -eq 0
