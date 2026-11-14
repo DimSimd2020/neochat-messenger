@@ -37,6 +37,11 @@ final class OnboardingViewController: UIViewController, UITextFieldDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        // Stable names for the UI tests: the visible placeholder of these two fields changes with
+        // the mode ("Никнейм" / "Никнейм или почта", "Пароль" / "Новый пароль"), so it cannot be
+        // what a test looks for.
+        username.accessibilityIdentifier = "loginUsername"
+        password.accessibilityIdentifier = "loginPassword"
         scroll.keyboardDismissMode = .interactive
         scroll.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
