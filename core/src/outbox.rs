@@ -53,15 +53,43 @@ pub struct FileMeta {
     /// Voice messages: loudness bars, one byte each (base64), drawn as the waveform.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wave: Option<String>,
+    /// Hidden behind a blur until the reader taps it. Presentation only: the file is not encrypted
+    /// differently, so this is not a protection against a curious device owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoiler: Option<bool>,
+    /// Shown once. The poster is never sent with such a file, and every device destroys its
+    /// copies after the picture has been opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub once: Option<bool>,
+    /// Local marks, never taken from the network (see `sanitized`): opened here, opened as a
+    /// spoiler, and whether the system reported a screen capture of this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shot: Option<bool>,
 }
 
 /// The waveform is a few dozen bars; anything longer is not one.
 const MAX_WAVE_B64: usize = 256;
 
+/// Only a plain photo or a video can be hidden: a voice message, a circle or a document
+/// carries neither a spoiler nor the view-once flag.
+fn hideable(mime: &str, kind: Option<&str>) -> bool {
+    kind.is_none() && (mime.starts_with("image/") || mime.starts_with("video/"))
+}
+
 impl FileMeta {
     /// A video sent as a video: it brings a poster or a length. Without them it is an ordinary file.
+    /// A view-once video has no poster by design, so the flag alone is enough to show it as video.
     pub fn is_video(&self) -> bool {
-        self.mime.starts_with("video/") && (self.thumb.is_some() || self.duration.is_some())
+        self.mime.starts_with("video/") && (self.thumb.is_some() || self.duration.is_some() || self.once == Some(true))
+    }
+
+    /// A picture shown as a picture: it brings a poster, or it is view-once and has none on purpose.
+    pub fn is_photo(&self) -> bool {
+        self.mime.starts_with("image/") && (self.thumb.is_some() || self.once == Some(true))
     }
 
     pub fn is_voice(&self) -> bool {
@@ -72,20 +100,39 @@ impl FileMeta {
         self.kind.as_deref() == Some("circle") && self.mime.starts_with("video/")
     }
 
+    /// The picture is behind a blur until the reader taps it.
+    pub fn is_spoiler(&self) -> bool {
+        self.spoiler == Some(true) && self.shown != Some(true)
+    }
+
+    /// A view-once file that has already been opened on this device: its copies are gone.
+    pub fn is_viewed(&self) -> bool {
+        self.once == Some(true) && self.viewed == Some(true)
+    }
+
     /// Makes metadata from another device safe to store: an unknown or mismatched kind and a
-    /// malformed waveform are dropped, the name loses separators.
+    /// malformed waveform are dropped, the name loses separators, a spoiler or a view-once flag
+    /// stays only on a plain photo or video, a view-once file loses its poster, and the local
+    /// marks of having been seen never come over the network.
     pub fn sanitized(&self) -> FileMeta {
         let kind = match (self.kind.as_deref(), self.mime.as_str()) {
             (Some("voice"), m) if m.starts_with("audio/") => Some("voice".to_string()),
             (Some("circle"), m) if m.starts_with("video/") => Some("circle".to_string()),
             _ => None,
         };
+        let media = hideable(&self.mime, kind.as_deref());
+        let spoiler = self.spoiler.filter(|v| *v && media);
+        let once = self.once.filter(|v| *v && media);
         let wave = self.wave.clone().filter(|w| kind.as_deref() == Some("voice") && w.len() <= MAX_WAVE_B64 && unb64(w).is_ok());
-        FileMeta { name: files::safe_name(&self.name), kind, wave, ..self.clone() }
+        let thumb = if once == Some(true) { None } else { self.thumb.clone() };
+        FileMeta { name: files::safe_name(&self.name), kind, wave, thumb, spoiler, once, viewed: None, shown: None, shot: None, ..self.clone() }
     }
 
     /// The chat-list line for a message that carries this file.
     pub fn preview(&self) -> String {
+        if self.once == Some(true) {
+            return if self.mime.starts_with("video/") { "🎬 Видео на один раз".to_string() } else { "🖼 Фото на один раз".to_string() };
+        }
         if self.is_voice() {
             "🎤 Голосовое сообщение".to_string()
         } else if self.is_circle() {
@@ -277,6 +324,16 @@ impl Inner {
             Some("circle") if mime.starts_with("video/") => Some("circle".to_string()),
             _ => None,
         };
+        // A spoiler and the view-once flag belong to plain photos and videos only.
+        let media = hideable(&mime, kind.as_deref());
+        let spoiler = p["spoiler"].as_bool().filter(|v| *v && media);
+        let once = p["once"].as_bool().filter(|v| *v && media);
+        // A channel has hundreds of readers: a view-once file there would tell every subscriber
+        // about every view, and "one time" would mean nothing. Spoilers stay allowed.
+        if once == Some(true) && self.conversation_json(conv)?["kind"] == "channel" {
+            return Err(Error::Invalid("Одноразовые фото и видео в каналах не отправляются".into()));
+        }
+        let thumb = p["thumb"].as_str().filter(|t| !t.is_empty() && t.len() <= MAX_THUMB_B64).map(str::to_string).filter(|_| once != Some(true));
         pl.file = Some(FileMeta {
             id: String::new(),
             key: b64(&enc.key),
@@ -286,12 +343,17 @@ impl Inner {
             ciphertext_size: enc.ciphertext_size,
             name: name.clone(),
             mime: mime.clone(),
-            thumb: p["thumb"].as_str().filter(|t| !t.is_empty() && t.len() <= MAX_THUMB_B64).map(str::to_string),
+            thumb,
             w: p["width"].as_u64().map(|v| v.min(100_000) as u32),
             h: p["height"].as_u64().map(|v| v.min(100_000) as u32),
             duration: p["duration"].as_u64().filter(|_| mime.starts_with("video/") || mime.starts_with("audio/")).map(|v| v.min(86_400_000)),
             wave: p["wave"].as_str().filter(|w| kind.as_deref() == Some("voice") && w.len() <= MAX_WAVE_B64 && unb64(w).is_ok()).map(str::to_string),
             kind,
+            spoiler,
+            once,
+            viewed: None,
+            shown: None,
+            shot: None,
         });
         pl.text = p["caption"].as_str().map(str::to_string);
         pl.reply_to = p["reply_to"].as_str().map(str::to_string);
@@ -555,7 +617,7 @@ impl Inner {
             Self::erase_message(&tx, &id, &conv)?;
             tx.commit()?;
         }
-        let _ = std::fs::remove_file(self.data_dir.join("files").join(format!("{id}.enc")));
+        self.erase_media(&id);
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         self.emit(json!({"type": "conversations_changed"}));
         Ok(Value::Null)
@@ -593,7 +655,7 @@ impl Inner {
             )?;
             tx.commit()?;
         }
-        let _ = std::fs::remove_file(self.data_dir.join("files").join(format!("{id}.enc")));
+        self.erase_media(&id);
         self.wake();
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         self.emit(json!({"type": "conversations_changed"}));
@@ -717,6 +779,9 @@ impl Inner {
         let mut att: Option<PathBuf> = None;
         if kind == "file" {
             let mut f: FileMeta = serde_json::from_str(&file.ok_or_else(|| Error::Invalid("В сообщении нет файла".into()))?)?;
+            if f.once == Some(true) {
+                return Err(Error::Invalid("Одноразовые фото и видео нельзя переслать".into()));
+            }
             let src = self.data_dir.join("files").join(format!("{id}.enc"));
             if !src.exists() {
                 return Err(Error::Invalid("Сначала скачайте файл".into()));
@@ -728,6 +793,8 @@ impl Inner {
             std::fs::copy(&src, &dst)?;
             std::fs::copy(&src, self.data_dir.join("files").join(format!("{}.enc", pl.mid)))?;
             f.id = String::new();
+            // A spoiler starts closed in the new chat: having opened it is a local mark.
+            f.shown = None;
             pl.file = Some(f);
             att = Some(dst);
         }
@@ -753,6 +820,9 @@ impl Inner {
     pub fn download_file(&self, p: &Value) -> Result<Value> {
         let id = s(p, "message_id")?;
         let meta = self.file_meta(id)?;
+        if meta.is_viewed() {
+            return Err(Error::Invalid("Это фото или видео уже просмотрено".into()));
+        }
         let enc = self.data_dir.join("files").join(format!("{id}.enc"));
         if !enc.exists() {
             let tmp = self.data_dir.join("tmp").join(format!("{id}.part"));
@@ -776,7 +846,8 @@ impl Inner {
         std::fs::create_dir_all(&dir)?;
         let out = dir.join(files::safe_name(&meta.name));
         // Photos are shown again and again: reuse the decrypted copy while it is complete.
-        if std::fs::metadata(&out).map(|m| m.len() == meta.size).unwrap_or(false) {
+        // A view-once file is decrypted afresh every time so that no readable copy outlives it.
+        if meta.once != Some(true) && std::fs::metadata(&out).map(|m| m.len() == meta.size).unwrap_or(false) {
             return Ok(json!({"path": out.to_string_lossy()}));
         }
         files::decrypt_file(&enc, &out, &unb64(&meta.key)?, &unb64(&meta.nonce)?)?;
@@ -787,12 +858,152 @@ impl Inner {
     pub fn export_file(&self, p: &Value) -> Result<Value> {
         let id = s(p, "message_id")?;
         let meta = self.file_meta(id)?;
+        if meta.once == Some(true) {
+            return Err(Error::Invalid("Одноразовые фото и видео нельзя сохранить".into()));
+        }
         let enc = self.data_dir.join("files").join(format!("{id}.enc"));
         if !enc.exists() {
             self.download_file(p)?;
         }
         files::decrypt_file(&enc, Path::new(s(p, "dest")?), &unb64(&meta.key)?, &unb64(&meta.nonce)?)?;
         Ok(Value::Null)
+    }
+
+    /// Drops everything this device keeps of a message's file: the ciphertext and the
+    /// decrypted copies made for viewing.
+    pub fn erase_media(&self, id: &str) {
+        let _ = std::fs::remove_file(self.data_dir.join("files").join(format!("{id}.enc")));
+        let _ = std::fs::remove_dir_all(self.data_dir.join("tmp").join(id));
+    }
+
+    /// Writes the local marks of a view-once file: opened here and, when the system reported a
+    /// screen capture, captured. Only a view-once file carries them; nothing is sent here.
+    pub(crate) fn set_seen(conn: &rusqlite::Connection, id: &str, shot: bool) -> Result<bool> {
+        let raw: Option<String> = conn.query_row("SELECT file FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten();
+        let Some(raw) = raw else { return Ok(false) };
+        let mut meta: FileMeta = serde_json::from_str(&raw)?;
+        if meta.once != Some(true) || (meta.viewed == Some(true) && (!shot || meta.shot == Some(true))) {
+            return Ok(false);
+        }
+        meta.viewed = Some(true);
+        if shot {
+            meta.shot = Some(true);
+        }
+        conn.execute("UPDATE messages SET file=?2 WHERE id=?1", params![id, serde_json::to_string(&meta)?])?;
+        Ok(true)
+    }
+
+    /// Opens a spoiler on this device only; the other devices of the account keep it closed.
+    pub fn media_shown(&self, p: &Value) -> Result<Value> {
+        let id = s(p, "message_id")?;
+        let conv = self.message_conv(id)?;
+        let raw: Option<String> = self.db().conn.query_row("SELECT file FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten();
+        if let Some(raw) = raw {
+            let mut meta: FileMeta = serde_json::from_str(&raw)?;
+            if meta.spoiler == Some(true) && meta.shown != Some(true) {
+                meta.shown = Some(true);
+                self.db().conn.execute("UPDATE messages SET file=?2 WHERE id=?1", params![id, serde_json::to_string(&meta)?])?;
+                self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
+            }
+        }
+        Ok(Value::Null)
+    }
+
+    /// The reader has opened a view-once photo or video. The readable copy is destroyed here and
+    /// now, every other device is told through a receipt, and when everybody except the author
+    /// has seen it the server is asked to drop the object too. `screenshot` is the iOS case where
+    /// the system reported a capture: it counts as having been seen and marks it for the author.
+    pub fn media_viewed(&self, p: &Value) -> Result<Value> {
+        let id = s(p, "message_id")?;
+        let conv = self.message_conv(id)?;
+        let shot = p["screenshot"].as_bool().unwrap_or(false);
+        let was = self.file_meta(&id)?;
+        if was.once != Some(true) {
+            return Err(Error::Invalid("Это сообщение не одноразовое".into()));
+        }
+        let first = !was.is_viewed();
+        Self::set_seen(&self.db().conn, &id, shot)?;
+        self.erase_media(&id);
+        if first {
+            self.enqueue_receipt(&conv, "viewed", vec![id.to_string()])?;
+            if shot {
+                self.enqueue_receipt(&conv, "screenshot", vec![id.to_string()])?;
+            }
+            self.wake();
+            self.burn_if_all_seen(&id)?;
+        }
+        self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
+        Ok(Value::Null)
+    }
+
+    /// Called when the user leaves a chat: view-once files opened there lose their encrypted copy
+    /// as well, so nothing of them stays on this device.
+    pub fn burn_viewed(&self, p: &Value) -> Result<Value> {
+        let conv = s(p, "conversation_id")?;
+        let ids: Vec<String> = {
+            let db = self.db();
+            let mut st = db.conn.prepare(
+                "SELECT id FROM messages WHERE conversation_id=?1 AND kind='file' AND json_extract(file,'$.once')=1 AND json_extract(file,'$.viewed')=1",
+            )?;
+            let rows = st.query_map([conv], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        for id in &ids {
+            self.erase_media(id);
+        }
+        Ok(json!({"burned": ids.len()}))
+    }
+
+    /// A device switched off after a view-once file had been opened destroys its encrypted
+    /// copies with the next start, before anything can be read from them again.
+    pub fn sweep_viewed_media(&self) {
+        let ids: Vec<String> = {
+            let db = self.db();
+            let Ok(mut st) = db.conn.prepare("SELECT id FROM messages WHERE kind='file' AND json_extract(file,'$.once')=1 AND json_extract(file,'$.viewed')=1") else {
+                return;
+            };
+            let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) else { return };
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for id in ids {
+            self.erase_media(&id);
+        }
+    }
+
+    /// Asks the server to drop the object once every member except the author has seen the file.
+    /// Any answer is final: the media is already gone for the people who saw it, and otherwise the
+    /// server keeps it for the 24 hours of a normal attachment.
+    pub(crate) fn burn_if_all_seen(&self, id: &str) -> Result<()> {
+        let (att, need, seen): (String, i64, i64) = {
+            let db = self.db();
+            let row: Option<(String, String, String)> = db
+                .conn
+                .query_row(
+                    "SELECT m.file, m.sender_user_id, COALESCE(c.members,'[]') FROM messages m
+                     LEFT JOIN conversations c ON c.id=m.conversation_id WHERE m.id=?1 AND m.kind='file'",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((raw, sender, members)) = row else { return Ok(()) };
+            let meta: FileMeta = serde_json::from_str(&raw)?;
+            if meta.once != Some(true) || meta.id.is_empty() {
+                return Ok(());
+            }
+            let listed: Vec<String> = serde_json::from_str(&members).unwrap_or_default();
+            let need = listed.iter().filter(|u| **u != sender).count() as i64;
+            let seen: i64 = db.conn.query_row(
+                "SELECT count(DISTINCT user_id) FROM receipts WHERE message_id=?1 AND kind IN ('viewed','screenshot') AND user_id<>?2",
+                params![id, sender],
+                |r| r.get(0),
+            )?;
+            (meta.id, need, seen)
+        };
+        if need == 0 || seen < need {
+            return Ok(());
+        }
+        let _ = self.authed("POST", &format!("/v1/attachments/{att}/burn"), None);
+        Ok(())
     }
 
     pub fn mark_read(&self, p: &Value) -> Result<Value> {
@@ -854,4 +1065,71 @@ fn parse_bundle(b: &Value) -> Result<PreKeyBundle> {
         unb64(kp["signature"].as_str().unwrap_or_default())?,
         IdentityKey::decode(&unb64(b["identity_key"].as_str().unwrap_or_default())?)?,
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileMeta, Inner};
+    use rusqlite::{Connection, params};
+
+    fn meta(mime: &str, kind: Option<&str>) -> FileMeta {
+        FileMeta { mime: mime.into(), name: "a.jpg".into(), thumb: Some("AAAA".into()), kind: kind.map(str::to_string), ..Default::default() }
+    }
+
+    #[test]
+    fn hidden_media_flags_survive_only_on_photos_and_videos() {
+        let mut photo = meta("image/jpeg", None);
+        (photo.spoiler, photo.once, photo.viewed, photo.shown, photo.shot) = (Some(true), Some(true), Some(true), Some(true), Some(true));
+        let clean = photo.sanitized();
+        // The two flags travel, the poster of a view-once file and the marks of having been seen do not.
+        assert_eq!((clean.spoiler, clean.once), (Some(true), Some(true)));
+        assert!(clean.thumb.is_none(), "{clean:?}");
+        assert!(clean.viewed.is_none() && clean.shown.is_none() && clean.shot.is_none(), "{clean:?}");
+        assert_eq!(clean.preview(), "🖼 Фото на один раз");
+
+        // A view-once video without a poster is still shown as a video.
+        let mut video = meta("video/mp4", None);
+        (video.once, video.thumb) = (Some(true), None);
+        let v = video.sanitized();
+        assert!(v.is_video() && !v.is_photo(), "{v:?}");
+
+        // A voice message, a circle and a plain document cannot be hidden at all.
+        for m in [meta("audio/ogg", Some("voice")), meta("video/mp4", Some("circle")), meta("application/zip", None)] {
+            let mut m = m;
+            (m.spoiler, m.once) = (Some(true), Some(true));
+            let s = m.sanitized();
+            assert!(s.spoiler.is_none() && s.once.is_none(), "{}", s.mime);
+        }
+
+        // A spoiler is blurred until it has been opened on this device.
+        let mut sp = meta("image/jpeg", None);
+        sp.spoiler = Some(true);
+        assert!(sp.is_spoiler() && !sp.is_viewed());
+        sp.shown = Some(true);
+        assert!(!sp.is_spoiler());
+    }
+
+    #[test]
+    fn viewed_marks_a_view_once_file_once_and_a_capture_adds_to_it() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE messages(id TEXT PRIMARY KEY, file TEXT);").unwrap();
+        let mut once = meta("image/jpeg", None);
+        once.once = Some(true);
+        c.execute("INSERT INTO messages VALUES('m1',?1),('m2',?2)", params![serde_json::to_string(&once).unwrap(), serde_json::to_string(&meta("image/jpeg", None)).unwrap()]).unwrap();
+
+        assert!(!Inner::set_seen(&c, "absent", false).unwrap());
+        // An ordinary photo never carries the mark, whatever a peer sends.
+        assert!(!Inner::set_seen(&c, "m2", false).unwrap());
+        assert!(Inner::set_seen(&c, "m1", false).unwrap());
+        assert!(!Inner::set_seen(&c, "m1", false).unwrap(), "the second report changes nothing");
+        let stored: String = c.query_row("SELECT file FROM messages WHERE id='m1'", [], |r| r.get(0)).unwrap();
+        let m: FileMeta = serde_json::from_str(&stored).unwrap();
+        assert_eq!((m.viewed, m.shot), (Some(true), None));
+        // A screen capture on top of the view is a new fact.
+        assert!(Inner::set_seen(&c, "m1", true).unwrap());
+        let stored: String = c.query_row("SELECT file FROM messages WHERE id='m1'", [], |r| r.get(0)).unwrap();
+        let m: FileMeta = serde_json::from_str(&stored).unwrap();
+        assert_eq!((m.viewed, m.shot), (Some(true), Some(true)));
+        assert!(m.is_viewed());
+    }
 }

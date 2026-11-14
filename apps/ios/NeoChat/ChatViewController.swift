@@ -82,6 +82,32 @@ func isVideo(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.boo
 func isVoice(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("voice") ?? false) }
 func isCircle(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("circle") ?? false) }
 
+/// A view-once picture or video: every copy of it is destroyed as soon as it has been opened.
+func isOnce(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("once") ?? false) }
+/// It has been opened here or on another device of the account; the copies are already gone.
+func isViewed(_ m: JSON) -> Bool { isOnce(m) && (m.obj("file")?.bool("viewed") ?? false) }
+/// A picture that still has to be shown blurred on this device.
+func isSpoiler(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("spoiler") ?? false) }
+/// The system reported a capture of this view-once file.
+func isShot(_ m: JSON) -> Bool { isOnce(m) && (m.obj("file")?.bool("shot") ?? false) }
+
+/// Closing the viewer of a view-once file is what tells the core it has been seen: the copies go
+/// here, the other devices are told, and the server drops the object. `shot` marks the iOS case
+/// where the system reported a screenshot — iOS cannot forbid one, only say that it happened.
+enum OnceMedia {
+    private static var burned: Set<String> = []
+
+    static func burn(_ m: JSON, shot: Bool) {
+        let id = m.str("id")
+        guard isOnce(m), !burned.contains(id) else { return }
+        burned.insert(id)
+        Photos.cache.removeObject(forKey: id as NSString)
+        var p: JSON = ["message_id": id]
+        if shot { p["screenshot"] = true }
+        Core.shared.call("media_viewed", p) { _ in }
+    }
+}
+
 /// The recognized text of a voice message or circle; nil while it has none, "" when no speech was found.
 func transcriptOf(_ m: JSON) -> String? { m.obj("file")?["transcript"] as? String }
 
@@ -589,6 +615,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         cancelVoice()
         Playback.shared.stop()
         Core.shared.call("set_draft", ["_account_id": accountId, "conversation_id": conversationId, "text": editTarget != nil ? savedDraft : (input.text ?? "")])
+        // Leaving the chat is the last chance: whatever of a view-once file is still here goes now.
+        Core.shared.call("burn_viewed", ["conversation_id": conversationId]) { _ in }
     }
 
     private func scheduleReload() {
@@ -1058,8 +1086,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             if files.allSatisfy({ $0.isVideo }) { self?.pickVideos(more: done) }
             else if photos && files.allSatisfy({ $0.isImage }) { self?.pickPhotos(more: done) }
             else { self?.pickFile(more: done) }
-        }, send: { [weak self] chosen, asPhotos, caption in
-            for (n, f) in chosen.enumerated() { self?.sendOutgoing(f, photo: asPhotos, caption: n == 0 ? caption : "") }
+        }, send: { [weak self] chosen, asPhotos, caption, hidden, oneTime in
+            for (n, f) in chosen.enumerated() { self?.sendOutgoing(f, photo: asPhotos, caption: n == 0 ? caption : "", hidden: hidden, oneTime: oneTime) }
         }))
     }
 
@@ -1141,20 +1169,21 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     /// The thumbnail is made only for pictures that go as photos.
-    private func sendOutgoing(_ f: OutgoingFile, photo: Bool, caption: String) {
-        if photo && f.isVideo { return sendVideo(f, caption: caption) }
+    private func sendOutgoing(_ f: OutgoingFile, photo: Bool, caption: String, hidden: Bool = false, oneTime: Bool = false) {
+        if photo && f.isVideo { return sendVideo(f, caption: caption, hidden: hidden, oneTime: oneTime) }
         if f.size > Videos.limit {
             try? FileManager.default.removeItem(at: f.url)
             return toast("Файл больше 50 МБ: " + f.name)
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let thumb = photo && f.isImage ? Photos.makeThumb(f.url) : nil
-            DispatchQueue.main.async { self?.sendPhoto(f.url, name: f.name, mime: f.mime, thumb: thumb, caption: caption) }
+            // A view-once file never carries its poster, so there is nothing to make here.
+            let thumb = photo && f.isImage && !oneTime ? Photos.makeThumb(f.url) : nil
+            DispatchQueue.main.async { self?.sendPhoto(f.url, name: f.name, mime: f.mime, thumb: thumb, caption: caption, hidden: hidden, oneTime: oneTime) }
         }
     }
 
     /// A video that goes as a video: made portable and small enough, then sent with its first frame and length.
-    private func sendVideo(_ f: OutgoingFile, caption: String) {
+    private func sendVideo(_ f: OutgoingFile, caption: String, hidden: Bool = false, oneTime: Bool = false) {
         toast("Готовим видео…")
         var shown = 0
         let report = { [weak self] (pct: Int) in
@@ -1170,15 +1199,19 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 guard let video else { return self.toast("Видео не удалось подготовить: оно слишком длинное или в неизвестном формате") }
                 var thumb: (String, Int, Int)?
                 if let t = video.info?.thumb, let i = video.info { thumb = (t, i.width, i.height) }
-                self.sendPhoto(video.url, name: video.name, mime: video.mime, thumb: thumb, caption: caption, duration: video.info?.duration)
+                self.sendPhoto(video.url, name: video.name, mime: video.mime, thumb: thumb, caption: caption, duration: video.info?.duration, hidden: hidden, oneTime: oneTime)
             }
         }
     }
 
-    private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?, caption: String = "", duration: Int? = nil) {
+    private func sendPhoto(_ url: URL, name: String, mime: String, thumb: (String, Int, Int)?, caption: String = "", duration: Int? = nil, hidden: Bool = false, oneTime: Bool = false) {
         guard accountId == Core.shared.accountId else { try? FileManager.default.removeItem(at: url); return }
         var p: JSON = ["_account_id": accountId, "conversation_id": conversationId, "path": url.path, "mime": mime, "name": name]
         if !caption.isEmpty { p["caption"] = caption }
+        // Both marks belong to a picture or a video; the core drops them for anything else and
+        // keeps the poster off a view-once file.
+        if hidden { p["spoiler"] = true }
+        if oneTime { p["once"] = true }
         if let t = thumb {
             p["thumb"] = t.0
             p["width"] = t.1
@@ -1612,7 +1645,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 guard let self else { return }
                 Transcription.shared.request(m, from: self)
             }
-            c.onPhoto = { [weak self] in if isVideo(m) { self?.openVideo(m) } else { self?.openPhoto(m) } }
+            c.onPhoto = { [weak self] in self?.openMedia(m) }
             c.onProfile = { [weak self] in self?.navigationController?.pushViewController(PersonProfileViewController(userId:m.str("sender_user_id")),animated:!Theme.reducedMotion) }
             c.onMention = { [weak self] name in
                 guard let self else { return }
@@ -1676,8 +1709,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         for l in links(m).prefix(3) {
             if let u = URL(string: l) { acts.append(MenuAction(title: "Открыть ссылку: " + (u.host ?? l), icon: "safari") { UIApplication.shared.open(u) }) }
         }
-        if isImage(m) { acts.append(MenuAction(title: "Открыть фото", icon: "photo") { [weak self] in self?.openPhoto(m) }) }
-        if isVideo(m) { acts.append(MenuAction(title: "Открыть видео", icon: "play.rectangle") { [weak self] in self?.openVideo(m) }) }
+        if isImage(m) { acts.append(MenuAction(title: "Открыть фото", icon: "photo") { [weak self] in self?.openMedia(m) }) }
+        if isVideo(m) { acts.append(MenuAction(title: "Открыть видео", icon: "play.rectangle") { [weak self] in self?.openMedia(m) }) }
         if isVoice(m) || isCircle(m), ok {
             if transcriptOf(m) != nil {
                 acts.append(MenuAction(title: "Убрать расшифровку", icon: "text.badge.xmark") { Transcription.shared.clear(m.str("id")) })
@@ -1695,7 +1728,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 Core.shared.call("pin_message", ["message_id": m.str("id"), "on": on]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
             })
         }
-        if postable && !conv.bool("saved") {
+        if postable && !conv.bool("saved") && !isOnce(m) {
             acts.append(MenuAction(title: "В избранное", icon: "bookmark") { [weak self] in
                 Core.shared.call("save_message", ["message_id": m.str("id")]) { r in
                     if case .failure(let e) = r { self?.toast(e.message) } else { self?.toast("Сохранено в избранное") }
@@ -1723,12 +1756,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 })
             }
         }
-        if m.str("kind") == "file" {
+        // A view-once file is never handed to another app and never kept; the core refuses it too.
+        if m.str("kind") == "file" && !isOnce(m) {
             acts.append(MenuAction(title: "Открыть файл", icon: "doc") { [weak self] in self?.openFile(m) })
             acts.append(MenuAction(title: "Сохранить как…", icon: "square.and.arrow.down") { [weak self] in self?.saveFile(m) })
         }
         if m.str("status") == "failed" { acts.append(MenuAction(title: "Повторить отправку", icon: "arrow.clockwise") { [weak self] in self?.retry(m) }) }
-        if ok && m.str("status") != "failed", ["text", "file", "poll"].contains(m.str("kind")) {
+        if ok && m.str("status") != "failed", ["text", "file", "poll"].contains(m.str("kind")), !isOnce(m) {
             acts.append(MenuAction(title: "Переслать", icon: "arrowshape.turn.up.right") { [weak self] in
                 self?.presentSheet(ForwardPickerViewController(msgs: [m]))
             })
@@ -1785,13 +1819,24 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     /// Opens the photo among all pictures of the chat; swiping left and right moves between them.
     private func openPhoto(_ m: JSON) {
-        let photos = messages.filter { isImage($0) }
+        if isViewed(m) { return toast("Просмотрено") }
+        // A view-once file never joins the album: it is shown alone and destroyed after that.
+        let photos = messages.filter { isImage($0) && !isOnce($0) }
         let at = photos.firstIndex { $0.str("id") == m.str("id") }
         present(PhotoGalleryController(photos: at == nil ? [m] : photos, start: at ?? 0), animated: !Theme.reducedMotion)
     }
 
+    /// A tap on a picture: opening a spoiler is a mark of this device, a view-once file goes to the viewer.
+    private func openMedia(_ m: JSON) {
+        if isSpoiler(m) && !isViewed(m) {
+            Core.shared.call("media_shown", ["message_id": m.str("id")]) { _ in }
+        }
+        if isVideo(m) { openVideo(m) } else { openPhoto(m) }
+    }
+
     /// Fetches and decrypts the video, then plays it in the system player.
     private func openVideo(_ m: JSON) {
+        if isViewed(m) { return toast("Просмотрено") }
         if m.obj("file")?.bool("downloaded") != true { toast("Загружаем видео…") }
         Core.shared.call("download_file", ["message_id": m.str("id")]) { [weak self] r in
             switch r {
@@ -1800,12 +1845,32 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 guard let self, let path = (v as? JSON)?.str("path"), !path.isEmpty else { return }
                 // The silent switch must not mute a video; a running call keeps its own audio session.
                 if CallManager.shared.call.isEmpty { try? AVAudioSession.sharedInstance().setCategory(.playback) }
-                let vc = AVPlayerViewController()
-                vc.player = AVPlayer(url: URL(fileURLWithPath: path))
-                self.present(vc, animated: !Theme.reducedMotion) { vc.player?.play() }
+                let player = AVPlayerViewController()
+                player.player = AVPlayer(url: URL(fileURLWithPath: path))
+                guard isOnce(m) else {
+                    self.present(player, animated: !Theme.reducedMotion) { player.player?.play() }
+                    return
+                }
+                // A view-once video plays inside a host of ours: closing it is the moment the file
+                // is destroyed, and the host is also where a reported screenshot is watched for.
+                let host = VideoHostController()
+                host.addChild(player)
+                player.view.frame = host.view.bounds
+                player.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                host.view.addSubview(player.view)
+                player.didMove(toParent: host)
+                host.onShot = { [weak self] in
+                    self?.burn(m, shot: true)
+                    host.dismiss(animated: !Theme.reducedMotion)
+                }
+                host.onLeave = { [weak self] in self?.burn(m, shot: false) }
+                self.present(host, animated: !Theme.reducedMotion) { player.player?.play() }
             }
         }
     }
+
+    /// The file of a view-once message is destroyed here and on every other device of the chat.
+    private func burn(_ m: JSON, shot: Bool) { OnceMedia.burn(m, shot: shot) }
 
     private func retry(_ m: JSON) {
         Core.shared.call("retry_message", ["message_id": m.str("id")]) { [weak self] r in if case .failure(let e) = r { self?.toast(e.message) } }
@@ -1918,6 +1983,11 @@ final class BubbleCell: UITableViewCell {
     private let content = UIStackView()
     private let photo = UIImageView()
     private let mark = VideoMarkView()
+    /// The face of hidden media: a frosted plate over a spoiler, a dark card for a view-once file.
+    private let cover = UIView()
+    private let coverBlur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterialDark))
+    private let coverBadge = UILabel()
+    private let coverNote = UILabel()
     private let circle = CircleView()
     private let voiceRow = UIStackView()
     private let playButton = UIButton(type: .system)
@@ -2020,6 +2090,41 @@ final class BubbleCell: UITableViewCell {
         NSLayoutConstraint.activate([
             mark.topAnchor.constraint(equalTo: photo.topAnchor), mark.bottomAnchor.constraint(equalTo: photo.bottomAnchor),
             mark.leadingAnchor.constraint(equalTo: photo.leadingAnchor), mark.trailingAnchor.constraint(equalTo: photo.trailingAnchor),
+        ])
+        // The cover sits over the picture: a spoiler keeps its poster under the frost, a
+        // view-once file has no picture at all and shows only the mark and the line.
+        cover.isHidden = true
+        cover.isUserInteractionEnabled = false
+        cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        cover.backgroundColor = UIColor(red: 0.06, green: 0.09, blue: 0.13, alpha: 1)
+        photo.addSubview(cover)
+        coverBlur.isHidden = true
+        coverBlur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        cover.addSubview(coverBlur)
+        coverBadge.text = "1"
+        coverBadge.font = .systemFont(ofSize: 15, weight: .semibold)
+        coverBadge.textColor = .white
+        coverBadge.textAlignment = .center
+        coverBadge.backgroundColor = UIColor(white: 1, alpha: 0.22)
+        coverBadge.layer.cornerRadius = 18
+        coverBadge.clipsToBounds = true
+        coverBadge.translatesAutoresizingMaskIntoConstraints = false
+        cover.addSubview(coverBadge)
+        coverNote.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        coverNote.textColor = .white
+        coverNote.textAlignment = .center
+        coverNote.backgroundColor = UIColor(white: 0, alpha: 0.45)
+        coverNote.layer.cornerRadius = 11
+        coverNote.clipsToBounds = true
+        coverNote.translatesAutoresizingMaskIntoConstraints = false
+        cover.addSubview(coverNote)
+        NSLayoutConstraint.activate([
+            coverBadge.widthAnchor.constraint(equalToConstant: 36), coverBadge.heightAnchor.constraint(equalToConstant: 36),
+            coverBadge.centerXAnchor.constraint(equalTo: cover.centerXAnchor), coverBadge.centerYAnchor.constraint(equalTo: cover.centerYAnchor),
+            coverNote.leadingAnchor.constraint(equalTo: cover.leadingAnchor, constant: 10),
+            coverNote.bottomAnchor.constraint(equalTo: cover.bottomAnchor, constant: -10),
+            coverNote.heightAnchor.constraint(equalToConstant: 22),
+            coverNote.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
         ])
         photoW = photo.widthAnchor.constraint(equalToConstant: 200)
         photoW.priority = UILayoutPriority(999)
@@ -2369,10 +2474,23 @@ final class BubbleCell: UITableViewCell {
             photoW.isActive = true
             photoH.isActive = true
             let id = boundId
-            mark.isHidden = !video
-            mark.length = video && f.int64("duration") > 0 ? Videos.clock(f.int64("duration")) : ""
+            let once = isOnce(m), seen = isViewed(m), spoiler = isSpoiler(m)
+            mark.isHidden = !video || once
+            mark.length = video && !once && f.int64("duration") > 0 ? Videos.clock(f.int64("duration")) : ""
             photo.backgroundColor = video ? UIColor(red: 0.06, green: 0.09, blue: 0.13, alpha: 1) : nil
-            if video {
+            cover.isHidden = !(once || spoiler)
+            // The frost lies over a real picture; the card of a view-once file is opaque on its own.
+            coverBlur.isHidden = !spoiler
+            coverBadge.isHidden = !once || seen
+            coverNote.text = once ? (seen ? (isShot(m) ? "Скриншот сделан · Просмотрено" : "Просмотрено") : (video ? "Видео" : "Фото")) : "Скрыто"
+            photo.isAccessibilityElement = true
+            photo.accessibilityLabel = once
+                ? "Одноразовое \(video ? "видео" : "фото")" + (seen ? ", просмотрено" : "")
+                : (spoiler ? "\(video ? "Видео" : "Фото") скрыто" : (video ? "Видео" : "Фото"))
+            if once {
+                // Nothing of a view-once file is drawn before it is opened, and nothing after.
+                photo.image = nil
+            } else if video {
                 // Only the first frame is shown; the video itself is fetched when it is played.
                 photo.image = Photos.thumb(m)
             } else if let img = Photos.cache.object(forKey: id as NSString) {
@@ -2387,6 +2505,7 @@ final class BubbleCell: UITableViewCell {
             photo.image = nil
             photo.backgroundColor = nil
             mark.isHidden = true
+            cover.isHidden = true
         }
         // Explicit wrap widths: the automatic one is the label's previous frame, so a reused
         // cell would wrap this message at the width of the message it showed before.
@@ -2659,12 +2778,36 @@ final class PollRow: UIControl {
 }
 
 /// One picture of the gallery: pinch to zoom, tap closes. The thumbnail shows until the original is decrypted.
+/// Hosts the system player for a view-once video. The player itself gives no way to learn that
+/// the user has left it, and iOS cannot forbid a screenshot — only report one — so both moments
+/// are watched here: leaving the video and a reported capture burn the file.
+final class VideoHostController: UIViewController {
+    var onLeave: (() -> Void)?
+    var onShot: (() -> Void)?
+    private var observer: NSObjectProtocol?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        observer = NotificationCenter.default.addObserver(forName: UIApplication.userDidTakeScreenshotNotification,
+                                                          object: nil, queue: .main) { [weak self] _ in self?.onShot?() }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        onLeave?()
+    }
+
+    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+}
+
 final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
     let message: JSON
     let index: Int
     var onClose: (() -> Void)?
     private let scroll = UIScrollView()
     private let imageView = UIImageView()
+    private var observer: NSObjectProtocol?
 
     init(message: JSON, index: Int) {
         self.message = message
@@ -2694,6 +2837,16 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
         scroll.addSubview(imageView)
         view.addSubview(scroll)
         view.addGestureRecognizer(TapGesture { [weak self] in self?.onClose?() })
+        if isOnce(message) {
+            imageView.accessibilityLabel = "Одноразовое фото"
+            imageView.accessibilityHint = "Коснитесь, чтобы закрыть. После закрытия фото исчезнет"
+            observer = NotificationCenter.default.addObserver(forName: UIApplication.userDidTakeScreenshotNotification,
+                                                              object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                OnceMedia.burn(self.message, shot: true)
+                self.onClose?()
+            }
+        }
         let profile = !message.str("profile_user_id").isEmpty
         let method = profile ? "profile_photo" : "download_file"
         let params: JSON = profile ? ["user_id":message.str("profile_user_id"),"photo_id":message.str("id")] : ["message_id":message.str("id")]
@@ -2707,6 +2860,17 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
+    /// A view-once photo: closing it is what burns it, and a reported capture counts as seen too.
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        guard isOnce(message) else { return }
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
+        OnceMedia.burn(message, shot: false)
+    }
+
+    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
 }
 
 /// Full-screen photos of a chat in one pager: swipe left and right, cross-fades unless motion is reduced.

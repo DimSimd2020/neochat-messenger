@@ -1777,7 +1777,7 @@ void forward(const DialogHost &h, const QJsonArray &msgs)
 
 // ---- attachments ----
 
-void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPhotos, std::function<void(const QStringList &, bool, const QString &)> send, std::function<void()> cancelled)
+void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPhotos, std::function<void(const QStringList &, bool, const QString &, bool, bool)> send, std::function<void()> cancelled)
 {
     if (initial.isEmpty())
         return;
@@ -1785,6 +1785,8 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
     auto paths = std::make_shared<QStringList>(initial);
     auto *preview = new AttachPreview;
     auto *asFile = new ui::Toggle(QStringLiteral("Отправить как файл"));
+    auto *spoiler = new ui::Toggle(QStringLiteral("Скрыть до нажатия"));
+    auto *once = new ui::Toggle(QStringLiteral("Просмотреть один раз"));
     auto *caption = new ui::TextField(QStringLiteral("Подпись"));
     caption->edit()->setMaxLength(1000);
     auto *add = new ui::Button(QStringLiteral("Добавить"), ui::Button::Flat);
@@ -1798,6 +1800,8 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
     buttons->addWidget(go);
     sheet->body()->addWidget(preview);
     sheet->body()->addWidget(asFile);
+    sheet->body()->addWidget(spoiler);
+    sheet->body()->addWidget(once);
     sheet->body()->addWidget(caption);
     sheet->body()->addLayout(buttons);
 
@@ -1809,6 +1813,13 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
         const bool media = std::all_of(paths->begin(), paths->end(), isMedia);
         asFile->setVisible(media);
         const bool photos = media ? !asFile->isChecked() : asPhotos;
+        // A spoiler and a view-once mark belong to a picture or a video, never to a document.
+        for (ui::Toggle *w : { spoiler, once })
+            w->setVisible(media && photos);
+        if (!(media && photos)) {
+            spoiler->setChecked(false);
+            once->setChecked(false);
+        }
         const bool images = std::all_of(paths->begin(), paths->end(), isImage);
         preview->setPaths(*paths, photos && images);
         if (media && photos && std::all_of(paths->begin(), paths->end(), isVideo))
@@ -1843,8 +1854,10 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
         const bool photos = media ? !asFile->isChecked() : asPhotos;
         const QStringList chosen = *paths;
         const QString text = caption->text().trimmed();
+        const bool hidden = media && photos && spoiler->isChecked();
+        const bool oneTime = media && photos && once->isChecked();
         sheet->close();
-        send(chosen, photos, text);
+        send(chosen, photos, text, hidden, oneTime);
     };
     QObject::connect(go, &QAbstractButton::clicked, sheet, submit);
     QObject::connect(caption->edit(), &QLineEdit::returnPressed, sheet, submit);

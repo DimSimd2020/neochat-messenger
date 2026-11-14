@@ -337,6 +337,8 @@ impl Inner {
         // Group and poll controls change state through helpers that lock the db: applied after commit.
         let mut control: Option<(String, Value)> = None;
         let mut deleted = None;
+        // View-once files somebody else has just opened: their local copies go after the commit.
+        let mut seen: Vec<String> = Vec::new();
         let mut service: Option<(Payload, String)> = None;
         let payload = payload.map(|p| {
             if crate::groups::may_post(&tx, &conv, &sender, &p.kind) { Some(p) } else { None }
@@ -449,6 +451,19 @@ impl Inner {
                                 tx.execute("UPDATE conversations SET unread=0 WHERE id=?1", [&conv])?;
                                 changed_conv = true;
                             }
+                        } else if r.kind == "viewed" || r.kind == "screenshot" {
+                            // A view-once file has been opened, and on iOS the system may also have
+                            // reported a capture. Every device of every member drops its copies, the
+                            // author's included; the marks are kept only on rows that are such files.
+                            for id in r.ids.iter().take(500) {
+                                tx.execute(
+                                    "INSERT OR IGNORE INTO receipts(message_id, user_id, kind, at) SELECT ?1, ?2, ?3, ?4 WHERE EXISTS(SELECT 1 FROM messages WHERE id=?1 AND conversation_id=?5 AND json_extract(file,'$.once')=1)",
+                                    params![id, sender, r.kind, now, conv],
+                                )?;
+                                if Self::set_seen(&tx, id, r.kind == "screenshot")? {
+                                    seen.push(id.to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -486,7 +501,11 @@ impl Inner {
             self.store_service(&p, &body, sender == me)?;
         }
         if let Some(id) = deleted {
-            let _ = std::fs::remove_file(self.data_dir.join("files").join(format!("{id}.enc")));
+            self.erase_media(&id);
+        }
+        for id in seen {
+            self.erase_media(&id);
+            let _ = self.burn_if_all_seen(&id);
         }
         if let Some((kind, g)) = control {
             let applied = match kind.as_str() {

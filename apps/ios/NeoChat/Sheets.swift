@@ -1021,20 +1021,25 @@ struct OutgoingFile {
     var isVideo: Bool { mime.hasPrefix("video/") }
 }
 
-/// The window every attachment passes through: preview, "send as a file" for pictures, a caption.
+/// The window every attachment passes through: preview, "send as a file" for pictures, a caption,
+/// and the two marks a picture can go out with — hidden until tapped, or shown only once.
 final class AttachViewController: SheetViewController {
     private var files: [OutgoingFile]
     private let asPhotos: Bool
     private let more: (@escaping ([OutgoingFile]) -> Void) -> Void
-    private let send: ([OutgoingFile], Bool, String) -> Void
+    private let send: ([OutgoingFile], Bool, String, Bool, Bool) -> Void
     private let preview = UIStackView()
     private let caption = Field("Подпись")
     private var asFileRow: UIStackView?
+    private var spoilerRow: UIStackView?
+    private var onceRow: UIStackView?
     private var asFile: Bool
+    private var spoiler = false
+    private var once = false
     private var sent = false
     private var loadToken = 0
 
-    init(files: [OutgoingFile], asPhotos: Bool, more: @escaping (@escaping ([OutgoingFile]) -> Void) -> Void, send: @escaping ([OutgoingFile], Bool, String) -> Void) {
+    init(files: [OutgoingFile], asPhotos: Bool, more: @escaping (@escaping ([OutgoingFile]) -> Void) -> Void, send: @escaping ([OutgoingFile], Bool, String, Bool, Bool) -> Void) {
         self.files = files
         self.asPhotos = asPhotos
         self.asFile = !asPhotos
@@ -1060,6 +1065,13 @@ final class AttachViewController: SheetViewController {
         }
         asFileRow = row
         stack.addArrangedSubview(row)
+        // A spoiler and a view-once mark belong to a picture or a video, never to a document.
+        let spoilerLine = switchRow("Скрыть до нажатия", on: spoiler) { [weak self] on in self?.spoiler = on }
+        let onceLine = switchRow("Просмотреть один раз", on: once) { [weak self] on in self?.once = on }
+        spoilerRow = spoilerLine
+        onceRow = onceLine
+        stack.addArrangedSubview(spoilerLine)
+        stack.addArrangedSubview(onceLine)
         caption.autocapitalizationType = .sentences
         caption.autocorrectionType = .default
         caption.returnKeyType = .send
@@ -1086,7 +1098,8 @@ final class AttachViewController: SheetViewController {
     private func submit() {
         guard !sent, !files.isEmpty else { return }
         sent = true
-        send(files, photosNow, (caption.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+        let media = allMedia && photosNow
+        send(files, photosNow, (caption.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines), media && spoiler, media && once)
         dismiss(animated: !Theme.reducedMotion)
     }
 
@@ -1102,6 +1115,12 @@ final class AttachViewController: SheetViewController {
         let media = allMedia
         asFileRow?.isHidden = !media
         let photos = photosNow && media
+        spoilerRow?.isHidden = !photos
+        onceRow?.isHidden = !photos
+        if !photos {
+            spoiler = false
+            once = false
+        }
         if photos && files.allSatisfy({ $0.isVideo }) {
             title = files.count == 1 ? "Отправить видео" : "Отправить видео: \(files.count)"
         } else if photos && files.contains(where: { $0.isVideo }) {

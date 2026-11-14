@@ -58,7 +58,7 @@ private:
     void sendText(const QString &text, const QString &replyTo);
     void editText(const QString &id, const QString &text);
     void attachDialog(const QStringList &paths, bool photos);
-    void sendFiles(const QStringList &paths, bool photos, const QString &caption = {});
+    void sendFiles(const QStringList &paths, bool photos, const QString &caption = {}, bool spoiler = false, bool once = false);
     void sendNextFile();
     void sendVoice(const QString &path, qint64 durationMs, const QByteArray &wave, const QString &replyTo);
     void sendCircle(const QString &path, qint64 durationMs, const QImage &poster);

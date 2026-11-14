@@ -93,6 +93,7 @@ impl Core {
         let w = inner.clone();
         let worker = std::thread::Builder::new().name("neocore-worker".into()).spawn(move || {
             w.record_installation();
+            w.sweep_viewed_media();
             w.worker_loop();
         }).ok();
         Ok(Core { inner, worker })
@@ -349,6 +350,9 @@ impl Inner {
             "edit_message" => self.edit_message(p),
             "forward_message" => self.forward_message(p),
             "download_file" => self.download_file(p),
+            "media_viewed" => self.media_viewed(p),
+            "media_shown" => self.media_shown(p),
+            "burn_viewed" => self.burn_viewed(p),
             "stt_model" => self.stt_model(),
             "stt_model_download" => self.stt_model_download(),
             "stt_model_delete" => self.stt_model_delete(),

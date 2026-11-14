@@ -79,6 +79,18 @@ class PosterView(ctx: Context) : ImageView(ctx) {
             field = v
             invalidate()
         }
+    /** A view-once file: nothing of it is drawn, the cover takes the whole place. */
+    var once = false
+        set(v) {
+            field = v
+            invalidate()
+        }
+    /** The line on the cover or over a blurred picture: "Фото", "Просмотрено", "Скрыто". */
+    var note = ""
+        set(v) {
+            field = v
+            invalidate()
+        }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val label = Paint(Paint.ANTI_ALIAS_FLAG)
     private val triangle = Path()
@@ -90,6 +102,11 @@ class PosterView(ctx: Context) : ImageView(ctx) {
 
     override fun onDraw(c: Canvas) {
         super.onDraw(c)
+        if (once) {
+            drawCover(c)
+            return
+        }
+        if (note.isNotEmpty()) drawNote(c)
         if (!video) return
         val d = resources.displayMetrics.density
         val cx = width / 2f
@@ -111,5 +128,36 @@ class PosterView(ctx: Context) : ImageView(ctx) {
         fill.color = 0x99000000.toInt()
         c.drawRoundRect(left, top, left + w + 16 * d, top + 22 * d, 11 * d, 11 * d, fill)
         c.drawText(length, left + 8 * d, top + 22 * d / 2 + (label.descent() - label.ascent()) / 2 - label.descent(), label)
+    }
+
+    /** The face of a view-once file: a dark plate, a round "1" and what became of it. */
+    private fun drawCover(c: Canvas) {
+        val d = resources.displayMetrics.density
+        fill.color = 0xFF101722.toInt()
+        c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
+        val cx = width / 2f
+        val cy = height / 2f
+        fill.color = 0x33FFFFFF
+        c.drawCircle(cx, cy - 16 * d, 20 * d, fill)
+        val one = "1"
+        label.textSize = 17 * d
+        label.color = Color.WHITE
+        c.drawText(one, cx - label.measureText(one) / 2, cy - 16 * d - (label.descent() + label.ascent()) / 2, label)
+        if (note.isEmpty()) return
+        label.textSize = 13 * d
+        c.drawText(note, cx - label.measureText(note) / 2, cy + 20 * d, label)
+    }
+
+    /** A short line in a corner over a blurred picture. */
+    private fun drawNote(c: Canvas) {
+        val d = resources.displayMetrics.density
+        label.textSize = 12 * d
+        val w = label.measureText(note)
+        val left = 10 * d
+        val top = 10 * d
+        fill.color = 0x99000000.toInt()
+        c.drawRoundRect(left, top, left + w + 16 * d, top + 22 * d, 11 * d, 11 * d, fill)
+        label.color = Color.WHITE
+        c.drawText(note, left + 8 * d, top + 22 * d / 2 + (label.descent() - label.ascent()) / 2 - label.descent(), label)
     }
 }

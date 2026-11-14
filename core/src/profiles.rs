@@ -74,8 +74,10 @@ impl Inner {
         let direct: Option<String> = self.db().conn.query_row("SELECT id FROM conversations WHERE kind='direct' AND peer_user_id=?1 LIMIT 1", [uid], |r| r.get(0)).optional()?;
         let Some(conv) = direct else { return Ok(json!([])); };
         let filter = match p["kind"].as_str().unwrap_or("media") {
-            "media" => "m.file IS NOT NULL AND json_extract(m.file,'$.mime') LIKE 'image/%'",
-            "files" => "m.file IS NOT NULL AND json_extract(m.file,'$.mime') NOT LIKE 'image/%'",
+            // A view-once file is not part of the shared history of the two people: it is gone
+            // after it has been seen, so it never appears in these lists.
+            "media" => "m.file IS NOT NULL AND json_extract(m.file,'$.mime') LIKE 'image/%' AND COALESCE(json_extract(m.file,'$.once'), 0)<>1",
+            "files" => "m.file IS NOT NULL AND json_extract(m.file,'$.mime') NOT LIKE 'image/%' AND COALESCE(json_extract(m.file,'$.once'), 0)<>1",
             "links" => "(m.body LIKE '%https://%' OR m.body LIKE '%http://%')",
             _ => return Err(Error::Invalid("Неизвестный раздел профиля".into())),
         };

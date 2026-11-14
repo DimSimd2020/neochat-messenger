@@ -153,6 +153,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/attachments", s.authed(s.handleReserveAttachment))
 	m.HandleFunc("PUT /v1/attachments/{id}/content", s.authed(s.handleUploadAttachment))
 	m.HandleFunc("GET /v1/attachments/{id}/content", s.authed(s.handleDownloadAttachment))
+	m.HandleFunc("POST /v1/attachments/{id}/burn", s.authed(s.handleBurnAttachment))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

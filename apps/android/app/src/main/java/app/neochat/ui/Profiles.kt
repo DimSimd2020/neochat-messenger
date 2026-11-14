@@ -211,7 +211,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             if(items.isEmpty()) content.addView(act.label("Общих ${if(category=="media") "фото" else if(category=="links") "ссылок" else "файлов"} пока нет",15f,400,Theme.Role.MUTED))
             if(category=="media") {
                 items.chunked(3).forEach { photos -> val row=LinearLayout(act)
-                    photos.forEach { m -> val image=ImageView(act).apply {scaleType=ImageView.ScaleType.CENTER_CROP;setImageBitmap(Photos.thumb(m));contentDescription="Открыть фото";setOnClickListener {showSharedPhoto(act,m)} }
+                    photos.forEach { m -> val image=ImageView(act).apply {scaleType=ImageView.ScaleType.CENTER_CROP;setImageBitmap(if (isSpoiler(m)) Photos.blurred(m) else Photos.thumb(m));contentDescription=if (isSpoiler(m)) "Фото скрыто, открыть фото" else "Открыть фото";setOnClickListener {showSharedPhoto(act,m)} }
                         val side=(act.resources.displayMetrics.widthPixels-dp(40))/3;row.addView(image,lp(0,side,1f).apply {marginEnd=dp(4)}) }
                     repeat(3-photos.size) {row.addView(View(act),lp(0,1,1f))};content.addView(row,lp().apply {bottomMargin=dp(4)})
                 }

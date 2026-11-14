@@ -171,6 +171,15 @@ fun isVoice(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?
 
 fun isCircle(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")?.optBoolean("circle") == true
 
+/** A view-once picture or video: every copy of it is destroyed as soon as it has been opened. */
+fun isOnce(m: JSONObject) = m.optJSONObject("file")?.optBoolean("once") == true
+
+/** True once it has been opened here or on any other device of the account; the copies are gone. */
+fun isViewed(m: JSONObject) = isOnce(m) && m.optJSONObject("file")?.optBoolean("viewed") == true
+
+/** A picture that still has to be shown blurred on this device. */
+fun isSpoiler(m: JSONObject) = m.optJSONObject("file")?.optBoolean("spoiler") == true
+
 /** The recognized text of a voice message or circle; null while it has none, "" when no speech was found. */
 fun transcriptOf(m: JSONObject): String? = m.optJSONObject("file")?.takeIf { it.has("transcript") && !it.isNull("transcript") }?.optString("transcript")
 
@@ -190,6 +199,7 @@ object Photos {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
     }
     private val thumbs = LruCache<String, Bitmap>(300)
+    private val blurs = LruCache<String, Bitmap>(300)
     private val pending = HashMap<String, Long>()
 
     fun thumb(m: JSONObject): Bitmap? {
@@ -201,6 +211,24 @@ object Photos {
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
         thumbs.put(id, bmp)
         return bmp
+    }
+
+    /** The poster shrunk to a few dozen pixels, which the view then stretches back: the blur of a spoiler. */
+    fun blurred(m: JSONObject): Bitmap? {
+        val id = m.str("id")
+        blurs.get(id)?.let { return it }
+        val b = thumb(m) ?: return null
+        val k = 24f / maxOf(1, maxOf(b.width, b.height))
+        val small = runCatching { Bitmap.createScaledBitmap(b, maxOf(1, (b.width * k).toInt()), maxOf(1, (b.height * k).toInt()), true) }.getOrNull() ?: return null
+        blurs.put(id, small)
+        return small
+    }
+
+    /** Forgets everything this process holds of a file that has been destroyed. */
+    fun forget(id: String) {
+        full.remove(id)
+        blurs.remove(id)
+        thumbs.remove(id)
     }
 
     /** Downloads (once per 30 s on failure) and decodes the original in the background. */
@@ -1146,7 +1174,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             photo.clipToOutline = true
             photo.contentDescription = "Фото"
             photo.isClickable = true
-            photo.setOnClickListener { if (isVideo(m)) openVideo(m) else openPhoto(m) }
+            photo.setOnClickListener { openMedia(m) }
             photo.setOnLongClickListener { menu(m, bubble); true }
             fileIcon.setOnClickListener { openFile(m) }
             fileAction.setOnClickListener { openFile(m) }
@@ -1335,19 +1363,49 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 plp.height = maxOf(dp(90), (ih * k).toInt())
                 photo.layoutParams = plp
                 val id = m.str("id")
-                val length = if (video && f.optLong("duration") > 0) Videos.clock(f.optLong("duration")) else ""
-                photo.video = video
+                val once = isOnce(m)
+                val seen = isViewed(m)
+                val hidden = isSpoiler(m)
+                val shot = once && seen && f.optBoolean("shot")
+                val length = if (video && !once && f.optLong("duration") > 0) Videos.clock(f.optLong("duration")) else ""
+                val noun = if (video) "видео" else "фото"
+                photo.video = video && !once
+                photo.once = once
                 photo.length = length
-                photo.contentDescription = if (video) "Видео" + if (length.isEmpty()) "" else ", $length" else "Фото"
-                if (video) {
-                    // Only the first frame is shown; the video itself is fetched when it is played.
-                    photo.setBackgroundColor(0xFF101722.toInt())
-                    photo.setImageBitmap(Photos.thumb(m))
-                } else {
-                    photo.background = null
-                    val cached = Photos.full.get(id)
-                    photo.setImageBitmap(cached ?: Photos.thumb(m))
-                    if (cached == null && Prefs.autoloadPhotos(ctx)) Photos.load(m) { bmp -> if (m.str("id") == id) photo.setImageBitmap(bmp) }
+                photo.note = when {
+                    once && seen -> if (shot) "Скриншот сделан · Просмотрено" else "Просмотрено"
+                    once -> if (video) "Видео" else "Фото"
+                    hidden -> "Скрыто"
+                    else -> ""
+                }
+                photo.contentDescription = when {
+                    once && seen -> "Одноразовое $noun, просмотрено" + if (shot) ", был сделан скриншот" else ""
+                    once -> "Одноразовое $noun. Нажмите, чтобы посмотреть один раз"
+                    hidden -> "${if (video) "Видео" else "Фото"} скрыто. Нажмите, чтобы показать"
+                    else -> if (video) "Видео" + if (length.isEmpty()) "" else ", $length" else "Фото"
+                }
+                when {
+                    // A view-once file has nothing to show before it is opened, and nothing after.
+                    once -> {
+                        photo.background = null
+                        photo.setImageDrawable(null)
+                    }
+                    // A spoiler keeps its poster, only it is not readable here.
+                    hidden -> {
+                        photo.background = null
+                        photo.setImageBitmap(Photos.blurred(m))
+                    }
+                    video -> {
+                        // Only the first frame is shown; the video itself is fetched when it is played.
+                        photo.setBackgroundColor(0xFF101722.toInt())
+                        photo.setImageBitmap(Photos.thumb(m))
+                    }
+                    else -> {
+                        photo.background = null
+                        val cached = Photos.full.get(id)
+                        photo.setImageBitmap(cached ?: Photos.thumb(m))
+                        if (cached == null && Prefs.autoloadPhotos(ctx)) Photos.load(m) { bmp -> if (m.str("id") == id) photo.setImageBitmap(bmp) }
+                    }
                 }
             }
             poll.visibility = if (kind == "poll") VISIBLE else GONE
@@ -1594,10 +1652,46 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private var viewer: View? = null
     private var viewerStop: (() -> Unit)? = null
+    // A view-once file is watched behind FLAG_SECURE; this holds its id until the viewer closes.
+    private var viewerOnce: String? = null
+    private var guarding = false
+    private var guardedByUser = false
+
+    /**
+     * Keeps screenshots, screen recording and the recents preview away from the window while a
+     * view-once file is on the screen. The user's own «secure screen» setting is restored as it was.
+     */
+    private fun guardScreen(on: Boolean) {
+        if (on == guarding) return
+        if (on) {
+            guardedByUser = act.window.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0
+            act.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        } else if (!guardedByUser) {
+            act.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        guarding = on
+    }
+
+    /** A tap on a picture: a spoiler is opened here, a view-once file goes to the guarded viewer. */
+    private fun openMedia(m: JSONObject) {
+        when {
+            isViewed(m) -> act.toast(if (m.optJSONObject("file")?.optBoolean("shot") == true) "Скриншот сделан · Просмотрено" else "Просмотрено")
+            isSpoiler(m) -> CoreClient.call("media_shown", JSONObject().put("_account_id", accountId).put("message_id", m.str("id"))) { _, e ->
+                if (e != null) return@call act.toast(e.message)
+                openNow(m)
+            }
+            else -> openNow(m)
+        }
+    }
+
+    private fun openNow(m: JSONObject) {
+        if (isVideo(m)) openVideo(m) else openPhoto(m)
+    }
 
     /** Opens the photo among all pictures of the chat; swiping left and right moves between them. */
     private fun openPhoto(m: JSONObject) {
-        val photos = messages.filter { isImage(it) }
+        // A view-once file never joins the album: it is shown alone and destroyed after that.
+        val photos = messages.filter { isImage(it) && !isOnce(it) }
         val at = photos.indexOfFirst { it.str("id") == m.str("id") }
         if (at < 0) showViewer(listOf(m), 0) else showViewer(photos, at)
     }
@@ -1610,6 +1704,9 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private fun showViewer(photos: List<JSONObject>, start: Int) {
         closeViewer()
         hideKeyboard()
+        val shown = photos.getOrElse(start) { photos.first() }
+        viewerOnce = if (isOnce(shown)) shown.str("id") else null
+        guardScreen(viewerOnce != null)
         val v = FrameLayout(ctx)
         v.setBackgroundColor(0xF2040914.toInt())
         v.isClickable = true
@@ -1657,7 +1754,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         counter.background = GradientDrawable().apply { setColor(0x66000000); cornerRadius = ctx.dpf(16) }
         fun describe(pos: Int) {
             counter.text = "${pos + 1} из ${photos.size}"
-            v.contentDescription = if (photos.size > 1) "Просмотр фото ${pos + 1} из ${photos.size}. Листайте влево и вправо, двойное касание увеличивает, нажмите, чтобы закрыть" else "Просмотр фото. Нажмите, чтобы закрыть"
+            val where = if (photos.size > 1) " ${pos + 1} из ${photos.size}" else ""
+            val swipe = if (photos.size > 1) "Листайте влево и вправо, двойное касание увеличивает, " else ""
+            val once = if (viewerOnce == null) "" else " Это фото смотрят один раз: после закрытия оно исчезнет."
+            v.contentDescription = "Просмотр фото$where. ${swipe}Нажмите, чтобы закрыть.$once"
         }
         describe(start)
         if (photos.size > 1) {
@@ -1680,12 +1780,23 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         viewer = null
         viewerStop?.invoke()
         viewerStop = null
+        val once = viewerOnce
+        viewerOnce = null
+        guardScreen(false)
+        if (once != null) {
+            // It has been seen: the core destroys both copies here and tells the other devices.
+            Photos.forget(once)
+            CoreClient.call("media_viewed", JSONObject().put("_account_id", accountId).put("message_id", once)) { _, e ->
+                if (e != null) act.toast(e.message)
+            }
+        }
         v.animate().cancel()
         v.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { root.removeView(v) }.start()
     }
 
     /** Fetches and decrypts the video, then plays it over the chat. */
     private fun openVideo(m: JSONObject) {
+        if (isViewed(m)) return act.toast("Просмотрено")
         if (m.optJSONObject("file")?.optBoolean("downloaded") != true) act.toast("Загружаем видео…")
         CoreClient.call("download_file", JSONObject().put("message_id", m.str("id"))) { v, e ->
             if (e != null) return@call act.toast(e.message)
@@ -1697,6 +1808,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private fun showVideo(m: JSONObject, path: String) {
         closeViewer()
         hideKeyboard()
+        viewerOnce = if (isOnce(m)) m.str("id") else null
+        guardScreen(viewerOnce != null)
         val v = FrameLayout(ctx)
         v.setBackgroundColor(0xF2040914.toInt())
         v.isClickable = true
@@ -1884,8 +1997,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("NeoChat", m.str("text")))
             if (android.os.Build.VERSION.SDK_INT < 33) act.toast("Текст скопирован")
         }
-        if (isImage(m)) pm.add("Открыть фото") { openPhoto(m) }
-        if (isVideo(m)) pm.add("Открыть видео") { openVideo(m) }
+        if (isImage(m) || isVideo(m)) pm.add(if (isVideo(m)) "Открыть видео" else "Открыть фото") { openMedia(m) }
         val postable = ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll")
         if (postable && conv.optBoolean("can_pin")) {
             val on = !m.optBoolean("pinned")
@@ -1893,7 +2005,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 CoreClient.call("pin_message", JSONObject().put("message_id", m.str("id")).put("on", on)) { _, e -> if (e != null) act.toast(e.message) }
             }
         }
-        if (postable && !conv.optBoolean("saved")) pm.add("В избранное") { savedCopy(m) }
+        if (postable && !conv.optBoolean("saved") && !isOnce(m)) pm.add("В избранное") { savedCopy(m) }
         if (!gone && m.optBoolean("outgoing") && m.str("status") in setOf("sent", "delivered", "read") && m.str("kind") in setOf("text", "file") && !isVoice(m) && !isCircle(m))
             pm.add("Изменить") { setEdit(m) }
         if (m.str("kind") == "poll" && m.optBoolean("outgoing") && m.optJSONObject("poll")?.optBoolean("closed") != true) pm.add("Завершить опрос") {
@@ -1903,12 +2015,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             if (transcriptOf(m) != null) pm.add("Убрать расшифровку") { Transcription.clear(m.str("id")) }
             else pm.add("Расшифровать") { Transcription.request(act, m) }
         }
-        if (m.str("kind") == "file") {
+        // A view-once file is never handed to another app and never kept; the core refuses it too.
+        if (m.str("kind") == "file" && !isOnce(m)) {
             pm.add("Открыть файл") { openFile(m) }
             pm.add("Сохранить как…") { saveFile(m) }
         }
         if (m.str("status") == "failed") pm.add("Повторить отправку") { retry(m) }
-        if (ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll"))
+        if (ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll") && !isOnce(m))
             pm.add("Переслать") { Dialogs.forward(act, listOf(m)) }
         if (m.optBoolean("outgoing") && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll"))
             pm.add("Удалить у всех", danger = true) {
@@ -2388,8 +2501,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             photos && picks.all { it.image } -> Kind.PHOTO
             else -> Kind.FILE
         }
-        AttachSheet(act, picks, media, { added -> pickUris(again) { added(it) } }) { chosen, asPhotos, caption ->
-            chosen.forEachIndexed { n, p -> sendPick(p, asPhotos, if (n == 0) caption else "") }
+        AttachSheet(act, picks, media, { added -> pickUris(again) { added(it) } }) { chosen, asPhotos, caption, hidden, oneTime ->
+            chosen.forEachIndexed { n, p -> sendPick(p, asPhotos, if (n == 0) caption else "", hidden, oneTime) }
         }.show()
     }
 
@@ -2400,7 +2513,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     /** Copies the picked document to app storage, hands it to the core, then removes the copy. */
-    private fun sendPick(p: Pick, photo: Boolean, caption: String) {
+    private fun sendPick(p: Pick, photo: Boolean, caption: String, hidden: Boolean = false, oneTime: Boolean = false) {
         val cr = ctx.contentResolver
         Thread {
             val dir = File(ctx.cacheDir, "outgoing").apply { mkdirs() }
@@ -2412,14 +2525,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                     tmp.delete()
                     return@runOnUiThread act.toast("Не удалось прочитать файл")
                 }
-                if (photo && p.video) return@runOnUiThread shrinkAndSend(tmp, p, caption)
-                dispatchFile(tmp, p.mime, p.name, thumb, caption, null)
+                if (photo && p.video) return@runOnUiThread shrinkAndSend(tmp, p, caption, hidden, oneTime)
+                dispatchFile(tmp, p.mime, p.name, thumb, caption, null, hidden, oneTime)
             }
         }.start()
     }
 
     /** A video sent as video is shrunk to H.264 + AAC when that is needed to fit the limit or to spare the traffic. */
-    private fun shrinkAndSend(tmp: File, p: Pick, caption: String) {
+    private fun shrinkAndSend(tmp: File, p: Pick, caption: String, hidden: Boolean, oneTime: Boolean) {
         var shown = -10
         VideoCompress.run(ctx, tmp, tmp.parentFile!!, onProgress = { pct ->
             if (pct - shown >= 10 || pct == 100) {
@@ -2442,16 +2555,19 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val mime = if (r.file != null) "video/mp4" else p.mime
             Thread {
                 val clip = Videos.info(out.absolutePath)
-                act.runOnUiThread { dispatchFile(out, mime, name, null, caption, clip) }
+                act.runOnUiThread { dispatchFile(out, mime, name, null, caption, clip, hidden, oneTime) }
             }.start()
         }
     }
 
     /** Hands a prepared file to the core and removes it afterwards. */
-    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?, caption: String = "", clip: VideoInfo? = null) {
+    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?, caption: String = "", clip: VideoInfo? = null, hidden: Boolean = false, oneTime: Boolean = false) {
         if (accountId != CoreClient.accountId) { tmp.delete(); return }
         val p = JSONObject().put("_account_id", accountId).put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
         if (caption.isNotEmpty()) p.put("caption", caption)
+        // The core applies both marks to photos and videos only and keeps the poster off a view-once file.
+        if (hidden) p.put("spoiler", true)
+        if (oneTime) p.put("once", true)
         if (thumb != null) p.put("thumb", thumb.first).put("width", thumb.second).put("height", thumb.third)
         if (clip != null) {
             clip.thumb?.let { p.put("thumb", it) }
@@ -2530,6 +2646,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         cancelVoice()
         Playback.stop()
         saveDraft()
+        // Leaving the chat is the last chance: whatever of a view-once file is still here goes now.
+        CoreClient.call("burn_viewed", JSONObject().put("_account_id", accountId).put("conversation_id", conversationId)) { _, _ -> }
     }
 
     override fun onEvent(ev: JSONObject) {

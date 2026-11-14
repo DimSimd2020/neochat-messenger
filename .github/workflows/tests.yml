@@ -1,0 +1,84 @@
+name: Tests
+
+# Proof that does not belong to any single client: the Go API against a real PostgreSQL and the
+# Rust core end-to-end against that same server. Release workflows publish; this one only checks.
+on:
+  push:
+    branches: ["main"]
+    paths: ["core/**", "server/**", ".github/workflows/tests.yml"]
+  pull_request:
+    paths: ["core/**", "server/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server-and-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: neochat_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d neochat_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      NEOCHAT_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/neochat_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: linux-tests-${{ runner.arch }}-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Go formatting and vet
+        working-directory: server
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)"
+          go vet ./...
+
+      # The whole API suite: auth, groups, receipts, attachments and the burn of view-once media.
+      - name: Server tests
+        working-directory: server
+        run: go test ./... -count=1 -timeout=25m
+
+      - name: Core unit tests
+        working-directory: core
+        run: cargo test --lib
+
+      # The e2e suite needs the test-only mailbox that lives in the Go test binary: it confirms
+      # @example.test addresses itself, so registration and E2EE stay real end to end.
+      - name: Core end-to-end against the test server
+        working-directory: core
+        run: |
+          set -euo pipefail
+          BIN=$(cargo test --test e2e --no-run --message-format=json 2>/dev/null \
+            | jq -r 'select(.executable != null) | .executable' | tail -n1)
+          test -n "$BIN" || { echo "e2e binary not found"; exit 1; }
+          echo "native test binary: $BIN"
+          cd ../server
+          NEOCHAT_NATIVE_TEST_COMMAND=$(jq -cn --arg b "$BIN" '[$b, "--test-threads=3"]')
+          export NEOCHAT_NATIVE_TEST_COMMAND
+          go test ./internal/app -run '^TestNativeEmailFlow$' -count=1 -timeout=30m -v

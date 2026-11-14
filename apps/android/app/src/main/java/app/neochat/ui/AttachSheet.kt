@@ -42,19 +42,22 @@ fun Context.pickOf(uri: Uri): Pick {
 
 /**
  * The window every attachment passes through: preview, "send as a file" for pictures, a caption.
- * [more] asks the chat to pick additional items; [send] gets the final set and the caption.
+ * [more] asks the chat to pick additional items; [send] gets the final set, the caption and what
+ * the sender asked of a picture — hidden until tapped, or shown only once.
  */
 class AttachSheet(
     private val act: MainActivity,
     initial: List<Pick>,
     private val asPhotos: Boolean,
     private val more: ((List<Pick>) -> Unit) -> Unit,
-    private val send: (List<Pick>, Boolean, String) -> Unit,
+    private val send: (List<Pick>, Boolean, String, Boolean, Boolean) -> Unit,
 ) {
     private val picks = initial.toMutableList()
     private val sheet = Sheet(act, "")
     private val previewBox = FrameLayout(act)
     private val asFile = ToggleRow(act, "Отправить как файл")
+    private val spoiler = ToggleRow(act, "Скрыть до нажатия")
+    private val once = ToggleRow(act, "Просмотреть один раз")
     private val caption = FloatingField(act, "Подпись")
     private var token = 0
 
@@ -69,6 +72,8 @@ class AttachSheet(
         }
         sheet.add(previewBox)
         sheet.add(asFile)
+        sheet.add(spoiler)
+        sheet.add(once)
         sheet.add(caption)
         sheet.add(row, 14)
         asFile.setChecked(!asPhotos, false)
@@ -83,8 +88,10 @@ class AttachSheet(
             val chosen = picks.toList()
             val photos = photosNow()
             val text = caption.text.trim()
+            val hidden = photos && spoiler.checked
+            val oneTime = photos && once.checked
             sheet.dismiss()
-            send(chosen, photos, text)
+            send(chosen, photos, text, hidden, oneTime)
         }
         refresh()
         sheet.show()
@@ -99,6 +106,12 @@ class AttachSheet(
         val media = allMedia()
         asFile.visibility = if (media) View.VISIBLE else View.GONE
         val photos = photosNow() && media
+        // A spoiler and a view-once mark belong to a picture or a video, never to a document.
+        for (w in listOf(spoiler, once)) w.visibility = if (photos) View.VISIBLE else View.GONE
+        if (!photos) {
+            spoiler.setChecked(false, false)
+            once.setChecked(false, false)
+        }
         val videos = picks.all { it.video }
         sheet.setTitle(
             when {

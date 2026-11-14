@@ -41,6 +41,14 @@
 #include <QTextDocument>
 #include <QUrl>
 
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+// The older SDKs of Qt's toolchains do not know this value: 0x11 is what Windows expects.
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x11
+#endif
+#endif
+
 namespace {
 
 qint64 clockMs()
@@ -181,6 +189,36 @@ bool isVoice(const QJsonObject &m)
 bool isCircle(const QJsonObject &m)
 {
     return m.value("kind").toString() == "file" && m.value("file").toObject().value("circle").toBool();
+}
+
+// Hidden media: a spoiler is only a presentation mark, a view-once file is destroyed once it has
+// been opened. Both come from the core, which already knows whether this device opened them.
+bool isOnce(const QJsonObject &m)
+{
+    return m.value("kind").toString() == "file" && m.value("file").toObject().value("once").toBool();
+}
+
+bool isViewed(const QJsonObject &m)
+{
+    return isOnce(m) && m.value("file").toObject().value("viewed").toBool();
+}
+
+bool isSpoiler(const QJsonObject &m)
+{
+    return m.value("kind").toString() == "file" && m.value("file").toObject().value("spoiler").toBool();
+}
+
+// Shrinking a picture to a few dozen pixels and stretching it back is the cheapest blur there is,
+// and it never lets the reader see what is under a spoiler.
+QPixmap blurPoster(const QPixmap &px)
+{
+    if (px.isNull())
+        return {};
+    const qreal k = 24.0 / qMax(1, qMax(px.width(), px.height()));
+    // The name "small" is a macro in the Windows headers, so this is `tiny`.
+    const QSize tiny(qMax(1, int(px.width() * k)), qMax(1, int(px.height() * k)));
+    return px.scaled(tiny, Qt::IgnoreAspectRatio, Qt::FastTransformation)
+        .scaled(px.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 }
 
 QFont transcriptFont()
@@ -444,6 +482,113 @@ void viewerMenu(PopupMenu *menu, const QJsonObject &m, const QImage &img, QWidge
     });
 }
 
+// ---- a view-once file ----
+
+// Windows keeps a whole top-level window out of screenshots and screen recordings; a widget inside
+// the chat cannot be excluded on its own, and putting the flag on the main window would blank the
+// whole program. So a view-once picture or video leaves the chat into this window, and closing it
+// is the moment the core destroys the file on every device.
+class SecureViewer : public QWidget {
+    Q_OBJECT
+public:
+    SecureViewer(QWidget *host, const QString &id)
+        : QWidget(host->window() ? host->window() : host, Qt::Dialog | Qt::FramelessWindowHint), m_id(id)
+    {
+        setObjectName(QStringLiteral("secureViewer"));
+        setAttribute(Qt::WA_DeleteOnClose);
+        setFocusPolicy(Qt::StrongFocus);
+        setAccessibleName(QStringLiteral("Просмотр одноразового вложения. Esc — закрыть"));
+        const QRect box = window()->geometry();
+        setGeometry(box.adjusted(box.width() / 7, box.height() / 8, -box.width() / 7, -box.height() / 8));
+        show();
+        blockCapture();
+        raise();
+        setFocus(Qt::OtherFocusReason);
+    }
+
+    // The picture of a photo; a video brings its own player as a child widget.
+    void setPhoto(const QImage &img)
+    {
+        m_img = img;
+        update();
+    }
+
+signals:
+    // Something the chat should say: a system that cannot block capture, or a refusal of the core.
+    void note(const QString &text);
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.fillRect(rect(), QColor(4, 9, 20));
+        if (!m_img.isNull()) {
+            p.setRenderHint(QPainter::SmoothPixmapTransform);
+            const QRectF avail = QRectF(rect()).adjusted(16, 16, -16, -46);
+            const qreal k = qMin(qMin(avail.width() / m_img.width(), avail.height() / m_img.height()), 1.0 / devicePixelRatioF());
+            const QSizeF sz = QSizeF(m_img.size()) * k;
+            p.drawImage(QRectF(avail.center() - QPointF(sz.width() / 2, sz.height() / 2), sz), m_img);
+            p.setPen(QColor(255, 255, 255, 190));
+            p.setFont(Theme::instance()->font(12.5));
+            p.drawText(QRectF(16, height() - 40, width() - 32, 24), Qt::AlignHCenter,
+                       QStringLiteral("После закрытия это фото исчезнет у всех"));
+        }
+    }
+    void closeEvent(QCloseEvent *e) override
+    {
+        if (!m_fired) {
+            m_fired = true;
+            Core::instance()->call("media_viewed", {{"message_id", m_id}}, this, [this](const QJsonValue &, const CoreError &err) {
+                if (!err.ok())
+                    emit note(err.message);
+            });
+        }
+        QWidget::closeEvent(e);
+    }
+    void keyPressEvent(QKeyEvent *e) override
+    {
+        if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Space || e->key() == Qt::Key_Return) {
+            close();
+            return;
+        }
+        QWidget::keyPressEvent(e);
+    }
+    // A click on the dark part of a photo is a way out; a video keeps its own clicks.
+    void mousePressEvent(QMouseEvent *e) override
+    {
+        if (e->button() == Qt::LeftButton && !m_img.isNull())
+            close();
+        else
+            QWidget::mousePressEvent(e);
+    }
+
+private:
+    void blockCapture()
+    {
+#ifdef Q_OS_WIN
+        // WDA_EXCLUDEFROMCAPTURE needs Windows 10 2004 or newer; WDA_MONITOR is the older way round.
+        auto *hwnd = reinterpret_cast<HWND>(winId());
+        m_blocked = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) != FALSE
+            || SetWindowDisplayAffinity(hwnd, WDA_MONITOR) != FALSE;
+        if (!m_blocked)
+            emit note(QStringLiteral("Эта Windows не может скрыть окно от съёмки экрана"));
+#endif
+    }
+
+    QString m_id;
+    QImage m_img;
+    bool m_blocked = false;
+    bool m_fired = false;
+};
+
+// Opens the protected window and reports the core's refusals back into the chat.
+SecureViewer *secureViewer(QWidget *host, const QJsonObject &m, MessageView *report)
+{
+    auto *viewer = new SecureViewer(host, m.value("id").toString());
+    QObject::connect(viewer, &SecureViewer::note, report, &MessageView::toast);
+    return viewer;
+}
+
 } // namespace
 
 bool showPhotoFile(QWidget *host, const QString &path, std::function<void(PopupMenu *)> actions)
@@ -467,12 +612,16 @@ ImageCache *ImageCache::instance()
 
 QPixmap ImageCache::thumb(const QJsonObject &m)
 {
-    const QString id = m.value("id").toString();
+    // The poster of a spoiler is cached already blurred and under a key of its own: once the user
+    // opens it, the plain key is asked for and the sharp poster is decoded again.
+    const QString id = m.value("id").toString() + (isSpoiler(m) ? QStringLiteral("#blur") : QString());
     auto it = m_thumbs.find(id);
     if (it != m_thumbs.end())
         return *it;
     QPixmap px;
     px.loadFromData(QByteArray::fromBase64(m.value("file").toObject().value("thumb").toString().toLatin1()));
+    if (isSpoiler(m))
+        px = blurPoster(px);
     m_thumbs.insert(id, px);
     return px;
 }
@@ -1135,14 +1284,23 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
 
     if (!L.image.isNull()) {
         // A video shows only its first frame; the file itself is fetched when it is played.
-        QPixmap px = isVideo(m) ? QPixmap() : ImageCache::instance()->full(m);
-        if (px.isNull())
-            px = ImageCache::instance()->thumb(m);
+        // A view-once file shows nothing of itself, a spoiler only a blur.
+        const bool once = isOnce(m), seen = isViewed(m), spoiler = isSpoiler(m);
+        QPixmap px;
+        if (!once) {
+            px = isVideo(m) ? QPixmap() : ImageCache::instance()->full(m);
+            if (px.isNull()) {
+                // The poster of a spoiler comes back from the cache already blurred.
+                px = ImageCache::instance()->thumb(m);
+            } else if (spoiler) {
+                px = blurPoster(px);
+            }
+        }
         p->save();
         QPainterPath clip;
         clip.addRoundedRect(L.image, 14, 14);
         p->setClipPath(clip);
-        p->fillRect(L.image, c.selected);
+        p->fillRect(L.image, once ? QColor(16, 23, 34) : c.selected);
         if (!px.isNull()) {
             // Cover the frame, cropping the overflow evenly.
             p->setRenderHint(QPainter::SmoothPixmapTransform);
@@ -1150,7 +1308,33 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
             const QSizeF src = L.image.size() / k;
             p->drawPixmap(L.image, px, QRectF(QPointF((px.width() - src.width()) / 2, (px.height() - src.height()) / 2), src));
         }
-        if (isVideo(m)) {
+        // A pill so the reader knows there is a picture under the blur.
+        if (spoiler && !once) {
+            p->setRenderHint(QPainter::Antialiasing);
+            p->setFont(Theme::instance()->font(12, QFont::DemiBold));
+            const QString label = QStringLiteral("Скрыто");
+            const QRectF pill(L.image.left() + 10, L.image.bottom() - 32, QFontMetricsF(p->font()).horizontalAdvance(label) + 16, 22);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(0, 0, 0, 150));
+            p->drawRoundedRect(pill, 11, 11);
+            p->setPen(Qt::white);
+            p->drawText(pill, Qt::AlignCenter, label);
+        }
+        if (once) {
+            const QPointF mid = L.image.center();            p->setRenderHint(QPainter::Antialiasing);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(255, 255, 255, 50));
+            p->drawEllipse(mid, 20, 20);
+            p->setFont(Theme::instance()->font(15, QFont::DemiBold));
+            p->setPen(Qt::white);
+            p->drawText(QRectF(mid.x() - 20, mid.y() - 24, 40, 48), Qt::AlignCenter, QStringLiteral("1"));
+            const QString line = seen ? (m.value("file").toObject().value("shot").toBool()
+                                             ? QStringLiteral("Скриншот сделан · Просмотрено")
+                                             : QStringLiteral("Просмотрено"))
+                                      : (isVideo(m) ? QStringLiteral("Видео") : QStringLiteral("Фото"));
+            p->setFont(Theme::instance()->font(12.5));
+            p->drawText(QRectF(L.image.left(), mid.y() + 26, L.image.width(), 20), Qt::AlignHCenter, line);
+        } else if (isVideo(m)) {
             const QPointF mid = L.image.center();
             p->setRenderHint(QPainter::Antialiasing);
             p->setPen(Qt::NoPen);
@@ -1440,6 +1624,9 @@ bool MessageView::atBottom() const
 void MessageView::setConversation(const QString &id, bool group)
 {
     exitCheckMode();
+    // Leaving a chat is the last chance for a view-once file that was opened here but never burned.
+    if (!m_conv.isEmpty() && m_conv != id)
+        Core::instance()->call("burn_viewed", {{"conversation_id", m_conv}}, this, [](const QJsonValue &, const CoreError &) {});
     m_conv = id;
     m_hasMore = true;
     m_searching = false;
@@ -2017,12 +2204,23 @@ void MessageView::vote(const QJsonObject &m, int option)
 
 void MessageView::openImage(const QJsonObject &m)
 {
-    Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this, m](const QJsonValue &v, const CoreError &e) {
+    if (isViewed(m))
+        return emit toast(QStringLiteral("Просмотрено"));
+    const QString id = m.value("id").toString();
+    Core::instance()->call("download_file", {{"message_id", id}}, this, [this, m, id](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
             return emit toast(e.message);
         const QImage img = viewerImage(v.toObject().value("path").toString());
         if (img.isNull())
             return emit toast(QStringLiteral("Не удалось открыть фото"));
+        // A view-once picture is shown outside the chat, in a window Windows keeps out of capture.
+        if (isOnce(m)) {
+            secureViewer(this, m, this)->setPhoto(img);
+            return;
+        }
+        // Opening a spoiler is a mark of this device; the picture itself is already downloaded.
+        if (isSpoiler(m))
+            Core::instance()->call("media_shown", {{"message_id", id}}, this, [](const QJsonValue &, const CoreError &) {});
         new PhotoViewer(window(), img, [this, m, img](PopupMenu *menu) { viewerActions(menu, m, img); });
     });
 }
@@ -2042,7 +2240,7 @@ QJsonArray MessageView::conversationPhotos() const
     QJsonArray photos;
     for (int i = 0; i < m_model->rowCount(); ++i) {
         const MessageItem &it = m_model->item(i);
-        if (!it.isDate && isImage(it.msg))
+        if (!it.isDate && isImage(it.msg) && !isOnce(it.msg))
             photos.append(it.msg);
     }
     return photos;
@@ -2188,7 +2386,7 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
             });
         });
     }
-    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed")
+    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed" && !isOnce(m))
         menu->addAction(QStringLiteral("В избранное"), this, [this, m] {
             Core::instance()->call("save_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
                 emit toast(e.ok() ? QStringLiteral("Добавлено в избранное") : e.message);
@@ -2202,13 +2400,14 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
         else
             menu->addAction(QStringLiteral("Расшифровать"), this, [this, m] { Transcriber::instance()->request(m, this); });
     }
-    if (kind == "file") {
+    // A view-once file is never handed to another app and never kept; the core refuses it too.
+    if (kind == "file" && !isOnce(m)) {
         menu->addAction(QStringLiteral("Открыть файл"), this, [this, m] { openFile(m); });
         menu->addAction(QStringLiteral("Сохранить как…"), this, [this, m] { saveFile(m); });
     }
     if (m.value("status").toString() == "failed")
         menu->addAction(QStringLiteral("Повторить отправку"), this, [this, m] { retry(m); });
-    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed")
+    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed" && !isOnce(m))
         menu->addAction(QStringLiteral("Переслать"), this, [this, m] { emit forwardRequested(QJsonArray{m}); });
     menu->addAction(QStringLiteral("Выбрать"), this, [this, m] { enterCheckMode(m.value("id").toString()); });
     menu->addSeparator();
@@ -2241,14 +2440,25 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
 void MessageView::openFile(const QJsonObject &m)
 {
     const bool video = isVideo(m);
+    if (video && isViewed(m))
+        return emit toast(QStringLiteral("Просмотрено"));
     emit toast(video ? QStringLiteral("Расшифровываем видео…") : QStringLiteral("Расшифровываем файл…"));
     Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this, m, video](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
             return emit toast(e.message);
         const QString path = v.toObject().value("path").toString();
+        const QString name = m.value("file").toObject().value("name").toString();
         // A video plays inside NeoChat: there is no reason for the system player to open a message.
         if (video) {
-            showVideoFile(this, path, m.value("file").toObject().value("name").toString());
+            // A view-once video goes to the protected window; when its player closes, the window
+            // closes with it, and that is what tells the core the file has been seen.
+            if (isOnce(m)) {
+                SecureViewer *viewer = secureViewer(this, m, this);
+                auto *player = new VideoViewer(viewer, path, name);
+                QObject::connect(player, &QObject::destroyed, viewer, &QWidget::close);
+                return;
+            }
+            showVideoFile(this, path, name);
             return;
         }
         QDesktopServices::openUrl(QUrl::fromLocalFile(path));

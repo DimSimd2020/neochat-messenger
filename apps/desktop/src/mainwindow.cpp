@@ -1398,11 +1398,12 @@ void MainWindow::attachDialog(const QStringList &paths, bool photos)
 {
     if (m_current.isEmpty() || paths.isEmpty() || !m_current.value("can_media").toBool())
         return;
-    dialogs::sendAttachments(host(), paths, photos, [this](const QStringList &chosen, bool asPhotos, const QString &caption) { sendFiles(chosen, asPhotos, caption); },
+    dialogs::sendAttachments(host(), paths, photos,
+                             [this](const QStringList &chosen, bool asPhotos, const QString &caption, bool spoiler, bool once) { sendFiles(chosen, asPhotos, caption, spoiler, once); },
                              [paths] { for (const QString &p : paths) dropPasted(p); });
 }
 
-void MainWindow::sendFiles(const QStringList &paths, bool photos, const QString &caption)
+void MainWindow::sendFiles(const QStringList &paths, bool photos, const QString &caption, bool spoiler, bool once)
 {
     if (m_current.isEmpty())
         return;
@@ -1414,6 +1415,10 @@ void MainWindow::sendFiles(const QStringList &paths, bool photos, const QString 
         QJsonObject item{{"_account_id", Core::instance()->accountId()}, {"conversation_id", m_current.value("id")}, {"path", path}, {"photo", photos}};
         if (first && !caption.isEmpty())
             item["caption"] = caption;
+        if (photos && spoiler)
+            item["spoiler"] = true;
+        if (photos && once)
+            item["once"] = true;
         first = false;
         m_files.enqueue(item);
     }
@@ -1432,9 +1437,15 @@ void MainWindow::sendNextFile()
         QJsonObject p{{"_account_id", file.value("_account_id")}, {"conversation_id", file.value("conversation_id")}, {"path", origin}, {"mime", type}};
         if (file.contains("caption"))
             p["caption"] = file.value("caption");
+        // Both marks belong to a picture or a video; the core drops them for anything else and
+        // keeps the poster off a view-once file.
+        if (file.value("spoiler").toBool())
+            p["spoiler"] = true;
+        if (file.value("once").toBool())
+            p["once"] = true;
         QString path = origin;
         QSize size;
-        const QString thumb = file.value("photo").toBool() && type.startsWith("image/") ? photoThumb(path, &size) : QString();
+        const QString thumb = file.value("photo").toBool() && !file.value("once").toBool() && type.startsWith("image/") ? photoThumb(path, &size) : QString();
         if (!thumb.isEmpty()) {
             p["thumb"] = thumb;
             p["width"] = size.width();

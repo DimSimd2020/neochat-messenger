@@ -1415,3 +1415,85 @@ fn own_devices_share_contacts_pins_settings_and_avatar() {
     alice.call("whats_new_seen", json!({"version": "0.6.3"}));
     assert_eq!(notes(&alice)["show"], false);
 }
+
+#[test]
+fn spoilers_and_one_time_media() {
+    let Some(e) = env() else { return };
+    let aname = uname("alice");
+    let (alice, _) = register(&e, &aname);
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let contact = alice.call("resolve_contact", json!({"username": bname}));
+    let cid = alice.call("open_direct", json!({"user_id": contact["user_id"]}))["id"].as_str().unwrap().to_string();
+    bob.call("resolve_contact", json!({"username": aname}));
+    bob.call("open_direct", json!({"user_id": uid(&alice)}));
+
+    let src = std::env::temp_dir().join(format!("nc-e2e-{}.jpg", uuid::Uuid::new_v4()));
+    let data: Vec<u8> = (0..90_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+
+    // A spoiler keeps its poster: the picture is there, only blurred until it is opened.
+    let hidden = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "image/jpeg", "name": "hidden.jpg", "thumb": "AAAA", "spoiler": true}));
+    assert_eq!(hidden["file"]["spoiler"], true);
+    assert_eq!(hidden["file"]["thumb"], "AAAA");
+    // A view-once file never carries a poster, so nothing of it shows in the chat at all.
+    let once = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "image/jpeg", "name": "once.jpg", "thumb": "AAAA", "once": true}));
+    assert_eq!(once["file"]["once"], true);
+    assert_eq!(once["file"]["image"], true);
+    assert!(once["file"]["thumb"].is_null(), "{once:?}");
+    // Neither flag sticks to a document.
+    let doc = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "application/zip", "name": "p.zip", "thumb": "AAAA", "once": true, "spoiler": true}));
+    assert_eq!(doc["file"]["once"], false);
+    assert_eq!(doc["file"]["spoiler"], false);
+    alice.sync();
+    bob.sync();
+
+    let find = |c: &Client, name: &str| c.messages(&cid).into_iter().find(|m| m["file"]["name"] == name).unwrap_or_else(|| panic!("{name} missing"));
+    let (hm, om) = (find(&bob, "hidden.jpg"), find(&bob, "once.jpg"));
+    assert_eq!(hm["file"]["spoiler"], true);
+    assert_eq!(hm["file"]["thumb"].as_str(), Some("AAAA"));
+    assert_eq!((om["file"]["once"].clone(), om["file"]["viewed"].clone(), om["file"]["shot"].clone()), (json!(true), json!(false), json!(false)));
+
+    // Opening a spoiler is a mark of this device only: the sender keeps it blurred.
+    bob.call("media_shown", json!({"message_id": hm["id"]}));
+    assert_eq!(find(&bob, "hidden.jpg")["file"]["spoiler"], false);
+    alice.sync();
+    bob.sync();
+    assert_eq!(find(&alice, "hidden.jpg")["file"]["spoiler"], true);
+
+    // The view-once photo: readable while it is being looked at, gone as soon as it has been seen.
+    let dl = bob.call("download_file", json!({"message_id": om["id"]}));
+    assert_eq!(std::fs::read(dl["path"].as_str().unwrap()).unwrap(), data);
+    bob.call("media_viewed", json!({"message_id": om["id"]}));
+    let om = find(&bob, "once.jpg");
+    assert_eq!(om["file"]["viewed"], true);
+    assert_eq!(om["file"]["downloaded"], false);
+    assert!(om["file"]["thumb"].is_null());
+    assert!(bob.try_call("download_file", json!({"message_id": om["id"]})).is_err(), "seen once already");
+    assert!(bob.try_call("export_file", json!({"message_id": om["id"], "dest": src.to_string_lossy()})).is_err(), "cannot be saved");
+    assert!(bob.try_call("forward_message", json!({"message_id": om["id"], "conversation_id": cid})).is_err(), "cannot be forwarded");
+    // Leaving the chat changes nothing further: the copies were destroyed with the view.
+    bob.call("burn_viewed", json!({"conversation_id": cid}));
+
+    // The author is told through the receipt and loses her own copies the same way.
+    alice.sync();
+    let am = find(&alice, "once.jpg");
+    assert_eq!(am["file"]["viewed"], true);
+    assert_eq!(am["file"]["downloaded"], false);
+    assert!(alice.try_call("download_file", json!({"message_id": am["id"]})).is_err());
+
+    // A capture reported by the system counts as a view and is marked for both sides.
+    let shot = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "image/jpeg", "name": "shot.jpg", "once": true}));
+    assert_eq!(shot["file"]["once"], true);
+    alice.sync();
+    bob.sync();
+    let sm = find(&bob, "shot.jpg");
+    bob.call("media_viewed", json!({"message_id": sm["id"], "screenshot": true}));
+    alice.sync();
+    bob.sync();
+    assert_eq!(find(&bob, "shot.jpg")["file"]["shot"], true);
+    assert_eq!(find(&alice, "shot.jpg")["file"]["shot"], true);
+    assert_eq!(find(&alice, "shot.jpg")["file"]["viewed"], true);
+
+    let _ = std::fs::remove_file(&src);
+}

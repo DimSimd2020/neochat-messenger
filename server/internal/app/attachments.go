@@ -22,6 +22,13 @@ const (
 	storedQuota       = 1 << 30
 )
 
+// attachmentAccess is the SQL for who may get or burn an object: the device that uploaded it, or
+// a device that received an envelope of the message it belongs to while its account is still a
+// member of the conversation. Both queries below join attachments to messages as "m".
+const attachmentAccess = `at.owner_device_id=$2 OR (
+	EXISTS(SELECT 1 FROM envelopes e WHERE e.message_id=m.id AND e.device_id=$2)
+	AND EXISTS(SELECT 1 FROM memberships mm WHERE mm.conversation_id=m.conversation_id AND mm.user_id=$3))`
+
 func (s *Server) objectPath(id string) string {
 	// id is a validated UUID; user-supplied names never reach the filesystem.
 	return filepath.Join(s.cfg.DataDir, "objects", id)
@@ -135,10 +142,7 @@ func (s *Server) handleDownloadAttachment(w http.ResponseWriter, r *http.Request
 	// message while its account is still a member of the conversation.
 	err := s.db.QueryRow(r.Context(), `SELECT at.size FROM attachments at
 		LEFT JOIN messages m ON m.id=at.message_id
-		WHERE at.id=$1 AND at.expires_at>now() AND at.state IN ('ready','attached') AND (
-			at.owner_device_id=$2 OR (
-				EXISTS(SELECT 1 FROM envelopes e WHERE e.message_id=m.id AND e.device_id=$2)
-				AND EXISTS(SELECT 1 FROM memberships mm WHERE mm.conversation_id=m.conversation_id AND mm.user_id=$3)))`,
+		WHERE at.id=$1 AND at.expires_at>now() AND at.state IN ('ready','attached') AND (`+attachmentAccess+`)`,
 		nullUUID(id), a.DeviceID, a.UserID).Scan(&size)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.fail(w, r, errNotFound)
@@ -154,10 +158,44 @@ func (s *Server) handleDownloadAttachment(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer f.Close()
+	// The read is what makes a later burn request credible: only a device that has really had
+	// the object in hand may ask to destroy it for everybody.
+	s.db.Exec(r.Context(), `UPDATE attachments SET downloaded_at=now() WHERE id=$1 AND downloaded_at IS NULL`, nullUUID(id))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(200)
 	io.Copy(w, f)
+}
+
+// handleBurnAttachment removes an object for good: the view-once media it carries has been seen
+// by everybody it was sent to. Any device entitled to the file may ask for this once it has been
+// downloaded, and repeating the request is harmless. The row stays until the cleanup removes it.
+func (s *Server) handleBurnAttachment(w http.ResponseWriter, r *http.Request, a *authCtx) {
+	id := r.PathValue("id")
+	var state string
+	err := s.db.QueryRow(r.Context(), `SELECT at.state FROM attachments at
+		LEFT JOIN messages m ON m.id=at.message_id
+		WHERE at.id=$1 AND at.state IN ('ready','attached','burned') AND (`+attachmentAccess+`) AND
+			(at.owner_device_id=$2 OR at.downloaded_at IS NOT NULL)`,
+		nullUUID(id), a.DeviceID, a.UserID).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		s.fail(w, r, errNotFound)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if state != "burned" {
+		if _, err := s.db.Exec(r.Context(), `UPDATE attachments SET state='burned', expires_at=now() WHERE id=$1`, nullUUID(id)); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if err := os.Remove(s.objectPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.log.Error("attachment burn", "id", id, "err", err)
+		}
+	}
+	w.WriteHeader(204)
 }
 
 // RunCleanup deletes expired objects, envelopes and events until ctx ends.

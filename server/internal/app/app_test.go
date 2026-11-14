@@ -501,6 +501,86 @@ func TestAttachmentUploadAndAccess(t *testing.T) {
 	}
 }
 
+func TestAttachmentBurn(t *testing.T) {
+	s, ts := testServer(t)
+	a := register(t, s, ts, "alice")
+	b := register(t, s, ts, "bob")
+	eve := register(t, s, ts, "eve")
+	conv := direct(t, a, b)
+	content := rnd(4096)
+	sum := sha256.Sum256(content)
+	var res struct {
+		AttachmentID string `json:"attachment_id"`
+	}
+	if st, m := a.do("POST", "/v1/attachments", map[string]any{"size": len(content), "sha256": sum[:]}, &res); st != 201 {
+		t.Fatalf("reserve: %d %v", st, m)
+	}
+	req, _ := http.NewRequest("PUT", ts.URL+"/v1/attachments/"+res.AttachmentID+"/content", bytes.NewReader(content))
+	req.Header.Set("Authorization", "Bearer "+a.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 204 {
+		t.Fatalf("upload: %d", resp.StatusCode)
+	}
+	recips := []map[string]any{{"target_device_id": conv.Recipients[0].DeviceID, "ciphertext": []byte{1, 2}}}
+	if st, m := a.do("POST", "/v1/conversations/"+conv.ID+"/messages", map[string]any{
+		"version": 1, "client_message_id": newUUID(), "conversation_revision": conv.Revision,
+		"recipient_set_revision": conv.RecipientSetRevision, "recipients": recips, "attachment_ids": []string{res.AttachmentID},
+	}, nil); st != 200 {
+		t.Fatalf("send: %d %v", st, m)
+	}
+	call := func(c *client, method string) int {
+		req, _ := http.NewRequest(method, ts.URL+"/v1/attachments/"+res.AttachmentID+"/burn", nil)
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	get := func(c *client) int {
+		req, _ := http.NewRequest("GET", ts.URL+"/v1/attachments/"+res.AttachmentID+"/content", nil)
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	// Nobody outside the conversation may destroy the object, and a member may do it only after
+	// the file has really been in their hands.
+	if st := call(eve, "POST"); st != 404 {
+		t.Fatalf("stranger burn: %d", st)
+	}
+	if st := call(b, "POST"); st != 404 {
+		t.Fatalf("burn before download: %d", st)
+	}
+	if st := get(b); st != 200 {
+		t.Fatalf("bob download: %d", st)
+	}
+	if st := call(b, "POST"); st != 204 {
+		t.Fatalf("burn: %d", st)
+	}
+	if st := get(b); st != 404 {
+		t.Fatalf("download after burn: %d", st)
+	}
+	if st := call(b, "POST"); st != 204 {
+		t.Fatalf("repeated burn: %d", st)
+	}
+	if _, err := os.Stat(s.objectPath(res.AttachmentID)); !os.IsNotExist(err) {
+		t.Fatalf("object left on disk: %v", err)
+	}
+	// The uploading device keeps its own copy; burning it there needs no download.
+	if st := call(a, "POST"); st != 204 {
+		t.Fatalf("owner burn: %d", st)
+	}
+}
+
 func TestDeviceAndRecipientCaps(t *testing.T) {
 	if maxDevices != 10 {
 		t.Fatalf("maxDevices=%d", maxDevices)
