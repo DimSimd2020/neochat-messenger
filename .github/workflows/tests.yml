@@ -44,6 +44,10 @@ jobs:
       - name: Rust
         run: rustup toolchain install stable --profile minimal
 
+      # libsignal's build script generates protobufs; the runner image has no protoc.
+      - name: Protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+
       - uses: actions/cache@v4
         with:
           path: |
