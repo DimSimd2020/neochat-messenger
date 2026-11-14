@@ -111,6 +111,9 @@ install -d -m 700 "$bk"
 cp -a "$D/manifest.json" "$D/manifest.sig" "$bk/" 2>/dev/null || true
 find "$D" -name 'NeoChat-*' -printf '%P %s
 ' > "$bk/files.txt"
+# Keep only the five newest backups: they used to pile up until the disk was full and
+# PostgreSQL could not write any more.
+ls -1dt /var/backups/neochat-releases/updates-before-* 2>/dev/null | tail -n +6 | while read -r d; do rm -rf "$d"; done
 shopt -s nullglob
 for f in /tmp/neochat-update/NeoChat-*; do install -m 644 -o neochat -g neochat "$f" "$D/alpha/"; done
 install -m 644 -o neochat -g neochat /tmp/neochat-update/manifest.sig "$D/alpha/manifest.sig.new"
@@ -190,6 +193,9 @@ install -d -m 700 "$bk"
 cp -a "$D/manifest.json" "$D/manifest.sig" "$bk/" 2>/dev/null || true
 find "$D" -name 'NeoChat-*' -printf '%P %s
 ' > "$bk/files.txt"
+# Keep only the five newest backups: they used to pile up until the disk was full and
+# PostgreSQL could not write any more.
+ls -1dt /var/backups/neochat-releases/updates-before-* 2>/dev/null | tail -n +6 | while read -r d; do rm -rf "$d"; done
 shopt -s nullglob
 for f in /tmp/neochat-update/NeoChat-*; do install -m 644 -o neochat -g neochat "$f" "$D/"; done
 install -m 644 -o neochat -g neochat /tmp/neochat-update/manifest.sig "$D/manifest.sig.new"

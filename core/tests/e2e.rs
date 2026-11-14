@@ -78,6 +78,12 @@ impl Client {
 }
 
 fn register(e: &Env, name: &str) -> (Client, String) {
+    register_named(e, name, "Тест")
+}
+
+/// The same flow with the display name a test needs. Registration always goes through the test
+/// mailbox: the server refuses an account without a confirmed address.
+fn register_named(e: &Env, name: &str, display: &str) -> (Client, String) {
     let c = Client::new();
     // Registration needs a confirmed mailbox; the test server confirms addresses at example.test by itself.
     let mail = c.call("registration_email_start", json!({"server": e.server, "email": format!("{name}@example.test")}));
@@ -88,7 +94,7 @@ fn register(e: &Env, name: &str) -> (Client, String) {
     }
     let res = c.call(
         "register",
-        json!({"server": e.server, "username": name, "display_name": "Тест", "password": "correct horse battery", "device_name": "test", "platform": "windows", "email_ticket": mail["ticket"]}),
+        json!({"server": e.server, "username": name, "display_name": display, "password": "correct horse battery", "device_name": "test", "platform": "windows", "email_ticket": mail["ticket"]}),
     );
     assert!(res["recovery_code"].as_str().unwrap().len() > 40);
     (c, res["recovery_code"].as_str().unwrap().to_string())
@@ -559,11 +565,8 @@ fn qr_login_history_and_two_factor() {
 fn profile_name_nickname_and_number() {
     let Some(e) = env() else { return };
     let nick = format!("DimSimd_{}", &uuid::Uuid::new_v4().simple().to_string()[..6]);
-    let dima = Client::new();
-    dima.call(
-        "register",
-        json!({"server": e.server, "username": nick, "display_name": "Дмитрий", "password": "correct horse battery", "device_name": "test", "platform": "windows"}),
-    );
+    // Through the test mailbox: the server refuses a registration without a confirmed address.
+    let (dima, _) = register_named(&e, &nick, "Дмитрий");
     let st = dima.call("status", json!({}));
     assert_eq!(st["username"], nick.as_str());
     assert_eq!(st["display_name"], "Дмитрий");

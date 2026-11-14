@@ -4,7 +4,9 @@ on:
   push:
     tags: ["v*"]
     branches: ["main"]
-    paths: ["core/**", "apps/ios/**", ".github/workflows/ios.yml"]
+    # An app build is republished only when the app or the core changed. Test sources cannot move
+    # the binary, and replacing the published IPA would leave it out of step with the update manifest.
+    paths: ["core/**", "apps/ios/**", ".github/workflows/ios.yml", "!core/tests/**"]
   workflow_dispatch:
     inputs:
       run_tests:
