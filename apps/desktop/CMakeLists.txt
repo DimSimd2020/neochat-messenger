@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NeoChat VERSION 0.7.3 LANGUAGES CXX)
+project(NeoChat VERSION 0.7.3.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ add_library(neochat_ui STATIC
     src/email.cpp src/email.h
     src/chatlist.cpp src/chatlist.h
     src/messages.cpp src/messages.h
+    src/spoiler.cpp src/spoiler.h
     src/composer.cpp src/composer.h
     src/emoji.cpp src/emoji.h
     src/mathtext.cpp src/mathtext.h
@@ -136,6 +137,9 @@ add_executable(neochat_mediatest tests/mediatest.cpp)
 target_link_libraries(neochat_mediatest PRIVATE neochat_ui)
 add_executable(neochat_bubbletest tests/bubbletest.cpp)
 target_link_libraries(neochat_bubbletest PRIVATE neochat_ui)
+# Hidden media and the farewell of a deleted message, rendered offscreen (no server needed).
+add_executable(neochat_spoilertest tests/spoilertest.cpp)
+target_link_libraries(neochat_spoilertest PRIVATE neochat_ui)
 
 install(TARGETS neochat neocall RUNTIME DESTINATION .)
 if(SHERPA_DLLS)

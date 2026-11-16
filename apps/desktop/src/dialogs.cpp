@@ -1270,7 +1270,7 @@ void conversationPhotos(const DialogHost &h, const QJsonArray &photos, const QJs
         auto *grid = new MediaGrid;
         for (const auto &value : photos) {
             const QJsonObject m = value.toObject();
-            auto *tile = new MediaTile(ImageCache::instance()->thumb(m));
+            auto *tile = new MediaTile(ImageCache::instance()->poster(m));
             if (m.value("id").toString() == currentId)
                 tile->setAccessibleName(QStringLiteral("Текущее фото"));
             QObject::connect(tile, &QAbstractButton::clicked, sheet, [open, m] { open(m); });
@@ -1785,7 +1785,7 @@ void sendAttachments(const DialogHost &h, const QStringList &initial, bool asPho
     auto paths = std::make_shared<QStringList>(initial);
     auto *preview = new AttachPreview;
     auto *asFile = new ui::Toggle(QStringLiteral("Отправить как файл"));
-    auto *spoiler = new ui::Toggle(QStringLiteral("Скрыть до нажатия"));
+    auto *spoiler = new ui::Toggle(QStringLiteral("Скрыто"));
     auto *once = new ui::Toggle(QStringLiteral("Просмотреть один раз"));
     auto *caption = new ui::TextField(QStringLiteral("Подпись"));
     caption->edit()->setMaxLength(1000);

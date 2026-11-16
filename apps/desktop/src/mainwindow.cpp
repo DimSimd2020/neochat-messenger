@@ -531,7 +531,7 @@ private:
     static QString preview(const QJsonObject &m, int max)
     {
         const QString kind = m.value("kind").toString();
-        QString t = m.value("text").toString().simplified();
+        QString t = messageQuote(m).simplified();
         if (kind == "file") {
             const QJsonObject f = m.value("file").toObject();
             t = (f.value("image").toBool() ? QStringLiteral("Фото") : f.value("video").toBool() ? QStringLiteral("Видео") : QStringLiteral("Файл ") + f.value("name").toString()) + (t.isEmpty() ? QString() : ": " + t);

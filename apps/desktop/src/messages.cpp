@@ -62,6 +62,8 @@ qint64 clockMs()
 }
 
 constexpr qreal kAppearMs = 220;
+constexpr qreal kGoneMs = 420;    // a deleted message dissolving and closing under itself
+constexpr qreal kRevealMs = 460;  // a cover opening or closing
 constexpr qreal kPadH = 15;
 constexpr qreal kPadTop = 9;
 constexpr qreal kPadBottom = 7;
@@ -208,17 +210,31 @@ bool isSpoiler(const QJsonObject &m)
     return m.value("kind").toString() == "file" && m.value("file").toObject().value("spoiler").toBool();
 }
 
-// Shrinking a picture to a few dozen pixels and stretching it back is the cheapest blur there is,
-// and it never lets the reader see what is under a spoiler.
-QPixmap blurPoster(const QPixmap &px)
+// The sender's mark itself, open or closed here: such a picture always carries a cover.
+bool isHiddenMedia(const QJsonObject &m)
 {
-    if (px.isNull())
-        return {};
-    const qreal k = 24.0 / qMax(1, qMax(px.width(), px.height()));
-    // The name "small" is a macro in the Windows headers, so this is `tiny`.
-    const QSize tiny(qMax(1, int(px.width() * k)), qMax(1, int(px.height() * k)));
-    return px.scaled(tiny, Qt::IgnoreAspectRatio, Qt::FastTransformation)
-        .scaled(px.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    return m.value("kind").toString() == "file" && m.value("file").toObject().value("hidden").toBool();
+}
+
+bool hasHiddenText(const QJsonObject &m)
+{
+    for (const auto &v : m.value("spans").toArray())
+        if (v.toObject().value("spoiler").toBool())
+            return true;
+    return false;
+}
+
+// What a screen reader is told instead of the hidden words.
+QString spokenText(const QJsonObject &m)
+{
+    if (!hasHiddenText(m))
+        return messageText(m);
+    QString out;
+    for (const auto &v : m.value("spans").toArray()) {
+        const QJsonObject s = v.toObject();
+        out += s.value("spoiler").toBool() ? QStringLiteral("скрытый текст") : s.value("text").toString();
+    }
+    return out;
 }
 
 QFont transcriptFont()
@@ -249,23 +265,34 @@ QString votesText(int n)
     return QString::number(n) + " " + QString::fromUtf8(word);
 }
 
-// Rich text of a message built from the core's markdown spans; cached per text and font.
-QTextDocument *textDoc(const QJsonObject &m)
+// Rich text of a message built from the core's markdown spans, with the places of its hidden
+// runs; cached per text and font.
+struct Rich {
+    QTextDocument *doc = nullptr;
+    QList<QPair<int, int>> hidden;
+};
+
+Rich *rich(const QJsonObject &m)
 {
-    static QHash<QString, QTextDocument *> cache;
+    static QHash<QString, Rich *> cache;
     const QFont font = textFont();
     const bool out = m.value("outgoing").toBool();
     // Outgoing bubbles are blue, the same family as the accent, so the tag color is part of the cache key.
     const QString key = m.value("id").toString() + '|' + font.family() + '|' + QString::number(font.pointSizeF()) + '|'
         + messageText(m) + (out ? QStringLiteral("|out") : QStringLiteral("|in"))
         + Theme::p().accent.name() + (Theme::instance()->isDark() ? QStringLiteral("|d") : QStringLiteral("|l"));
-    if (QTextDocument *d = cache.value(key))
-        return d;
+    if (Rich *r = cache.value(key))
+        return r;
     if (cache.size() > 3000) {
-        qDeleteAll(cache);
+        for (Rich *r : cache) {
+            delete r->doc;
+            delete r;
+        }
         cache.clear();
     }
+    auto *r = new Rich;
     auto *d = new QTextDocument;
+    r->doc = d;
     d->setDocumentMargin(0);
     d->setDefaultFont(font);
     QTextOption o;
@@ -325,14 +352,22 @@ QTextDocument *textDoc(const QJsonObject &m)
             cur.setCharFormat({});
             continue;
         }
+        const int at = cur.position();
         cur.insertText(t, f);
+        if (s.value("spoiler").toBool())
+            r->hidden << qMakePair(int(at), int(cur.position()));
     }
     // Drop the empty line a trailing code block leaves behind.
     if (cur.block().text().isEmpty() && cur.block().previous().isValid()) {
         cur.deletePreviousChar();
     }
-    cache.insert(key, d);
-    return d;
+    cache.insert(key, r);
+    return r;
+}
+
+QTextDocument *textDoc(const QJsonObject &m)
+{
+    return rich(m)->doc;
 }
 
 // Floating pill with bulk actions while several messages are checked.
@@ -591,6 +626,18 @@ SecureViewer *secureViewer(QWidget *host, const QJsonObject &m, MessageView *rep
 
 } // namespace
 
+QString messageQuote(const QJsonObject &m)
+{
+    if (!hasHiddenText(m))
+        return messageText(m);
+    QString out;
+    for (const auto &v : m.value("spans").toArray()) {
+        const QJsonObject s = v.toObject();
+        out += s.value("spoiler").toBool() ? QStringLiteral("███") : s.value("text").toString();
+    }
+    return out;
+}
+
 bool showPhotoFile(QWidget *host, const QString &path, std::function<void(PopupMenu *)> actions)
 {
     if (!host)
@@ -612,18 +659,32 @@ ImageCache *ImageCache::instance()
 
 QPixmap ImageCache::thumb(const QJsonObject &m)
 {
-    // The poster of a spoiler is cached already blurred and under a key of its own: once the user
-    // opens it, the plain key is asked for and the sharp poster is decoded again.
-    const QString id = m.value("id").toString() + (isSpoiler(m) ? QStringLiteral("#blur") : QString());
+    const QString id = m.value("id").toString();
     auto it = m_thumbs.find(id);
     if (it != m_thumbs.end())
         return *it;
     QPixmap px;
     px.loadFromData(QByteArray::fromBase64(m.value("file").toObject().value("thumb").toString().toLatin1()));
-    if (isSpoiler(m))
-        px = blurPoster(px);
     m_thumbs.insert(id, px);
     return px;
+}
+
+QPixmap ImageCache::blur(const QJsonObject &m, int level)
+{
+    static const int sides[3] = {12, 26, 56};
+    const QString key = m.value("id").toString() + QStringLiteral("#b") + QString::number(level);
+    auto it = m_blur.find(key);
+    if (it != m_blur.end())
+        return *it;
+    // The poster is enough: while the picture is closed nothing sharper is asked for.
+    const QPixmap px = spoiler::defocus(thumb(m), sides[qBound(0, level, 2)]);
+    m_blur.insert(key, px);
+    return px;
+}
+
+QPixmap ImageCache::poster(const QJsonObject &m)
+{
+    return isSpoiler(m) ? blur(m, 0) : thumb(m);
 }
 
 QPixmap ImageCache::full(const QJsonObject &m)
@@ -683,7 +744,7 @@ QVariant MessageModel::data(const QModelIndex &index, int role) const
             s += QStringLiteral("файл ") + m.value("file").toObject().value("name").toString() + ". ";
         else if (m.value("kind").toString() == "poll")
             s += QStringLiteral("опрос. ");
-        s += messageText(m);
+        s += spokenText(m);
         if (bool has = false; isVoice(m) || isCircle(m)) {
             const QString t = transcriptOf(m, &has);
             if (has && !t.isEmpty())
@@ -709,6 +770,7 @@ void MessageModel::clear()
     m_items.clear();
     m_appear.clear();
     m_react.clear();
+    m_gone.clear();
     endResetModel();
 }
 
@@ -725,9 +787,20 @@ QStringList MessageModel::merge(const QList<QJsonObject> &page, bool animateNew,
         for (const auto &m : page)
             ids.insert(m.value("id").toString());
         const qint64 oldest = page.isEmpty() ? 0 : qint64(page.first().value("local_id").toDouble());
-        m_messages.removeIf([&](const QJsonObject &m) {
-            return qint64(m.value("local_id").toDouble()) >= oldest && !ids.contains(m.value("id").toString());
-        });
+        // A message that disappeared stays for the length of its farewell, then leaves for good.
+        QList<QJsonObject> keep;
+        for (const auto &m : m_messages) {
+            const QString id = m.value("id").toString();
+            const bool dropped = qint64(m.value("local_id").toDouble()) >= oldest && !ids.contains(id);
+            if (!dropped) {
+                keep << m;
+            } else if (Theme::ms(int(kGoneMs)) > 0) {
+                if (!m_gone.contains(id))
+                    m_gone.insert(id, clockMs());
+                keep << m;
+            }
+        }
+        m_messages = keep;
     }
     QHash<QString, int> pos;
     for (int i = 0; i < m_messages.size(); ++i)
@@ -761,7 +834,26 @@ void MessageModel::setFlat(const QList<QJsonObject> &list)
     std::sort(m_messages.begin(), m_messages.end(),
               [](const QJsonObject &a, const QJsonObject &b) { return a.value("local_id").toDouble() < b.value("local_id").toDouble(); });
     m_appear.clear();
+    m_gone.clear();
     rebuild();
+}
+
+bool MessageModel::finishGone()
+{
+    if (m_gone.isEmpty())
+        return false;
+    const qint64 now = clockMs();
+    QStringList done;
+    for (auto it = m_gone.constBegin(); it != m_gone.constEnd(); ++it)
+        if (now - it.value() >= kGoneMs)
+            done << it.key();
+    if (done.isEmpty())
+        return false;
+    for (const QString &id : done)
+        m_gone.remove(id);
+    m_messages.removeIf([&](const QJsonObject &m) { return done.contains(m.value("id").toString()); });
+    rebuild();
+    return true;
 }
 
 void MessageModel::rebuild()
@@ -783,6 +875,7 @@ void MessageModel::rebuild()
         it.msg = m;
         it.appearAt = m_appear.value(m.value("id").toString(), -1);
         it.reactAt = m_react.value(m.value("id").toString(), -1);
+        it.goneAt = m_gone.value(m.value("id").toString(), -1);
         if (!flat && !m_items.isEmpty() && !m_items.last().isDate && m_items.last().msg.value("kind") != "service" && m.value("kind") != "service") {
             const QJsonObject &prev = m_items.last().msg;
             const bool same = prev.value("sender_user_id") == m.value("sender_user_id") && prev.value("outgoing") == m.value("outgoing") &&
@@ -994,7 +1087,13 @@ QSize MessageDelegate::sizeHint(const QStyleOptionViewItem &opt, const QModelInd
     const auto *it = static_cast<const MessageItem *>(index.data(MessageModel::ItemRole).value<const void *>());
     const auto *model = static_cast<const MessageModel *>(index.model());
     const qreal width = opt.widget ? static_cast<const QListView *>(opt.widget)->viewport()->width() : opt.rect.width();
-    return {int(width), int(std::ceil(layout(*it, width, model->group && !model->flat).height))};
+    qreal h = layout(*it, width, model->group && !model->flat).height;
+    // A row on its way out closes under itself, so the history slides together instead of jumping.
+    if (it->goneAt >= 0) {
+        const qreal t = qBound(0.0, (clockMs() - it->goneAt) / kGoneMs, 1.0);
+        h *= 1 - Theme::surfaceEasing().valueForProgress(qBound(0.0, (t - 0.35) / 0.65, 1.0));
+    }
+    return {int(width), int(std::ceil(h))};
 }
 
 void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &index) const
@@ -1057,6 +1156,18 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
             p->scale(0.985 + 0.015 * e, 0.985 + 0.015 * e);
             p->translate(-anchor);
         }
+    }
+
+    // The farewell of a deleted message: it fades, drifts to its own side and shrinks a little.
+    qreal goneT = -1;
+    if (it->goneAt >= 0) {
+        goneT = qBound(0.0, (clockMs() - it->goneAt) / kGoneMs, 1.0);
+        const qreal fade = qBound(0.0, goneT / 0.5, 1.0);
+        p->setOpacity(1 - fade);
+        p->translate((out ? 1 : -1) * 24 * fade, 0);
+        p->translate(L.bubble.center());
+        p->scale(1 - 0.1 * fade, 1 - 0.1 * fade);
+        p->translate(-L.bubble.center());
     }
 
     if (!L.name.isNull()) {
@@ -1284,41 +1395,52 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
 
     if (!L.image.isNull()) {
         // A video shows only its first frame; the file itself is fetched when it is played.
-        // A view-once file shows nothing of itself, a spoiler only a blur.
-        const bool once = isOnce(m), seen = isViewed(m), spoiler = isSpoiler(m);
+        // A view-once file shows nothing of itself; a hidden one lies under a cover of defocus and dust.
+        const bool once = isOnce(m), seen = isViewed(m);
+        const bool hidden = isHiddenMedia(m), closed = isSpoiler(m);
+        const QString id = m.value("id").toString();
+        const qreal reveal = view ? view->revealOf(id, closed) : (closed ? 0.0 : 1.0);
         QPixmap px;
         if (!once) {
             px = isVideo(m) ? QPixmap() : ImageCache::instance()->full(m);
-            if (px.isNull()) {
-                // The poster of a spoiler comes back from the cache already blurred.
+            if (px.isNull())
                 px = ImageCache::instance()->thumb(m);
-            } else if (spoiler) {
-                px = blurPoster(px);
-            }
         }
         p->save();
         QPainterPath clip;
         clip.addRoundedRect(L.image, 14, 14);
         p->setClipPath(clip);
         p->fillRect(L.image, once ? QColor(16, 23, 34) : c.selected);
-        if (!px.isNull()) {
+        auto cover = [&](const QPixmap &src, const QRectF &dst) {
+            if (src.isNull())
+                return;
             // Cover the frame, cropping the overflow evenly.
             p->setRenderHint(QPainter::SmoothPixmapTransform);
-            const qreal k = qMax(L.image.width() / px.width(), L.image.height() / px.height());
-            const QSizeF src = L.image.size() / k;
-            p->drawPixmap(L.image, px, QRectF(QPointF((px.width() - src.width()) / 2, (px.height() - src.height()) / 2), src));
-        }
-        // A pill so the reader knows there is a picture under the blur.
-        if (spoiler && !once) {
-            p->setRenderHint(QPainter::Antialiasing);
-            p->setFont(Theme::instance()->font(12, QFont::DemiBold));
-            const QString label = QStringLiteral("Скрыто");
-            const QRectF pill(L.image.left() + 10, L.image.bottom() - 32, QFontMetricsF(p->font()).horizontalAdvance(label) + 16, 22);
-            p->setPen(Qt::NoPen);
-            p->setBrush(QColor(0, 0, 0, 150));
-            p->drawRoundedRect(pill, 11, 11);
-            p->setPen(Qt::white);
-            p->drawText(pill, Qt::AlignCenter, label);
+            const qreal k = qMax(dst.width() / src.width(), dst.height() / src.height());
+            const QSizeF part = dst.size() / k;
+            p->drawPixmap(dst, src, QRectF(QPointF((src.width() - part.width()) / 2, (src.height() - part.height()) / 2), part));
+        };
+        cover(px, L.image);
+        if (hidden && !once) {
+            // Three steps of defocus lie over the sharp frame and melt away one after another.
+            // Their alpha multiplies the row's own: a leaving or arriving row fades as a whole.
+            const qreal base = p->opacity();
+            const qreal depth = (1 - reveal) * 3;
+            const qreal zoom = 1 + 0.05 * (1 - reveal);
+            const QSizeF big = L.image.size() * zoom;
+            const QRectF dst(L.image.center() - QPointF(big.width() / 2, big.height() / 2), big);
+            for (int i = 2; i >= 0; --i) {
+                const qreal a = qBound(0.0, depth - (2 - i), 1.0);
+                if (a <= 0.004)
+                    continue;
+                p->save();
+                p->setOpacity(base * a);
+                cover(ImageCache::instance()->blur(m, i), dst);
+                p->restore();
+            }
+            p->fillRect(L.image, QColor(5, 7, 12, int(52 * (1 - reveal))));
+            spoiler::dust(*p, L.image, quint32(qHash(id)), 1 - reveal, reveal);
+            spoiler::sweep(*p, L.image, reveal);
         }
         if (once) {
             const QPointF mid = L.image.center();            p->setRenderHint(QPainter::Antialiasing);
@@ -1335,6 +1457,10 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
             p->setFont(Theme::instance()->font(12.5));
             p->drawText(QRectF(L.image.left(), mid.y() + 26, L.image.width(), 20), Qt::AlignHCenter, line);
         } else if (isVideo(m)) {
+            // The play mark and the length belong to the picture: they come out with it.
+            p->save();
+            if (hidden)
+                p->setOpacity(p->opacity() * reveal);
             const QPointF mid = L.image.center();
             p->setRenderHint(QPainter::Antialiasing);
             p->setPen(Qt::NoPen);
@@ -1352,6 +1478,7 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
                 p->setPen(Qt::white);
                 p->drawText(pill, Qt::AlignCenter, length);
             }
+            p->restore();
         }
         p->restore();
     }
@@ -1459,6 +1586,17 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         p->translate(L.text.topLeft());
         d->documentLayout()->draw(p, ctx);
         p->restore();
+        // Hidden runs lie under a block of dust until the reader opens them.
+        const QList<QPair<int, int>> &runs = rich(m)->hidden;
+        if (!runs.isEmpty() && view) {
+            const qreal rv = view->textRevealOf(m.value("id").toString());
+            if (rv < 1) {
+                const QColor plate = spoiler::plate(out ? c.outgoing : c.raised, Theme::instance()->isDark(), out);
+                const quint32 seed = quint32(qHash(m.value("id").toString()));
+                for (const QRectF &r : spoiler::rects(d, runs))
+                    spoiler::textCover(*p, r.translated(L.text.topLeft()).adjusted(-1.5, 1, 1.5, -1), 6, plate, 1 - rv, rv, seed + quint32(qAbs(int(r.top()))));
+            }
+        }
     }
 
     const QJsonArray reacts = m.value("reactions").toArray();
@@ -1526,6 +1664,9 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         if (checked)
             ui::paintIcon(p, cr.adjusted(5, 5, -5, -5), "tick", c.onAccent, 2.2);
     }
+    // A deleted message dissolves into dust on its way out.
+    if (goneT >= 0 && goneT < 1)
+        spoiler::dust(*p, L.bubble, quint32(qHash(m.value("id").toString())), (1 - goneT) * 0.85, goneT, 0.6);
     p->restore();
 }
 
@@ -1552,7 +1693,6 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
     connect(Transcriber::instance(), &Transcriber::notice, this, &MessageView::toast);
     m_anim.setInterval(16);
     connect(&m_anim, &QTimer::timeout, this, [this] {
-        viewport()->update();
         bool running = false;
         const qint64 now = clockMs();
         for (int i = 0; i < m_model->rowCount(); ++i) {
@@ -1560,12 +1700,27 @@ MessageView::MessageView(QWidget *parent) : QListView(parent)
             if ((it.appearAt >= 0 && now - it.appearAt < kAppearMs) || (it.reactAt >= 0 && now - it.reactAt < 180))
                 running = true;
         }
+        // A row closing under itself changes the height of the list: lay it out again each frame.
+        if (m_model->anyGone()) {
+            const bool bottom = atBottom();
+            const int distance = verticalScrollBar()->maximum() - verticalScrollBar()->value();
+            m_model->finishGone();
+            doItemsLayout();
+            if (bottom)
+                scrollToBottom();
+            else
+                restoreBottomDistance(distance);
+            running = true;
+        }
+        if (liveCover())
+            running = true;
         if (!m_flashId.isEmpty()) {
             if (now - m_flashAt < 1600)
                 running = true;
             else
                 m_flashId.clear();
         }
+        viewport()->update();
         if (!running)
             m_anim.stop();
     });
@@ -1624,9 +1779,13 @@ bool MessageView::atBottom() const
 void MessageView::setConversation(const QString &id, bool group)
 {
     exitCheckMode();
-    // Leaving a chat is the last chance for a view-once file that was opened here but never burned.
+    // Leaving a chat is the last chance for a view-once file that was opened here but never burned,
+    // and it closes every hidden picture and hidden text of that chat again.
     if (!m_conv.isEmpty() && m_conv != id)
         Core::instance()->call("burn_viewed", {{"conversation_id", m_conv}}, this, [](const QJsonValue &, const CoreError &) {});
+    m_reveal.clear();
+    m_textReveal.clear();
+    m_openText.clear();
     m_conv = id;
     m_hasMore = true;
     m_searching = false;
@@ -1715,6 +1874,97 @@ qreal MessageView::flashOf(const QString &id) const
     return t >= 1 ? 0 : (t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85);
 }
 
+qreal MessageView::revealOf(const QString &id, bool closed) const
+{
+    auto it = m_reveal.constFind(id);
+    if (it == m_reveal.constEnd())
+        return closed ? 0 : 1;
+    return it->value(Theme::ms(int(kRevealMs)));
+}
+
+qreal MessageView::textRevealOf(const QString &id) const
+{
+    auto it = m_textReveal.constFind(id);
+    if (it == m_textReveal.constEnd())
+        return m_openText.contains(id) ? 1 : 0;
+    return it->value(Theme::ms(int(kRevealMs)));
+}
+
+void MessageView::toggleHidden(const QJsonObject &m)
+{
+    const QString id = m.value("id").toString();
+    const bool closed = isSpoiler(m);
+    const int ms = Theme::ms(int(kRevealMs));
+    // The cover moves at once; the core writes the mark and the refresh carries the motion on.
+    m_reveal[id].start(closed ? 1 : 0, ms);
+    m_anim.start();
+    viewport()->update();
+    Core::instance()->call("media_shown", {{"message_id", id}, {"on", closed}}, this, [this, id, closed, ms](const QJsonValue &, const CoreError &e) {
+        if (e.ok())
+            return;
+        emit toast(e.message);
+        m_reveal[id].start(closed ? 0 : 1, ms);
+        m_anim.start();
+        viewport()->update();
+    });
+}
+
+void MessageView::toggleText(const QJsonObject &m)
+{
+    const QString id = m.value("id").toString();
+    const bool open = m_openText.contains(id);
+    if (open)
+        m_openText.remove(id);
+    else
+        m_openText.insert(id);
+    m_textReveal[id].start(open ? 0 : 1, Theme::ms(int(kRevealMs)));
+    m_anim.start();
+    viewport()->update();
+}
+
+bool MessageView::liveCover() const
+{
+    if (Theme::ms(int(kRevealMs)) == 0)
+        return false; // reduced motion: the dust stands still and covers jump
+    const int ms = Theme::ms(int(kRevealMs));
+    for (int i = 0; i < m_model->rowCount(); ++i) {
+        const MessageItem &it = m_model->item(i);
+        if (it.isDate)
+            continue;
+        const QJsonObject &m = it.msg;
+        const QString id = m.value("id").toString();
+        if (isHiddenMedia(m)) {
+            if (isSpoiler(m))
+                return true;
+            auto r = m_reveal.constFind(id);
+            if (r != m_reveal.constEnd() && r->moving(ms))
+                return true;
+        }
+        if (hasHiddenText(m)) {
+            if (!m_openText.contains(id))
+                return true;
+            auto r = m_textReveal.constFind(id);
+            if (r != m_textReveal.constEnd() && r->moving(ms))
+                return true;
+        }
+    }
+    return false;
+}
+
+bool MessageView::spoilerTextAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const
+{
+    if (L.text.isNull() || !L.text.contains(pos))
+        return false;
+    const QList<QPair<int, int>> &runs = rich(m)->hidden;
+    if (runs.isEmpty())
+        return false;
+    const QPointF local = QPointF(pos) - L.text.topLeft();
+    for (const QRectF &r : spoiler::rects(textDoc(m), runs))
+        if (r.adjusted(-2, 0, 2, 0).contains(local))
+            return true;
+    return false;
+}
+
 void MessageView::applyPage(const QList<QJsonObject> &page, bool older)
 {
     const bool first = m_model->messageCount() == 0;
@@ -1751,7 +2001,7 @@ void MessageView::applyPage(const QList<QJsonObject> &page, bool older)
                 fresh = true;
                 break;
             }
-    if (fresh)
+    if (fresh || m_model->anyGone() || liveCover())
         m_anim.start();
     if (atBottom())
         emit readable();
@@ -2011,7 +2261,8 @@ void MessageView::mousePressEvent(QMouseEvent *e)
     if (e->button() == Qt::LeftButton) {
         MessageLayout L;
         const QJsonObject m = messageAt(e->pos(), &L);
-        if (!m.isEmpty() && !L.big && L.options.isEmpty() && !L.text.isNull() && L.text.contains(e->pos()) && linkAt(m, L, e->pos()).isEmpty()) {
+        if (!m.isEmpty() && !L.big && L.options.isEmpty() && !L.text.isNull() && L.text.contains(e->pos()) && linkAt(m, L, e->pos()).isEmpty() &&
+            !spoilerTextAt(m, L, e->pos())) {
             m_selIndex = QPersistentModelIndex(indexAt(e->pos()));
             m_selPress = e->pos();
             m_selDragging = true;
@@ -2080,8 +2331,17 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
             openFile(m);
         else if (L.retry.contains(e->pos()))
             retry(m);
-        else if (L.image.contains(e->pos()))
-            isVideo(m) ? openFile(m) : openImage(m);
+        else if (L.image.contains(e->pos())) {
+            // A hidden picture opens and closes right here; anything else goes to the viewer.
+            if (isViewed(m))
+                emit toast(m.value("file").toObject().value("shot").toBool() ? QStringLiteral("Скриншот сделан · Просмотрено") : QStringLiteral("Просмотрено"));
+            else if (isHiddenMedia(m))
+                toggleHidden(m);
+            else if (isVideo(m))
+                openFile(m);
+            else
+                openImage(m);
+        }
         else if (L.play.contains(e->pos()) || L.circle.contains(e->pos()))
             Playback::instance()->toggle(m);
         else if (L.wave.contains(e->pos())) {
@@ -2095,6 +2355,8 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
             Playback::instance()->cycleSpeed();
         else if (L.transBtn.contains(e->pos()))
             Transcriber::instance()->request(m, this);
+        else if (spoilerTextAt(m, L, e->pos()))
+            toggleText(m);
         else if (link.startsWith(QStringLiteral("mention:")))
             openMention(link.mid(8));
         else if (!link.isEmpty())
@@ -2118,7 +2380,8 @@ void MessageView::mouseDoubleClickEvent(QMouseEvent *e)
         return;
     // Buttons, links, photos and poll answers keep their own clicks.
     bool control = L.download.contains(e->pos()) || L.retry.contains(e->pos()) || L.image.contains(e->pos()) || L.play.contains(e->pos()) ||
-                   L.wave.contains(e->pos()) || L.circle.contains(e->pos()) || L.speed.contains(e->pos()) || L.transBtn.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty();
+                   L.wave.contains(e->pos()) || L.circle.contains(e->pos()) || L.speed.contains(e->pos()) || L.transBtn.contains(e->pos()) || !linkAt(m, L, e->pos()).isEmpty() ||
+                   spoilerTextAt(m, L, e->pos());
     for (const QRectF &r : L.options)
         control = control || r.contains(e->pos());
     for (const QRectF &r : L.reacts)
@@ -2206,6 +2469,9 @@ void MessageView::openImage(const QJsonObject &m)
 {
     if (isViewed(m))
         return emit toast(QStringLiteral("Просмотрено"));
+    // The menu's way in: a hidden picture is opened here first and then shown full window.
+    if (isHiddenMedia(m) && isSpoiler(m))
+        toggleHidden(m);
     const QString id = m.value("id").toString();
     Core::instance()->call("download_file", {{"message_id", id}}, this, [this, m, id](const QJsonValue &v, const CoreError &e) {
         if (!e.ok())
@@ -2218,9 +2484,6 @@ void MessageView::openImage(const QJsonObject &m)
             secureViewer(this, m, this)->setPhoto(img);
             return;
         }
-        // Opening a spoiler is a mark of this device; the picture itself is already downloaded.
-        if (isSpoiler(m))
-            Core::instance()->call("media_shown", {{"message_id", id}}, this, [](const QJsonValue &, const CoreError &) {});
         new PhotoViewer(window(), img, [this, m, img](PopupMenu *menu) { viewerActions(menu, m, img); });
     });
 }
@@ -2235,12 +2498,13 @@ void MessageView::viewerActions(PopupMenu *menu, const QJsonObject &m, const QIm
 }
 
 // The photo messages loaded so far, oldest first: the album the open picture came from.
+// A picture still under its cover never joins it.
 QJsonArray MessageView::conversationPhotos() const
 {
     QJsonArray photos;
     for (int i = 0; i < m_model->rowCount(); ++i) {
         const MessageItem &it = m_model->item(i);
-        if (!it.isDate && isImage(it.msg) && !isOnce(it.msg))
+        if (!it.isDate && isImage(it.msg) && !isOnce(it.msg) && !(isHiddenMedia(it.msg) && isSpoiler(it.msg)))
             photos.append(it.msg);
     }
     return photos;

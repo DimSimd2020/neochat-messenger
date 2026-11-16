@@ -56,7 +56,7 @@ class AttachSheet(
     private val sheet = Sheet(act, "")
     private val previewBox = FrameLayout(act)
     private val asFile = ToggleRow(act, "Отправить как файл")
-    private val spoiler = ToggleRow(act, "Скрыть до нажатия")
+    private val spoiler = ToggleRow(act, "Скрыто")
     private val once = ToggleRow(act, "Просмотреть один раз")
     private val caption = FloatingField(act, "Подпись")
     private var token = 0

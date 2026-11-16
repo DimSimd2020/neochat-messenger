@@ -7,9 +7,11 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.view.Choreographer
 import android.widget.ImageView
 
 /** What a video message carries besides the file: its first frame, the picture size and the length. */
@@ -85,12 +87,82 @@ class PosterView(ctx: Context) : ImageView(ctx) {
             field = v
             invalidate()
         }
-    /** The line on the cover or over a blurred picture: "Фото", "Просмотрено", "Скрыто". */
+    /** The line on the cover of a view-once file: "Фото", "Просмотрено". */
     var note = ""
         set(v) {
             field = v
             invalidate()
         }
+
+    /**
+     * The sender hid this picture. Three steps of defocus lie over the sharp frame and the dust
+     * of [SpoilerFx] drifts on top; [reveal] moves the whole cover away and back.
+     */
+    var hidden = false
+        set(v) {
+            field = v
+            restart()
+            invalidate()
+        }
+    var blur: List<Bitmap>? = null
+    var seed = 0
+    var onReveal: ((Float) -> Unit)? = null
+    var reveal = 0f
+        private set
+
+    private val spring = Spring(0.5f, 0.86f, 0.0015f) {
+        reveal = it
+        onReveal?.invoke(it)
+        restart()
+        invalidate()
+    }
+    private val cover = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
+    private val box = RectF()
+    private var ticking = false
+    private val frames = object : Choreographer.FrameCallback {
+        override fun doFrame(now: Long) {
+            if (!ticking) return
+            invalidate()
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    /** Takes the stored motion of this message and carries it on to where the message is now. */
+    fun bindReveal(start: Float, target: Float) {
+        if (spring.running && spring.target == target) {
+            restart()
+            return
+        }
+        spring.snap(start)
+        if (start != target) spring.to(target)
+        restart()
+    }
+
+    fun revealTo(target: Float) {
+        spring.to(target)
+        restart()
+    }
+
+    private fun restart() {
+        val want = hidden && reveal < 0.999f && isAttachedToWindow && !Theme.reducedMotion
+        if (want == ticking) return
+        ticking = want
+        if (want) Choreographer.getInstance().postFrameCallback(frames)
+        else Choreographer.getInstance().removeFrameCallback(frames)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        restart()
+    }
+
+    override fun onDetachedFromWindow() {
+        ticking = false
+        Choreographer.getInstance().removeFrameCallback(frames)
+        spring.stop()
+        super.onDetachedFromWindow()
+    }
+
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val label = Paint(Paint.ANTI_ALIAS_FLAG)
     private val triangle = Path()
@@ -106,14 +178,20 @@ class PosterView(ctx: Context) : ImageView(ctx) {
             drawCover(c)
             return
         }
-        if (note.isNotEmpty()) drawNote(c)
-        if (!video) return
         val d = resources.displayMetrics.density
+        if (hidden) drawHidden(c, d)
+        if (note.isNotEmpty() && !hidden) drawNote(c)
+        if (!video) return
+        // The play mark and the length belong to the picture: they come out with it.
+        val vis = if (hidden) reveal else 1f
+        if (vis <= 0.02f) return
         val cx = width / 2f
         val cy = height / 2f
         fill.color = 0x99000000.toInt()
+        fill.alpha = (fill.alpha * vis).toInt()
         c.drawCircle(cx, cy, 26 * d, fill)
         fill.color = Color.WHITE
+        fill.alpha = (255 * vis).toInt()
         triangle.rewind()
         triangle.moveTo(cx - 8 * d, cy - 12 * d)
         triangle.lineTo(cx + 13 * d, cy)
@@ -122,12 +200,43 @@ class PosterView(ctx: Context) : ImageView(ctx) {
         c.drawPath(triangle, fill)
         if (length.isEmpty()) return
         label.textSize = 12 * d
+        label.alpha = (255 * vis).toInt()
         val w = label.measureText(length)
         val left = 10 * d
         val top = 10 * d
         fill.color = 0x99000000.toInt()
+        fill.alpha = (fill.alpha * vis).toInt()
         c.drawRoundRect(left, top, left + w + 16 * d, top + 22 * d, 11 * d, 11 * d, fill)
         c.drawText(length, left + 8 * d, top + 22 * d / 2 + (label.descent() - label.ascent()) / 2 - label.descent(), label)
+    }
+
+    /** The defocus ladder, the dust and the light that crosses while the picture opens. */
+    private fun drawHidden(c: Canvas, d: Float) {
+        box.set(0f, 0f, width.toFloat(), height.toFloat())
+        val p = reveal
+        val depth = (1f - p) * 3f
+        blur?.let { steps ->
+            for (i in 2 downTo 0) {
+                val a = (depth - (2 - i)).coerceIn(0f, 1f)
+                if (a <= 0.004f || i >= steps.size) continue
+                drawScaled(c, steps[i], 1f + 0.05f * (1f - p), (a * 255).toInt())
+            }
+        }
+        fill.color = 0xFF05070C.toInt()
+        fill.alpha = (52 * (1f - p)).toInt()
+        c.drawRect(box, fill)
+        SpoilerFx.dust(c, box, seed, 1f - p, p, d)
+        SpoilerFx.sweep(c, box, p)
+    }
+
+    /** One step of the blur, cropped like the picture itself and slightly larger while closed. */
+    private fun drawScaled(c: Canvas, b: Bitmap, zoom: Float, alpha: Int) {
+        if (b.isRecycled || alpha <= 0) return
+        val k = maxOf(width.toFloat() / b.width, height.toFloat() / b.height) * zoom
+        val w = b.width * k
+        val h = b.height * k
+        cover.alpha = alpha
+        c.drawBitmap(b, null, RectF((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2), cover)
     }
 
     /** The face of a view-once file: a dark plate, a round "1" and what became of it. */
@@ -148,7 +257,7 @@ class PosterView(ctx: Context) : ImageView(ctx) {
         c.drawText(note, cx - label.measureText(note) / 2, cy + 20 * d, label)
     }
 
-    /** A short line in a corner over a blurred picture. */
+    /** A short line in a corner over the picture. */
     private fun drawNote(c: Canvas) {
         val d = resources.displayMetrics.density
         label.textSize = 12 * d

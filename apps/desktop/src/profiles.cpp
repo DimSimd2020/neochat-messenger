@@ -264,7 +264,7 @@ public:
             for(int i=0;i<items.size();++i) {
                 const auto m=items[i].toObject();
                 if(kind=="media") {
-                    auto *b=new MediaTile(ImageCache::instance()->thumb(m));grid->add(b);
+                    auto *b=new MediaTile(ImageCache::instance()->poster(m));grid->add(b);
                     QObject::connect(b,&QAbstractButton::clicked,this,[=]{Core::instance()->call("download_file",{{"message_id",m.value("id")}},this,[=](const QJsonValue &r,const CoreError &err){if(!err.ok())host.toast(err.message);else {const QString path=r.toObject().value("path").toString();if(m.value("file").toObject().value("video").toBool())showVideoFile(window(),path,m.value("file").toObject().value("name").toString());else if(!showPhotoFile(window(),path))host.toast(QStringLiteral("Не удалось открыть фото"));}});});
                 } else {
                     QString text=m.value("file").toObject().value("name").toString(); QString url;

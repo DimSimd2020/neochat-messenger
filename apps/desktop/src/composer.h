@@ -27,8 +27,17 @@ signals:
 
 protected:
     void keyPressEvent(QKeyEvent *e) override;
+    void contextMenuEvent(QContextMenuEvent *e) override;
     void insertFromMimeData(const QMimeData *source) override;
     bool canInsertFromMimeData(const QMimeData *source) const override;
+
+private:
+    // One formatting mark the selection can be wrapped in; the core parses every one of them.
+    struct Mark {
+        QString title, open, close;
+    };
+    static const QList<Mark> &marks();
+    void wrap(const Mark &mark);
 };
 
 // Message input: attach, text, emoji; the send arrow appears with the first

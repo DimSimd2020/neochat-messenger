@@ -894,14 +894,16 @@ impl Inner {
     }
 
     /// Opens a spoiler on this device only; the other devices of the account keep it closed.
+    /// `on: false` closes it again — a second tap hides the picture back.
     pub fn media_shown(&self, p: &Value) -> Result<Value> {
         let id = s(p, "message_id")?;
+        let on = p["on"].as_bool().unwrap_or(true);
         let conv = self.message_conv(id)?;
         let raw: Option<String> = self.db().conn.query_row("SELECT file FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten();
         if let Some(raw) = raw {
             let mut meta: FileMeta = serde_json::from_str(&raw)?;
-            if meta.spoiler == Some(true) && meta.shown != Some(true) {
-                meta.shown = Some(true);
+            if meta.spoiler == Some(true) && (meta.shown == Some(true)) != on {
+                meta.shown = on.then_some(true);
                 self.db().conn.execute("UPDATE messages SET file=?2 WHERE id=?1", params![id, serde_json::to_string(&meta)?])?;
                 self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
             }
@@ -937,7 +939,7 @@ impl Inner {
     }
 
     /// Called when the user leaves a chat: view-once files opened there lose their encrypted copy
-    /// as well, so nothing of them stays on this device.
+    /// as well, so nothing of them stays on this device, and every spoiler of the chat closes again.
     pub fn burn_viewed(&self, p: &Value) -> Result<Value> {
         let conv = s(p, "conversation_id")?;
         let ids: Vec<String> = {
@@ -951,7 +953,16 @@ impl Inner {
         for id in &ids {
             self.erase_media(id);
         }
-        Ok(json!({"burned": ids.len()}))
+        // A spoiler is opened for as long as the reader stays in the chat.
+        let closed = {
+            let db = self.db();
+            db.conn.execute(
+                "UPDATE messages SET file=json_remove(file,'$.shown')
+                 WHERE conversation_id=?1 AND kind='file' AND json_extract(file,'$.spoiler')=1 AND json_extract(file,'$.shown')=1",
+                [conv],
+            )?
+        };
+        Ok(json!({"burned": ids.len(), "closed": closed}))
     }
 
     /// A device switched off after a view-once file had been opened destroys its encrypted

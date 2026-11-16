@@ -1,5 +1,7 @@
 #pragma once
 
+#include "spoiler.h"
+
 #include <QAbstractListModel>
 #include <QDate>
 #include <QElapsedTimer>
@@ -28,6 +30,9 @@ QString quickReaction();
 void loadQuickReaction(QObject *ctx);
 QStringList quickReactionChoices();
 
+// The text of a message as it may be quoted elsewhere (a pin, a preview): hidden words are blocks.
+QString messageQuote(const QJsonObject &m);
+
 struct MessageItem {
     bool isDate = false;
     QDate date;
@@ -36,6 +41,7 @@ struct MessageItem {
     bool groupEnd = true;
     qint64 appearAt = -1; // ms on the shared clock; -1 = no entry animation
     qint64 reactAt = -1;  // reactions changed at this time: chips pop in
+    qint64 goneAt = -1;   // deleted at this time: the row dissolves and closes under itself
 };
 
 class MessageModel : public QAbstractListModel {
@@ -53,6 +59,9 @@ public:
     void setFlat(const QList<QJsonObject> &list); // search results: no grouping
     qint64 oldestLocalId() const;
     int messageCount() const { return int(m_messages.size()); }
+    // Drops the rows whose farewell has finished; true when the model changed.
+    bool finishGone();
+    bool anyGone() const { return !m_gone.isEmpty(); }
     bool group = false;
     bool flat = false;
 
@@ -61,6 +70,7 @@ private:
     QList<QJsonObject> m_messages; // chronological
     QHash<QString, qint64> m_appear;
     QHash<QString, qint64> m_react;
+    QHash<QString, qint64> m_gone;
     QList<MessageItem> m_items;
 };
 
@@ -84,13 +94,17 @@ public:
     static ImageCache *instance();
     QPixmap thumb(const QJsonObject &m);
     QPixmap full(const QJsonObject &m); // null until loaded; starts the download
+    // One step of the defocus over a hidden picture: 0 unreadable, 1 middle, 2 nearly sharp.
+    QPixmap blur(const QJsonObject &m, int level);
+    // The poster as it may be shown outside the chat: a closed spoiler stays unreadable.
+    QPixmap poster(const QJsonObject &m);
 
 signals:
     void changed();
 
 private:
     using QObject::QObject;
-    QHash<QString, QPixmap> m_thumbs, m_full;
+    QHash<QString, QPixmap> m_thumbs, m_full, m_blur;
     QHash<QString, qint64> m_pending; // id -> request time (ms since epoch)
 };
 
@@ -125,6 +139,14 @@ public:
     QJsonArray conversationPhotos() const;
     // 0..1 while the message is flashing after a jump, else 0.
     qreal flashOf(const QString &id) const;
+    // How far the cover of a hidden picture is open (0 closed, 1 open), and the same for hidden text.
+    qreal revealOf(const QString &id, bool closed) const;
+    qreal textRevealOf(const QString &id) const;
+    // A tap on a hidden picture or on hidden text: it opens here, and a second tap closes it.
+    void toggleHidden(const QJsonObject &m);
+    void toggleText(const QJsonObject &m);
+    // Something on screen still needs its dust drawn: a closed cover or a cover in motion.
+    bool liveCover() const;
     // Check mode: several messages picked for a bulk action.
     bool checkMode() const { return m_checkMode; }
     bool isChecked(const QString &id) const { return m_checked.contains(id); }
@@ -165,6 +187,8 @@ private:
     // The right-click menu of an open picture: the actions of the message it came from.
     void viewerActions(class PopupMenu *menu, const QJsonObject &m, const QImage &img);
     QString linkAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const;
+    // A click on a hidden run of text, open or closed: it toggles instead of selecting.
+    bool spoilerTextAt(const QJsonObject &m, const MessageLayout &L, const QPoint &pos) const;
     void openMention(const QString &name);
     void placeJump();
     QJsonObject messageAt(const QPoint &pos, MessageLayout *lay = nullptr) const;
@@ -186,6 +210,11 @@ private:
     QString m_jumpId;  // a jump waiting for older pages
     QString m_flashId; // the message just jumped to
     qint64 m_flashAt = 0;
+    // Covers of this chat: how far each hidden picture and each hidden text is open. They live
+    // only while the chat is on screen; leaving it closes everything again.
+    mutable QHash<QString, spoiler::Reveal> m_reveal;
+    mutable QHash<QString, spoiler::Reveal> m_textReveal;
+    QSet<QString> m_openText;
     int m_generation = 0;
     int m_newBelow = 0;
     QTimer m_anim;

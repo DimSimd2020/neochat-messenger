@@ -1463,6 +1463,18 @@ fn spoilers_and_one_time_media() {
     alice.sync();
     bob.sync();
     assert_eq!(find(&alice, "hidden.jpg")["file"]["spoiler"], true);
+    // A second tap hides it again on this device.
+    bob.call("media_shown", json!({"message_id": hm["id"], "on": false}));
+    assert_eq!(find(&bob, "hidden.jpg")["file"]["spoiler"], true);
+    bob.call("media_shown", json!({"message_id": hm["id"]}));
+    assert_eq!(find(&bob, "hidden.jpg")["file"]["spoiler"], false);
+
+    // Hidden text: the span is marked, and the chat list line shows blocks instead of the words.
+    let secret = alice.call("send_text", json!({"conversation_id": cid, "text": "код ||1234|| дальше"}));
+    assert_eq!(secret["spans"][1]["spoiler"], true);
+    assert_eq!(secret["spans"][1]["text"], "1234");
+    let line = alice.call("get_conversation", json!({"conversation_id": cid}))["last_preview"].as_str().unwrap().to_string();
+    assert!(line.contains("███") && !line.contains("1234"), "{line}");
 
     // The view-once photo: readable while it is being looked at, gone as soon as it has been seen.
     let dl = bob.call("download_file", json!({"message_id": om["id"]}));
@@ -1476,7 +1488,9 @@ fn spoilers_and_one_time_media() {
     assert!(bob.try_call("export_file", json!({"message_id": om["id"], "dest": src.to_string_lossy()})).is_err(), "cannot be saved");
     assert!(bob.try_call("forward_message", json!({"message_id": om["id"], "conversation_id": cid})).is_err(), "cannot be forwarded");
     // Leaving the chat changes nothing further: the copies were destroyed with the view.
+    // The spoiler closes again — it is open only while the reader stays in the chat.
     bob.call("burn_viewed", json!({"conversation_id": cid}));
+    assert_eq!(find(&bob, "hidden.jpg")["file"]["spoiler"], true);
 
     // The author is told through the receipt and loses her own copies the same way. The
     // receipt leaves this device through its outbox, so bob syncs first.

@@ -80,15 +80,7 @@ fun <T : View> T.margins(l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0): T {
 }
 
 /** Text with a palette role that follows theme changes. */
-fun Context.label(s: CharSequence, sp: Float, weight: Int = 400, role: Theme.Role = Theme.Role.TEXT): TextView = TextView(this).apply {
-    text = s
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
-    typeface = weightFace(weight)
-    setTag(Theme.TAG_ROLE, role)
-    setTextColor(role.color())
-    includeFontPadding = false
-    setLineSpacing(0f, 1.12f)
-}
+fun Context.label(s: CharSequence, sp: Float, weight: Int = 400, role: Theme.Role = Theme.Role.TEXT): TextView = TextView(this).styled(sp, weight, role).apply { text = s }
 
 fun TextView.role(r: Theme.Role) {
     setTag(Theme.TAG_ROLE, r)
@@ -488,6 +480,10 @@ class ThemedEdit(ctx: Context) : EditText(ctx), Themed {
         }
         return super.onTextContextMenuItem(id)
     }
+
+    /** Selecting words offers the formatting marks beside cut, copy and paste. */
+    override fun startActionMode(callback: android.view.ActionMode.Callback?, type: Int): android.view.ActionMode =
+        super.startActionMode(FormatMode(callback, this), type)
 
     override fun applyTheme() {
         setTextColor(Theme.p.text)

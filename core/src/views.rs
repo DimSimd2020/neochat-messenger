@@ -76,7 +76,7 @@ impl Inner {
                         [rid],
                         |x| {
                             let name = if x.get::<_, i64>(1)? == 1 { "Вы".to_string() } else { display_name(&x.get::<_, String>(2)?, &x.get::<_, String>(3)?, &x.get::<_, String>(4)?) };
-                            Ok((json!({"id": rid, "text": x.get::<_, String>(0)?.chars().take(120).collect::<String>(), "sender_name": name, "kind": x.get::<_, String>(5)?}), x.get::<_, String>(6)?))
+                            Ok((json!({"id": rid, "text": crate::markdown::mask(&x.get::<_, String>(0)?).chars().take(120).collect::<String>(), "sender_name": name, "kind": x.get::<_, String>(5)?}), x.get::<_, String>(6)?))
                         },
                     )
                     .optional()?
@@ -101,7 +101,9 @@ impl Inner {
                         "voice": voice, "circle": circle, "wave": if voice { meta.wave.clone() } else { None }, "transcript": transcript,
                         // Presentation marks of hidden media: "spoiler" is still blurred, "viewed" and
                         // "shot" are local facts about a view-once file, "once" is how it was sent.
-                        "spoiler": meta.is_spoiler(), "once": meta.once == Some(true),
+                        // "hidden" is the sender's spoiler mark itself, open or closed here, so a client
+                        // can animate the cover of a picture it has already opened.
+                        "spoiler": meta.is_spoiler(), "hidden": meta.spoiler == Some(true), "once": meta.once == Some(true),
                         "viewed": meta.viewed == Some(true), "shot": meta.shot == Some(true)}))
                 }
                 None => None,

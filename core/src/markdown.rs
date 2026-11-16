@@ -1,6 +1,6 @@
 //! Message formatting, parsed once here so every client renders the same thing.
 //!
-//! Supported (Telegram-like): **bold**, *italic* or _italic_, ~~strike~~, `code`,
+//! Supported (Telegram-like): **bold**, *italic* or _italic_, ~~strike~~, ||spoiler||, `code`,
 //! ```code block```, and bare http(s) links. A marker only counts when it has a
 //! matching closing marker in the same paragraph and touches text on the inner side,
 //! so `2 * 3 * 4` and snake_case stay as typed.
@@ -18,6 +18,7 @@ struct Style {
     bold: bool,
     italic: bool,
     strike: bool,
+    spoiler: bool,
 }
 
 /// Formulas per message that get drawn, and how much they may weigh together; the rest stays text.
@@ -71,6 +72,9 @@ impl Out {
         if st.strike {
             v["strike"] = json!(true);
         }
+        if st.spoiler {
+            v["spoiler"] = json!(true);
+        }
         if let Some((k, val)) = extra {
             v[k] = val;
         }
@@ -88,7 +92,7 @@ impl Out {
     }
 }
 
-/// Spans of a message: [{text, bold?, italic?, strike?, code?, pre?, link?}].
+/// Spans of a message: [{text, bold?, italic?, strike?, spoiler?, code?, pre?, link?}].
 pub fn spans(text: &str) -> Vec<Value> {
     let mut out = Out { spans: Vec::new(), math: Vec::new(), formulas: 0, formula_bytes: 0 };
     let mut rest = text;
@@ -109,6 +113,35 @@ pub fn spans(text: &str) -> Vec<Value> {
     }
     inline(rest, &mut out);
     out.spans
+}
+
+/// What a hidden part looks like where it must not be read: the chat list line and a quote.
+const MASK: &str = "███";
+
+/// The text with every spoiler body replaced by blocks. The markers themselves go away too,
+/// so a preview never shows either the hidden words or the syntax around them.
+pub fn mask(text: &str) -> String {
+    if !text.contains("||") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("||") {
+        let after = &rest[start + 2..];
+        match closing(after, "||", 0) {
+            Some(end) => {
+                out.push_str(&rest[..start]);
+                out.push_str(MASK);
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str(&rest[..start + 2]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn inline(text: &str, out: &mut Out) {
@@ -234,7 +267,7 @@ fn dollar_formula(rest: &str) -> Option<(&str, usize, bool)> {
     None
 }
 
-const MARKERS: [&str; 4] = ["**", "~~", "*", "_"];
+const MARKERS: [&str; 5] = ["**", "~~", "||", "*", "_"];
 
 fn is_word(c: Option<char>) -> bool {
     c.is_some_and(|c| c.is_alphanumeric())
@@ -314,6 +347,7 @@ fn set(st: &mut Style, m: &str, on: bool) {
     match m {
         "**" => st.bold = on,
         "~~" => st.strike = on,
+        "||" => st.spoiler = on,
         _ => st.italic = on,
     }
 }
@@ -386,6 +420,26 @@ mod tests {
         assert_eq!(spans("snake_case_name"), vec![json!({"text": "snake_case_name"})]);
         assert_eq!(spans("**не закрыто"), vec![json!({"text": "**не закрыто"})]);
         assert_eq!(spans("a ** b"), vec![json!({"text": "a ** b"})]);
+    }
+
+    #[test]
+    fn hides_spoiler_text() {
+        assert_eq!(spans("это ||секрет|| и текст"), vec![
+            json!({"text": "это "}),
+            json!({"text": "секрет", "spoiler": true}),
+            json!({"text": " и текст"}),
+        ]);
+        // A spoiler carries the other marks with it and stays one span.
+        assert_eq!(spans("||**жирный секрет**||"), vec![json!({"text": "жирный секрет", "bold": true, "spoiler": true})]);
+        // Nothing hidden: an empty marker, a space inside, a paragraph break, code.
+        for src in ["||||", "|| пусто ||", "||через\n\nабзац||", "`||код||`"] {
+            assert!(spans(src).iter().all(|s| s.get("spoiler").is_none()), "{src}");
+        }
+        // The preview and a quote show blocks instead of the hidden words.
+        assert_eq!(super::mask("это ||секрет|| и текст"), "это ███ и текст");
+        assert_eq!(super::mask("||всё скрыто||"), "███");
+        assert_eq!(super::mask("обычный текст"), "обычный текст");
+        assert_eq!(super::mask("||не закрыто"), "||не закрыто");
     }
 
     #[test]

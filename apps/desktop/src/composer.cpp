@@ -2,6 +2,7 @@
 
 #include "audioio.h"
 #include "emoji.h"
+#include "popupmenu.h"
 #include "theme.h"
 #include "widgets.h"
 #include "core.h"
@@ -12,12 +13,14 @@
 #include <QJsonArray>
 
 #include <QAbstractTextDocumentLayout>
+#include <QContextMenuEvent>
 #include <QGridLayout>
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QPushButton>
 #include <QPainter>
 #include <QPointer>
+#include <QTextCursor>
 #include <cmath>
 #include <QScrollBar>
 #include <QTimer>
@@ -86,6 +89,83 @@ void ComposerEdit::keyPressEvent(QKeyEvent *e)
 bool ComposerEdit::canInsertFromMimeData(const QMimeData *source) const
 {
     return source->hasUrls() || source->hasImage() || QPlainTextEdit::canInsertFromMimeData(source);
+}
+
+const QList<ComposerEdit::Mark> &ComposerEdit::marks()
+{
+    static const QList<Mark> list = {
+        {QStringLiteral("Жирный"), QStringLiteral("**"), QStringLiteral("**")},
+        {QStringLiteral("Курсив"), QStringLiteral("*"), QStringLiteral("*")},
+        {QStringLiteral("Зачёркнутый"), QStringLiteral("~~"), QStringLiteral("~~")},
+        {QStringLiteral("Моноширинный"), QStringLiteral("`"), QStringLiteral("`")},
+        {QStringLiteral("Скрытый"), QStringLiteral("||"), QStringLiteral("||")},
+        {QStringLiteral("Блок кода"), QStringLiteral("```\n"), QStringLiteral("\n```")},
+    };
+    return list;
+}
+
+// Wraps the selection, or takes the marks away when they are already there.
+void ComposerEdit::wrap(const Mark &mark)
+{
+    QTextCursor cur = textCursor();
+    if (!cur.hasSelection())
+        return;
+    const int a = cur.selectionStart(), b = cur.selectionEnd();
+    const QString all = toPlainText();
+    const QString o = mark.open, cl = mark.close;
+    auto take = [&cur](int from, int to) {
+        cur.setPosition(from);
+        cur.setPosition(to, QTextCursor::KeepAnchor);
+        cur.removeSelectedText();
+    };
+    // The marks are inside the selection.
+    if (b - a >= o.size() + cl.size() && all.mid(a, o.size()) == o && all.mid(b - cl.size(), cl.size()) == cl) {
+        take(b - cl.size(), b);
+        take(a, a + o.size());
+        cur.setPosition(a);
+        cur.setPosition(b - o.size() - cl.size(), QTextCursor::KeepAnchor);
+        setTextCursor(cur);
+        return;
+    }
+    // They sit just outside it.
+    if (a >= o.size() && b + cl.size() <= all.size() && all.mid(a - o.size(), o.size()) == o && all.mid(b, cl.size()) == cl) {
+        take(b, b + cl.size());
+        take(a - o.size(), a);
+        cur.setPosition(a - o.size());
+        cur.setPosition(b - o.size(), QTextCursor::KeepAnchor);
+        setTextCursor(cur);
+        return;
+    }
+    cur.insertText(o + all.mid(a, b - a) + cl);
+    cur.setPosition(a + o.size());
+    cur.setPosition(b + o.size(), QTextCursor::KeepAnchor);
+    setTextCursor(cur);
+}
+
+// The menu of the field: the usual editing actions and, over a selection, the formatting marks.
+void ComposerEdit::contextMenuEvent(QContextMenuEvent *e)
+{
+    auto *menu = new PopupMenu(this);
+    const bool sel = textCursor().hasSelection();
+    if (document()->isUndoAvailable())
+        menu->addAction(QStringLiteral("Отменить"), this, [this] { undo(); });
+    if (document()->isRedoAvailable())
+        menu->addAction(QStringLiteral("Вернуть"), this, [this] { redo(); });
+    if (sel) {
+        menu->addAction(QStringLiteral("Вырезать"), this, [this] { cut(); });
+        menu->addAction(QStringLiteral("Копировать"), this, [this] { copy(); });
+    }
+    if (canPaste())
+        menu->addAction(QStringLiteral("Вставить"), this, [this] { paste(); });
+    if (sel)
+        menu->addAction(QStringLiteral("Удалить"), this, [this] { textCursor().removeSelectedText(); });
+    menu->addAction(QStringLiteral("Выделить всё"), this, [this] { selectAll(); });
+    if (sel) {
+        menu->addSeparator();
+        for (const Mark &mark : marks())
+            menu->addAction(mark.title, this, [this, mark] { wrap(mark); });
+    }
+    menu->popup(e->globalPos());
 }
 
 void ComposerEdit::insertFromMimeData(const QMimeData *source)
