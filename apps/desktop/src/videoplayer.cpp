@@ -1,20 +1,26 @@
 #include "videoplayer.h"
 
 #include "playback.h"
+#include "popupmenu.h"
 #include "theme.h"
 #include "widgets.h"
 
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
+#include <QScreen>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QTimer>
+#include <algorithm>
 #include <atomic>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <windows.h>
@@ -26,7 +32,8 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-constexpr int kBarHeight = 56; // the control row under the picture
+constexpr int kBarHeight = 52; // the control row under the picture
+constexpr float kRates[] = {1.0f, 1.25f, 1.5f, 2.0f};
 
 // MFPlay's aspect-ratio modes; the SDK header takes them as a plain DWORD and does not declare
 // the enumeration, so the values come from the API documentation.
@@ -41,6 +48,11 @@ QString clockText(qint64 ms)
 {
     const qint64 s = ms / 1000;
     return QStringLiteral("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QLatin1Char('0'));
+}
+
+QString rateText(float rate)
+{
+    return rate == 1.0f ? QStringLiteral("1×") : rate == 1.25f ? QStringLiteral("1,25×") : rate == 1.5f ? QStringLiteral("1,5×") : QStringLiteral("2×");
 }
 
 // The player answers times as 64-bit 100 ns values; both variants appear in practice.
@@ -81,6 +93,25 @@ QString failureDetail(long hr)
         return QStringLiteral("Попробуйте скачать видео заново.");
     }
 }
+
+// The panel is a native window of its own: MFPlay parents the picture to it, and a native
+// window paints its own plate instead of inheriting the scrim's translucency.
+class Panel : public QWidget {
+public:
+    using QWidget::QWidget;
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        QPainterPath path;
+        path.addRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18);
+        p.fillPath(path, QColor(11, 18, 32));
+        p.setPen(QPen(QColor(255, 255, 255, 26), 1));
+        p.drawPath(path);
+    }
+};
 
 } // namespace
 
@@ -163,7 +194,22 @@ struct VideoPlayback {
     std::shared_ptr<VideoPlayerRelay> relay = std::make_shared<VideoPlayerRelay>();
 };
 
-// MFPlay creates its own video window inside the player window; EVR paints it, Qt never does.
+// MFPlay's picture window is not a Qt window: it takes the keyboard and the mouse for itself.
+// Its procedure is hooked so Esc, space, arrows, mute and the clicks still reach the viewer.
+static LRESULT CALLBACK videoWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto *viewer = reinterpret_cast<VideoViewer *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (viewer) {
+        const QPoint local(int(short(LOWORD(lparam))), int(short(HIWORD(lparam))));
+        POINT screen{local.x(), local.y()};
+        ClientToScreen(hwnd, &screen);
+        if (viewer->nativeInput(message, unsigned(wparam), QPoint(screen.x, screen.y)))
+            return 0;
+        if (viewer->originalWindowProc())
+            return CallWindowProcW(reinterpret_cast<WNDPROC>(viewer->originalWindowProc()), hwnd, message, wparam, lparam);
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
 
 bool showVideoFile(QWidget *host, const QString &path, const QString &name)
 {
@@ -187,18 +233,21 @@ VideoViewer::VideoViewer(QWidget *host, const QString &path, const QString &name
 {
     setObjectName(QStringLiteral("videoViewer"));
     setAttribute(Qt::WA_DeleteOnClose);
-    setAttribute(Qt::WA_NativeWindow);
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("Просмотр видео. ") + name + QStringLiteral(". Пробел — пауза, стрелки — перемотка, Esc — закрыть"));
     setGeometry(host->rect());
     host->installEventFilter(this);
     m_previousFocus = host->focusWidget();
 
-    m_bar = new QWidget(this);
+    m_panel = new Panel(this);
+    m_panel->setObjectName(QStringLiteral("videoPanel"));
+    m_panel->setFocusPolicy(Qt::NoFocus);
+
+    m_bar = new QWidget(m_panel);
     m_bar->setObjectName(QStringLiteral("videoControls"));
     auto *row = new QHBoxLayout(m_bar);
-    row->setContentsMargins(10, 8, 10, 8);
-    row->setSpacing(8);
+    row->setContentsMargins(10, 6, 10, 6);
+    row->setSpacing(6);
     m_play = new ui::IconButton(QStringLiteral("play"), QStringLiteral("Воспроизвести"), m_bar, 36);
     m_play->setObjectName(QStringLiteral("videoPlay"));
     row->addWidget(m_play);
@@ -212,11 +261,22 @@ VideoViewer::VideoViewer(QWidget *host, const QString &path, const QString &name
     row->addWidget(m_seekBar, 1);
     m_total = new ui::Label({}, 12.5, 500, ui::Label::Muted, m_bar);
     row->addWidget(m_total);
+    m_rate = new ui::Button(QStringLiteral("1×"), ui::Button::Flat, m_bar);
+    m_rate->setObjectName(QStringLiteral("videoRate"));
+    m_rate->setAccessibleName(QStringLiteral("Скорость воспроизведения"));
+    m_rate->setFixedHeight(32);
+    row->addWidget(m_rate);
+    m_mute = new ui::IconButton(QStringLiteral("speaker"), QStringLiteral("Выключить звук"), m_bar, 36);
+    m_mute->setObjectName(QStringLiteral("videoMute"));
+    row->addWidget(m_mute);
+    m_expand = new ui::IconButton(QStringLiteral("expand"), QStringLiteral("Развернуть на окно"), m_bar, 36);
+    m_expand->setObjectName(QStringLiteral("videoExpand"));
+    row->addWidget(m_expand);
     m_close = new ui::IconButton(QStringLiteral("close"), QStringLiteral("Закрыть"), m_bar, 36);
     m_close->setObjectName(QStringLiteral("videoClose"));
     row->addWidget(m_close);
 
-    m_note = new ui::Label({}, 14, 400, ui::Label::Muted, this);
+    m_note = new ui::Label({}, 14, 400, ui::Label::Muted, m_panel);
     m_note->setObjectName(QStringLiteral("videoNote"));
     m_note->setAlignment(Qt::AlignCenter);
     m_note->setWordWrap(true);
@@ -227,6 +287,9 @@ VideoViewer::VideoViewer(QWidget *host, const QString &path, const QString &name
     connect(m_clock, &QTimer::timeout, this, &VideoViewer::tick);
     connect(m_play, &QAbstractButton::clicked, this, [this] { toggle(); });
     connect(m_close, &QAbstractButton::clicked, this, &QWidget::close);
+    connect(m_rate, &QAbstractButton::clicked, this, [this] { cycleRate(); });
+    connect(m_mute, &QAbstractButton::clicked, this, [this] { toggleMute(); });
+    connect(m_expand, &QAbstractButton::clicked, this, [this] { toggleExpanded(); });
     connect(m_seekBar, &QSlider::sliderMoved, this, [this](int sec) { seek(qint64(sec) * 1000); });
     connect(m_seekBar, &QSlider::actionTriggered, this, [this](int action) {
         // The keyboard moves the bar without dragging it; that is a seek too.
@@ -241,12 +304,12 @@ VideoViewer::VideoViewer(QWidget *host, const QString &path, const QString &name
         std::lock_guard<std::mutex> lock(m_backend->relay->mutex);
         m_backend->relay->target = this;
     }
-    // MFPlay parents its video window to the player window, so that window is this overlay itself.
-    m_overlay = reinterpret_cast<HWND>(winId());
+    // MFPlay parents its video window to the panel, so the panel is the player window.
+    m_overlay = reinterpret_cast<HWND>(m_panel->winId());
     const HWND overlay = static_cast<HWND>(m_overlay);
     const HRESULT created = MFPCreateMediaPlayer(nullptr, FALSE, MFP_OPTION_NONE, m_backend->callback.Get(), overlay, &m_backend->player);
     if (SUCCEEDED(created) && m_backend->player && overlay) {
-        m_backend->player->SetBorderColor(RGB(4, 9, 20));
+        m_backend->player->SetBorderColor(RGB(11, 18, 32));
         m_backend->player->SetAspectRatioMode(MFPlayAspect_LetterBox);
         HWND video = nullptr;
         if (SUCCEEDED(m_backend->player->GetVideoWindow(&video)))
@@ -359,6 +422,7 @@ void VideoViewer::applyItemInfo()
     HWND video = nullptr;
     if (!m_videoWindow && SUCCEEDED(player->GetVideoWindow(&video)))
         m_videoWindow = video;
+    hookVideoWindow();
     updateVideoWindow();
 }
 
@@ -439,6 +503,29 @@ void VideoViewer::seek(qint64 ms)
         m_backend->player->UpdateVideo();
 }
 
+void VideoViewer::cycleRate()
+{
+    m_rateIndex = (m_rateIndex + 1) % int(std::size(kRates));
+    if (m_backend->player)
+        m_backend->player->SetRate(kRates[m_rateIndex]);
+    refreshControls();
+}
+
+void VideoViewer::toggleMute()
+{
+    m_muted = !m_muted;
+    if (m_backend->player)
+        m_backend->player->SetMute(m_muted ? TRUE : FALSE);
+    refreshControls();
+}
+
+void VideoViewer::toggleExpanded()
+{
+    m_expanded = !m_expanded;
+    place();
+    refreshControls();
+}
+
 void VideoViewer::fail(const QString &message, long result)
 {
     m_error = result ? QStringLiteral("%1 %2").arg(message, failureDetail(result)) : message;
@@ -458,39 +545,58 @@ void VideoViewer::refreshControls()
     m_play->setIcon(m_playing ? QStringLiteral("pause") : QStringLiteral("play"));
     m_play->setLabel(m_playing ? QStringLiteral("Пауза") : QStringLiteral("Воспроизвести"));
     m_play->setAccessibleName(m_playing ? QStringLiteral("Пауза") : QStringLiteral("Воспроизвести"));
+    m_mute->setIcon(m_muted ? QStringLiteral("speaker-off") : QStringLiteral("speaker"));
+    m_mute->setLabel(m_muted ? QStringLiteral("Включить звук") : QStringLiteral("Выключить звук"));
+    m_mute->setAccessibleName(m_muted ? QStringLiteral("Включить звук") : QStringLiteral("Выключить звук"));
+    m_expand->setIcon(m_expanded ? QStringLiteral("collapse") : QStringLiteral("expand"));
+    m_expand->setLabel(m_expanded ? QStringLiteral("Свернуть панель") : QStringLiteral("Развернуть на окно"));
+    m_expand->setAccessibleName(m_expanded ? QStringLiteral("Свернуть панель") : QStringLiteral("Развернуть на окно"));
+    m_rate->setText(rateText(kRates[m_rateIndex]));
     m_close->setAccessibleName(QStringLiteral("Закрыть видео"));
 }
 
 void VideoViewer::restyle()
 {
-    const Palette &c = Theme::p();
-    m_bar->setAutoFillBackground(true);
-    QPalette native = m_bar->palette();
-    native.setColor(QPalette::Window, c.surface);
-    m_bar->setPalette(native);
     m_note->setAutoFillBackground(true);
     QPalette note = m_note->palette();
-    note.setColor(QPalette::Window, QColor(4, 9, 20));
-    note.setColor(QPalette::WindowText, c.text);
+    note.setColor(QPalette::Window, QColor(11, 18, 32));
+    note.setColor(QPalette::WindowText, Theme::p().text);
     m_note->setPalette(note);
     place();
 }
 
+QRect VideoViewer::panelRect() const
+{
+    const QRect avail = parentWidget() ? parentWidget()->rect() : rect();
+    if (m_expanded)
+        return avail.adjusted(24, 24, -24, -24);
+    // A panel, not a takeover: the chat stays visible around the picture.
+    int w = qMin(avail.width() - 96, 920);
+    int h = qMin(avail.height() - 96, w * 9 / 16 + kBarHeight + 40);
+    w = qMax(w, qMin(480, avail.width() - 32));
+    h = qMax(h, qMin(320, avail.height() - 32));
+    w = qMin(w, avail.width() - 32);
+    h = qMin(h, avail.height() - 32);
+    return QRect(avail.x() + (avail.width() - w) / 2, avail.y() + (avail.height() - h) / 2, qMax(1, w), qMax(1, h));
+}
+
 void VideoViewer::place()
 {
-    m_bar->setGeometry(32, height() - kBarHeight - 32, qMax(1, width() - 64), kBarHeight);
+    const QRect panel = panelRect();
+    m_panel->setGeometry(panel);
+    // Everything inside the panel is clamped to it: a control row can never land off-window.
+    m_bar->setGeometry(12, qMax(0, panel.height() - kBarHeight - 12), qMax(1, panel.width() - 24), kBarHeight);
     m_note->setGeometry(videoRect().adjusted(24, 0, -24, 0));
     updateVideoWindow();
 }
 
 QRect VideoViewer::videoRect() const
 {
-    const int margin = 32;
-    return QRect(margin, margin, qMax(1, width() - 2 * margin), qMax(1, height() - kBarHeight - 3 * margin));
+    const QSize panel = m_panel->size();
+    return QRect(16, 16, qMax(1, panel.width() - 32), qMax(1, panel.height() - kBarHeight - 44));
 }
 
-// MFPlay owns the video window: it is a native window of its own or the overlay's client area,
-// and we only ever move the separate one.
+// MFPlay owns the video window: a native child of the panel, moved only in panel coordinates.
 void VideoViewer::updateVideoWindow()
 {
     auto *window = reinterpret_cast<HWND>(m_videoWindow);
@@ -504,6 +610,70 @@ void VideoViewer::updateVideoWindow()
                      visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW);
     }
     m_backend->player->UpdateVideo();
+}
+
+void VideoViewer::hookVideoWindow()
+{
+    auto *hwnd = reinterpret_cast<HWND>(m_videoWindow);
+    if (!hwnd || m_originalProc || !IsWindow(hwnd))
+        return;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    m_originalProc = reinterpret_cast<void *>(SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(videoWindowProc)));
+}
+
+void VideoViewer::unhookVideoWindow()
+{
+    auto *hwnd = reinterpret_cast<HWND>(m_videoWindow);
+    if (hwnd && m_originalProc && IsWindow(hwnd)) {
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(m_originalProc));
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    }
+    m_originalProc = nullptr;
+}
+
+bool VideoViewer::nativeInput(unsigned message, unsigned key, const QPoint &global)
+{
+    switch (message) {
+    case WM_KEYDOWN: {
+        // Windows virtual keys are not Qt keys; only the ones the player answers are mapped.
+        const int qt = key == VK_ESCAPE ? Qt::Key_Escape : key == VK_SPACE ? Qt::Key_Space
+            : key == VK_LEFT ? Qt::Key_Left : key == VK_RIGHT ? Qt::Key_Right : key == 'M' ? Qt::Key_M : 0;
+        if (!qt)
+            return false;
+        QKeyEvent event(QEvent::KeyPress, qt, Qt::NoModifier);
+        return handleKey(&event);
+    }
+    case WM_LBUTTONUP:
+        toggle();
+        return true;
+    case WM_RBUTTONUP:
+        pictureMenu(global);
+        return true;
+    default:
+        return false;
+    }
+}
+
+void VideoViewer::pictureMenu(const QPoint &global)
+{
+    auto *menu = new PopupMenu(this);
+    menu->addAction(m_playing ? QStringLiteral("Пауза") : QStringLiteral("Воспроизвести"), this, [this] { toggle(); });
+    for (float rate : kRates)
+        menu->addChoice(QStringLiteral("Скорость ") + rateText(rate), qFuzzyCompare(rate, kRates[m_rateIndex]), this, [this, rate] {
+            m_rateIndex = int(std::find(std::begin(kRates), std::end(kRates), rate) - std::begin(kRates));
+            if (m_backend->player)
+                m_backend->player->SetRate(rate);
+            refreshControls();
+        });
+    menu->addChoice(QStringLiteral("Без звука"), m_muted, this, [this] { toggleMute(); });
+    menu->addChoice(QStringLiteral("На всё окно"), m_expanded, this, [this] { toggleExpanded(); });
+    menu->addSeparator();
+    menu->addAction(QStringLiteral("Закрыть"), this, [this] { close(); });
+    menu->adjustSize();
+    const QRect screen = QGuiApplication::screenAt(global)->availableGeometry();
+    const QPoint at(qBound(screen.left(), global.x(), screen.right() - menu->width()),
+                    qBound(screen.top(), global.y(), screen.bottom() - menu->height()));
+    menu->popup(at);
 }
 
 bool VideoViewer::eventFilter(QObject *object, QEvent *event)
@@ -531,15 +701,19 @@ bool VideoViewer::focusNextPrevChild(bool next)
 
 void VideoViewer::paintEvent(QPaintEvent *)
 {
+    // A scrim, not a blackout: the messenger stays visible under the picture.
     QPainter p(this);
-    p.fillRect(rect(), QColor(4, 9, 20));
+    p.fillRect(rect(), QColor(4, 9, 20, 150));
 }
 
 void VideoViewer::mousePressEvent(QMouseEvent *e)
 {
-    // The picture itself is a window of its own and takes its clicks; a press on the dark
-    // surround around it is the play button.
-    if (e->button() == Qt::LeftButton && !m_bar->geometry().contains(e->pos()) && !m_note->isVisible())
+    // A press on the scrim outside the panel closes; the panel surround toggles playback.
+    if (e->button() != Qt::LeftButton)
+        return;
+    if (!m_panel->geometry().contains(e->pos()))
+        close();
+    else if (!m_bar->geometry().contains(m_panel->mapFrom(this, e->pos())) && !m_note->isVisible())
         toggle();
 }
 
@@ -558,6 +732,9 @@ bool VideoViewer::handleKey(QKeyEvent *event)
         return true;
     case Qt::Key_Space:
         toggle();
+        return true;
+    case Qt::Key_M:
+        toggleMute();
         return true;
     case Qt::Key_Left:
         if (focusWidget() == m_seekBar)
@@ -590,6 +767,7 @@ void VideoViewer::shutdown()
     m_clock->stop();
     m_playing = false;
     m_ready = false;
+    unhookVideoWindow();
     {
         std::lock_guard<std::mutex> lock(m_backend->relay->mutex);
         m_backend->relay->target = nullptr;

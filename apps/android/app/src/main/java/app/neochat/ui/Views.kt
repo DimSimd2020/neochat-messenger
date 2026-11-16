@@ -879,11 +879,19 @@ class ToggleRow(ctx: Context, text: String) : LinearLayout(ctx), Themed {
     private val knob = object : View(ctx) {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         override fun onDraw(c: Canvas) {
-            val off = Theme.p.rim
+            val off = if (Theme.p.dark) Theme.p.rim else 0xFFD9E2F0.toInt()
             val on = 0xFF367FF4.toInt()
             val k = t.coerceIn(0f, 1f)
             paint.color = blendColor(off, on, k)
             c.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), height / 2f, height / 2f, paint)
+            // On a light sheet an unchecked track is nearly the sheet's own colour: a blue rim
+            // keeps the switch readable as a control instead of a blank pill.
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dpf(1.4f)
+            paint.color = if (k > 0.5f) on else 0x96367FF4.toInt()
+            val inset = paint.strokeWidth / 2
+            c.drawRoundRect(inset, inset, width - inset, height - inset, (height - 2 * inset) / 2f, (height - 2 * inset) / 2f, paint)
+            paint.style = Paint.Style.FILL
             paint.color = android.graphics.Color.WHITE
             val r = height / 2f - dpf(3)
             val cx = height / 2f + t * (width - height)

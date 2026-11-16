@@ -16,6 +16,7 @@ struct IMFPMediaItem;
 struct IMFPMediaPlayer;
 namespace ui {
 class IconButton;
+class Button;
 class Label;
 }
 
@@ -23,6 +24,11 @@ class Label;
 // picture and the sound; nothing is decoded into memory here. MFPlay delivers its events on its
 // own thread: they are relayed to the UI thread, and the relay is closed before Shutdown.
 // Times are milliseconds.
+//
+// The viewer is a translucent scrim over the whole messenger window with a smaller panel in the
+// middle: the chat stays visible around the picture, and the panel can be unfolded to the window.
+// MFPlay paints into a native child window of the panel; that window takes the keyboard and the
+// clicks, so its window procedure is hooked to keep Esc, space, arrows and the mouse working.
 class VideoViewer : public QWidget {
     Q_OBJECT
 public:
@@ -36,10 +42,14 @@ public:
     QString errorString() const { return m_error; }
     // The line that explains an error in the middle of the picture.
     ui::Label *note() const { return m_note; }
+    // The window procedure the MFPlay picture window had before it was hooked.
+    void *originalWindowProc() const { return m_originalProc; }
 
 public slots:
     void toggle();
     void seek(qint64 ms);
+    // Called from the hooked window procedure of the MFPlay video window.
+    bool nativeInput(unsigned message, unsigned key, const QPoint &global);
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -59,21 +69,33 @@ private:
     void restyle();
     void place();
     void updateVideoWindow();
+    QRect panelRect() const;
     QRect videoRect() const;
     void shutdown();
     void fail(const QString &message, long result = 0);
     bool handleKey(QKeyEvent *event);
+    void cycleRate();
+    void toggleMute();
+    void toggleExpanded();
+    void pictureMenu(const QPoint &global);
+    void hookVideoWindow();
+    void unhookVideoWindow();
 
     QString m_path, m_name;
     std::unique_ptr<VideoPlayback> m_backend;
     QPointer<QWidget> m_previousFocus;
-    void *m_videoWindow = nullptr; // the video window MFPlay creates inside this overlay (HWND)
-    void *m_overlay = nullptr;     // this widget's own HWND (HWND)
+    void *m_videoWindow = nullptr; // the video window MFPlay creates inside the panel (HWND)
+    void *m_overlay = nullptr;     // the panel's own HWND (HWND)
+    void *m_originalProc = nullptr;
+    QWidget *m_panel = nullptr;
     QWidget *m_bar = nullptr;
     QTimer *m_clock = nullptr;
     QSlider *m_seekBar = nullptr;
     ui::IconButton *m_play = nullptr;
     ui::IconButton *m_close = nullptr;
+    ui::IconButton *m_mute = nullptr;
+    ui::IconButton *m_expand = nullptr;
+    ui::Button *m_rate = nullptr;
     ui::Label *m_elapsed = nullptr;
     ui::Label *m_total = nullptr;
     ui::Label *m_note = nullptr;
@@ -87,6 +109,9 @@ private:
     bool m_seekPending = false;
     bool m_canSeek = true;
     bool m_ended = false;
+    bool m_expanded = false;
+    bool m_muted = false;
+    int m_rateIndex = 0;
 };
 
 // True means the viewer was opened, not that asynchronous decoding has succeeded.

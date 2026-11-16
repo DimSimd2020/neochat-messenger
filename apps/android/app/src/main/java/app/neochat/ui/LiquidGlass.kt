@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RenderEffect
@@ -85,6 +86,51 @@ class BackdropBlur(private val source: BackdropSource, private val blurDp: Float
     private companion object {
         /** Set while a source is recorded, so a glass surface inside it asks for nothing. */
         var recording = false
+    }
+}
+
+/**
+ * The top of a conversation: no plate, just the history dissolving upward. The content behind is
+ * blurred and the blur fades out down the strip, while a scrim of the backdrop colour closes it
+ * into the window background at the very top. Older systems get the scrim alone.
+ */
+class TopFade(ctx: Context, source: BackdropSource) : View(ctx), Themed {
+    private val blur = BackdropBlur(source, 18f)
+    private val mask = Paint()
+    private val scrim = Paint()
+    private val shape = Path()
+    private val box = Rect()
+
+    init {
+        isClickable = false
+        source.watch(this)
+    }
+
+    override fun applyTheme() = invalidate()
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        box.set(0, 0, width, height)
+        shape.rewind()
+        shape.addRect(0f, 0f, w, h, Path.Direction.CW)
+        // The blurred history, faded out toward the bottom of the strip.
+        c.saveLayer(0f, 0f, w, h, null)
+        blur.draw(c, this, box, shape, 0f)
+        mask.shader = android.graphics.LinearGradient(0f, 0f, 0f, h, 0xFFFFFFFF.toInt(), 0x00FFFFFF, Shader.TileMode.CLAMP)
+        mask.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN)
+        c.drawRect(0f, 0f, w, h, mask)
+        mask.xfermode = null
+        c.restore()
+        // …and the backdrop colour closing over it at the very top.
+        val top = Theme.p.bg1
+        scrim.shader = android.graphics.LinearGradient(
+            0f, 0f, 0f, h,
+            intArrayOf((top and 0x00FFFFFF) or 0xEB000000.toInt(), (top and 0x00FFFFFF) or 0x78000000, 0x00000000),
+            floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP,
+        )
+        c.drawRect(0f, 0f, w, h, scrim)
     }
 }
 

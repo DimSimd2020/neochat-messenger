@@ -533,7 +533,7 @@ public:
         setAttribute(Qt::WA_DeleteOnClose);
         setFocusPolicy(Qt::StrongFocus);
         setAccessibleName(QStringLiteral("Просмотр одноразового вложения. Esc — закрыть"));
-        const QRect box = window()->geometry();
+        const QRect box = parentWidget() ? parentWidget()->rect() : window()->geometry();
         setGeometry(box.adjusted(box.width() / 7, box.height() / 8, -box.width() / 7, -box.height() / 8));
         show();
         blockCapture();
@@ -1456,6 +1456,10 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
                                       : (isVideo(m) ? QStringLiteral("Видео") : QStringLiteral("Фото"));
             p->setFont(Theme::instance()->font(12.5));
             p->drawText(QRectF(L.image.left(), mid.y() + 26, L.image.width(), 20), Qt::AlignHCenter, line);
+            // A view-once file carries no poster by contract, so its cover is the same living
+            // dust over the dark plate: the hidden-media gesture, without pretending content.
+            if (!seen)
+                spoiler::dust(*p, L.image, quint32(qHash(id)), 1.0, 0.0, 1.2);
         } else if (isVideo(m)) {
             // The play mark and the length belong to the picture: they come out with it.
             p->save();
@@ -1926,13 +1930,18 @@ bool MessageView::liveCover() const
 {
     if (Theme::ms(int(kRevealMs)) == 0)
         return false; // reduced motion: the dust stands still and covers jump
+    const auto *m = qobject_cast<const MessageModel *>(model());
+    if (!m)
+        return false;
     const int ms = Theme::ms(int(kRevealMs));
-    for (int i = 0; i < m_model->rowCount(); ++i) {
-        const MessageItem &it = m_model->item(i);
+    for (int i = 0; i < m->rowCount(); ++i) {
+        const MessageItem &it = m->item(i);
         if (it.isDate)
             continue;
         const QJsonObject &m = it.msg;
         const QString id = m.value("id").toString();
+        if (isOnce(m) && !isViewed(m))
+            return true; // the dust on a view-once cover drifts until it is opened
         if (isHiddenMedia(m)) {
             if (isSpoiler(m))
                 return true;

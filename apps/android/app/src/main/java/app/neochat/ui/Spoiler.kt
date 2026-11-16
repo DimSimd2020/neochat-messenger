@@ -35,6 +35,22 @@ object SpoilerFx {
     private val halo = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
     private val fields = HashMap<Long, Field>()
 
+    private var epoch = 0L
+    private var scale = 0f
+
+    /** Dust time follows the system animator scale, so developer slow motion slows the drift too. */
+    fun resetClock() {
+        scale = 0f
+    }
+
+    private fun clock(): Float {
+        if (scale == 0f) {
+            scale = animatorScale()
+            epoch = AnimationUtils.currentAnimationTimeMillis()
+        }
+        return (AnimationUtils.currentAnimationTimeMillis() - epoch) / 1000f / scale
+    }
+
     /** Dust of one place: same seed, same grains, so a recycled row does not reshuffle them. */
     private class Field(seed: Int, val count: Int) {
         val x = FloatArray(count)
@@ -48,7 +64,7 @@ object SpoilerFx {
             for (i in 0 until count) {
                 x[i] = rand(seed, i, 1)
                 y[i] = rand(seed, i, 2)
-                r[i] = 0.5f + 1.7f * rand(seed, i, 3)
+                r[i] = 0.35f + 1.05f * rand(seed, i, 3)
                 phase[i] = rand(seed, i, 4) * 6.283f
                 speed[i] = 0.35f + 1.1f * rand(seed, i, 5)
                 bright[i] = 0.35f + 0.65f * rand(seed, i, 6)
@@ -75,9 +91,9 @@ object SpoilerFx {
      */
     fun dust(c: Canvas, r: RectF, seed: Int, closed: Float, spread: Float, d: Float, density: Float = 1f, gain: Float = 1f) {
         if (closed <= 0.002f || r.width() <= 0f || r.height() <= 0f) return
-        val count = ((r.width() * r.height()) / (d * d * 340f) * density).toInt().coerceIn(10, 110)
+        val count = ((r.width() * r.height()) / (d * d * 260f) * density).toInt().coerceIn(12, 150)
         val f = field(seed, count)
-        val t = if (Theme.reducedMotion) 0f else AnimationUtils.currentAnimationTimeMillis() / 1000f
+        val t = if (Theme.reducedMotion) 0f else clock()
         halo.color = Theme.p.accent
         core.color = 0xFFFFFFFF.toInt()
         c.save()
@@ -97,10 +113,10 @@ object SpoilerFx {
             val a = (closed * f.bright[i] * twinkle * gain).coerceIn(0f, 1f)
             val rad = f.r[i] * d * (1f + spread * 0.8f)
             halo.strokeWidth = rad * 4.2f
-            halo.alpha = (a * 56).toInt().coerceIn(0, 255)
+            halo.alpha = (a * 40).toInt().coerceIn(0, 255)
             c.drawCircle(px, py, rad * 2.1f, halo)
             core.strokeWidth = rad * 2f
-            core.alpha = (a * 235).toInt().coerceIn(0, 255)
+            core.alpha = (a * 210).toInt().coerceIn(0, 255)
             c.drawCircle(px, py, rad, core)
         }
         c.restore()
@@ -208,8 +224,10 @@ class MessageText(ctx: Context) : TextView(ctx) {
         val want = ink != null && ink!!.progress < 0.999f && isAttachedToWindow && !Theme.reducedMotion
         if (want == ticking) return
         ticking = want
-        if (want) Choreographer.getInstance().postFrameCallback(frames)
-        else Choreographer.getInstance().removeFrameCallback(frames)
+        if (want) {
+            SpoilerFx.resetClock()
+            Choreographer.getInstance().postFrameCallback(frames)
+        } else Choreographer.getInstance().removeFrameCallback(frames)
     }
 
     /** Called by the row when the reveal moved, so the dust starts or stops with it. */
@@ -338,6 +356,43 @@ object Blur {
         val k = side.toFloat() / max(1, max(cur.width, cur.height))
         if (k >= 1f) return cur
         return Bitmap.createScaledBitmap(cur, max(1, (cur.width * k).toInt()), max(1, (cur.height * k).toInt()), true)
+    }
+}
+
+/** A short burst of dust over a fixed rectangle, drawn above whatever it is added to. */
+class DustBurst(ctx: Context, private val box: RectF, private val seed: Int) : View(ctx) {
+    private var t = 0f
+    private var last = 0L
+    private val frames = object : Choreographer.FrameCallback {
+        override fun doFrame(now: Long) {
+            val dt = (if (last == 0L) 1f / 60 else (now - last) / 1e9f).coerceIn(0f, 1f / 20)
+            last = now
+            t += dt / animatorScale() / 0.42f
+            if (t >= 1f) {
+                (parent as? android.view.ViewGroup)?.removeView(this@DustBurst)
+                return
+            }
+            invalidate()
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    init {
+        isClickable = false
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        Choreographer.getInstance().postFrameCallback(frames)
+    }
+
+    override fun onDetachedFromWindow() {
+        Choreographer.getInstance().removeFrameCallback(frames)
+        super.onDetachedFromWindow()
+    }
+
+    override fun onDraw(c: Canvas) {
+        SpoilerFx.dust(c, box, seed, (1f - t) * 0.85f, t, resources.displayMetrics.density, density = 0.6f)
     }
 }
 

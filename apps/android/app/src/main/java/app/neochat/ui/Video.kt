@@ -85,6 +85,14 @@ class PosterView(ctx: Context) : ImageView(ctx) {
     var once = false
         set(v) {
             field = v
+            restart()
+            invalidate()
+        }
+    /** A view-once file already opened: its cover stops drifting, the card says what became of it. */
+    var onceSeen = false
+        set(v) {
+            field = v
+            restart()
             invalidate()
         }
     /** The line on the cover of a view-once file: "Фото", "Просмотрено". */
@@ -144,11 +152,13 @@ class PosterView(ctx: Context) : ImageView(ctx) {
     }
 
     private fun restart() {
-        val want = hidden && reveal < 0.999f && isAttachedToWindow && !Theme.reducedMotion
+        val want = ((hidden && reveal < 0.999f) || (once && !onceSeen)) && isAttachedToWindow && !Theme.reducedMotion
         if (want == ticking) return
         ticking = want
-        if (want) Choreographer.getInstance().postFrameCallback(frames)
-        else Choreographer.getInstance().removeFrameCallback(frames)
+        if (want) {
+            SpoilerFx.resetClock()
+            Choreographer.getInstance().postFrameCallback(frames)
+        } else Choreographer.getInstance().removeFrameCallback(frames)
     }
 
     override fun onAttachedToWindow() {
@@ -176,6 +186,12 @@ class PosterView(ctx: Context) : ImageView(ctx) {
         super.onDraw(c)
         if (once) {
             drawCover(c)
+            // No poster travels with a view-once file, so the cover is the same living dust
+            // over the dark plate: one gesture for everything hidden.
+            if (!onceSeen) {
+                box.set(0f, 0f, width.toFloat(), height.toFloat())
+                SpoilerFx.dust(c, box, seed, 1f, 0f, resources.displayMetrics.density, density = 1.2f)
+            }
             return
         }
         val d = resources.displayMetrics.density
@@ -225,7 +241,7 @@ class PosterView(ctx: Context) : ImageView(ctx) {
         fill.color = 0xFF05070C.toInt()
         fill.alpha = (52 * (1f - p)).toInt()
         c.drawRect(box, fill)
-        SpoilerFx.dust(c, box, seed, 1f - p, p, d)
+        SpoilerFx.dust(c, box, seed, 1f - p, p, d, density = 1.5f)
         SpoilerFx.sweep(c, box, p)
     }
 

@@ -6,8 +6,10 @@
 #include "spoiler.h"
 #include "style.h"
 #include "theme.h"
+#include "videoplayer.h"
 
 #include <QApplication>
+#include <cstdio>
 #include <QBuffer>
 #include <QDateTime>
 #include <QDir>
@@ -21,7 +23,7 @@ int failures = 0;
 
 void check(bool ok, const char *what)
 {
-    qInfo("%s %s", ok ? "ok  " : "FAIL", what);
+    fprintf(stderr, "%s %s\n", ok ? "ok  " : "FAIL", what);
     if (!ok)
         ++failures;
 }
@@ -207,6 +209,40 @@ int main(int argc, char **argv)
     check(model.finishGone(), "farewell finishes");
     check(!model.anyGone() && rowOf(model, QStringLiteral("p10")) < 0, "deleted row is gone");
 
-    qInfo(failures ? "SPOILERTEST FAILED: %d" : "SPOILERTEST PASSED", failures);
+    // A view-once file carries no poster: its cover is the living dust, and it keeps the list awake.
+    MessageModel onceModel;
+    QJsonObject onceFile{{"name", "once.jpg"}, {"mime", "image/jpeg"}, {"size", 90000}, {"image", true}, {"once", true}, {"viewed", false}};
+    QJsonObject onceMsg{{"id", "o1"}, {"local_id", 1}, {"kind", "file"}, {"outgoing", false}, {"status", "delivered"},
+                        {"sent_at", double(QDateTime::currentMSecsSinceEpoch() - 60000)}, {"sender_name", "Анна"}, {"sender_user_id", "u1"}, {"text", QString()}};
+    onceMsg.insert("file", onceFile);
+    onceModel.merge({onceMsg}, false);
+    MessageView onceView;
+    onceView.setModel(&onceModel);
+    onceView.resize(660, 500);
+    onceView.show();
+    QApplication::processEvents();
+    check(onceView.liveCover(), "view-once cover keeps the dust alive");
+    onceView.grab().save(out.filePath("once-cover.png"));
+
+    // The player panel and its control row stay inside the window, never at negative coordinates.
+    QWidget host;
+    host.resize(800, 600);
+    host.show();
+    QApplication::processEvents();
+    VideoViewer player(&host, QStringLiteral("missing-video.mp4"), QStringLiteral("probe"));
+    QApplication::processEvents();
+    auto *panel = player.findChild<QWidget *>(QStringLiteral("videoPanel"));
+    auto *bar = player.findChild<QWidget *>(QStringLiteral("videoControls"));
+    check(panel && bar, "player panel and controls exist");
+    if (panel && bar) {
+        const QRect pr = panel->geometry(), br = bar->geometry();
+        check(pr.x() >= 0 && pr.y() >= 0 && pr.right() <= host.width() && pr.bottom() <= host.height(), "panel stays inside the window");
+        check(pr.width() < host.width(), "panel is not a full-window takeover by default");
+        check(br.y() >= 0 && br.bottom() <= pr.height(), "control row stays inside the panel");
+    }
+    player.close();
+    QApplication::processEvents();
+
+    fprintf(stderr, failures ? "SPOILERTEST FAILED: %d\n" : "SPOILERTEST PASSED\n", failures);
     return failures ? 1 : 0;
 }

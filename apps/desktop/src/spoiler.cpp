@@ -33,7 +33,7 @@ struct Field {
         for (int i = 0; i < count; ++i) {
             x[i] = rand(seed, i, 1);
             y[i] = rand(seed, i, 2);
-            r[i] = 0.5 + 1.7 * rand(seed, i, 3);
+            r[i] = 0.35 + 1.05 * rand(seed, i, 3);
             phase[i] = rand(seed, i, 4) * 6.283;
             speed[i] = 0.35 + 1.1 * rand(seed, i, 5);
             bright[i] = 0.35 + 0.65 * rand(seed, i, 6);
@@ -89,7 +89,7 @@ void dust(QPainter &p, const QRectF &r, quint32 seed, qreal closed, qreal spread
 {
     if (closed <= 0.002 || r.width() <= 0 || r.height() <= 0)
         return;
-    const int count = qBound(10, int(r.width() * r.height() / 340.0 * density), 110);
+    const int count = qBound(12, int(r.width() * r.height() / 260.0 * density), 150);
     const Field &f = field(seed, count);
     const qreal t = Theme::reducedMotion() ? 0.0 : now() / 1000.0;
     p.save();
@@ -111,10 +111,10 @@ void dust(QPainter &p, const QRectF &r, quint32 seed, qreal closed, qreal spread
         const qreal a = qBound(0.0, closed * f.bright[i] * twinkle * gain, 1.0);
         const qreal rad = f.r[i] * (1 + spread * 0.8);
         QColor halo = accent;
-        halo.setAlphaF(qBound(0.0, a * 0.22, 1.0));
+        halo.setAlphaF(qBound(0.0, a * 0.16, 1.0));
         p.setBrush(halo);
         p.drawEllipse(at, rad * 2.1, rad * 2.1);
-        p.setBrush(QColor(255, 255, 255, qBound(0, int(a * 235), 255)));
+        p.setBrush(QColor(255, 255, 255, qBound(0, int(a * 210), 255)));
         p.drawEllipse(at, rad, rad);
     }
     p.restore();

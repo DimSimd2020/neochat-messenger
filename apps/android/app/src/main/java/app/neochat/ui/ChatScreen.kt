@@ -66,9 +66,6 @@ import java.util.Locale
 
 private val RU = Locale("ru")
 
-/** How long a deleted message takes to leave the history. */
-private const val DEPART_MS = 420L
-
 fun dateTitle(ms: Long): String {
     val t = Calendar.getInstance().apply { timeInMillis = ms }
     val now = Calendar.getInstance()
@@ -474,7 +471,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
         list.layoutManager = layout
         list.adapter = adapter
-        list.itemAnimator = null
+        list.itemAnimator = DepartAnimator()
         list.clipToPadding = false
         list.isVerticalScrollBarEnabled = false
         list.setPadding(dp(8), dp(8), dp(8), dp(8))
@@ -491,6 +488,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             }
         })
         listHolder.addView(list, FrameLayout.LayoutParams(MATCH, MATCH))
+        listHolder.addView(TopFade(ctx, listHolder), FrameLayout.LayoutParams(MATCH, dp(120), Gravity.TOP))
         jump.visibility = View.GONE
         jump.elevation = ctx.dpf(4)
         jump.setOnClickListener { scrollToBottom(true) }
@@ -513,8 +511,9 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun buildHeader() {
         header.gravity = Gravity.CENTER_VERTICAL
-        header.background = GlassDrawable(ctx, radius = ctx.dpf(32))
-        header.frostGlass(listHolder)
+        // No plate: the controls float on the window backdrop, and the history below dissolves
+        // upward into it through TopFade instead of sliding under a glass capsule.
+        header.background = null
         header.setPadding(dp(4), dp(6), dp(4), dp(6))
         val back = IconButton(ctx, R.drawable.ic_back, "Вернуться к чатам")
         back.setOnClickListener { act.closeChat() }
@@ -893,40 +892,15 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             for (m in messages) if (m.optLong("local_id") < oldest) merged[m.str("id")] = m
             for (m in page) merged[m.str("id")] = m
         }
-        // A message that just disappeared keeps its place for the length of its farewell.
-        val leaving = LinkedHashMap<String, JSONObject>()
-        if (!older && !searching && !first && !Theme.reducedMotion) {
-            for (m in messages) {
-                val id = m.str("id")
-                if (id !in merged && id !in departing) leaving[id] = m
-            }
-        }
-        val display = ArrayList<JSONObject>(merged.size + leaving.size)
-        if (leaving.isEmpty() && departing.isEmpty()) {
-            display.addAll(merged.values)
-        } else {
-            val old = HashSet<String>()
-            for (m in messages) {
-                val id = m.str("id")
-                old += id
-                val kept = merged[id]
-                if (kept != null) display += kept else if (id in departing || id in leaving) display += m
-            }
-            for ((id, m) in merged) if (id !in old) display += m
-        }
         val appended = merged.keys.filter { it !in known }
         val anchorPos = layout.findFirstVisibleItemPosition()
         val anchorTop = list.getChildAt(0)?.top ?: 0
         val before = adapter.itemCount
-        messages = display
+        messages = merged.values.toList()
         known.clear()
-        for (m in display) known.add(m.str("id"))
+        known.addAll(merged.keys)
         adapter.animate = if (!older && !first) appended.toHashSet() else emptySet()
         adapter.setItems(build(messages))
-        if (leaving.isNotEmpty()) {
-            departing.putAll(leaving)
-            startDeparture()
-        }
         if (older) {
             layout.scrollToPositionWithOffset(anchorPos + (adapter.itemCount - before), anchorTop)
             jumpId?.let { jumpTo(it) }
@@ -934,7 +908,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
         val newMsgs = page.filter { it.str("id") in appended }
         val own = newMsgs.any { it.optBoolean("outgoing") }
-        if (wasBottom || own) {
+        // Only fresh messages move the view: a deletion or an edit must not scroll the history.
+        if (newMsgs.isNotEmpty() && (wasBottom || own)) {
             list.post { scrollToBottom(!first) }
         } else if (newMsgs.any { !it.optBoolean("outgoing") }) {
             showJump(true)
@@ -944,48 +919,53 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     // ---- a message leaving ----
 
-    /** Messages on their way out: they stay in the list until the farewell has played. */
-    private val departing = LinkedHashMap<String, JSONObject>()
-    private var departAnim: android.animation.ValueAnimator? = null
-    private var departT = 0f
-
-    /** The bubble dissolves into dust, drifts to its own side and the row closes under it. */
-    private fun startDeparture() {
-        val old = departAnim
-        departAnim = null
-        old?.cancel()
-        departT = 0f
-        val a = android.animation.ValueAnimator.ofFloat(0f, 1f)
-        a.duration = DEPART_MS
-        a.addUpdateListener { anim ->
-            departT = anim.animatedValue as Float
-            eachDeparting { it.applyDepart(departT) }
+    /**
+     * The farewell of a deleted message. The list animator owns the row: it fades, drifts to its
+     * own side and shrinks a little while the rows below glide up — the layout is never touched
+     * by hand, so the history cannot jump. Dust is drawn over the place the row leaves.
+     */
+    private inner class DepartAnimator : androidx.recyclerview.widget.DefaultItemAnimator() {
+        init {
+            supportsChangeAnimations = false
+            removeDuration = 300
+            moveDuration = 280
+            addDuration = 240
         }
-        a.addListener(object : android.animation.AnimatorListenerAdapter() {
-            override fun onAnimationEnd(animation: android.animation.Animator) {
-                if (departAnim === animation) finishDeparture()
+
+        override fun animateRemove(holder: RecyclerView.ViewHolder): Boolean {
+            val v = holder.itemView
+            val out = (holder as? MessageHolder)?.row?.message?.optBoolean("outgoing") == true
+            dustAt(v)
+            // The base animator owns the fade and the RecyclerView bookkeeping, and puts alpha
+            // and translation back to neutral when it ends; bypassing or cancelling it leaves
+            // tmp-detached rows that crash the next layout. Scale and drift ride along on their
+            // own animator, over properties the base one does not touch.
+            val started = super.animateRemove(holder)
+            if (started && !Theme.reducedMotion) {
+                android.animation.ObjectAnimator.ofPropertyValuesHolder(
+                    v,
+                    android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X, 0.92f),
+                    android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y, 0.92f),
+                    android.animation.PropertyValuesHolder.ofFloat(View.TRANSLATION_X, if (out) ctx.dpf(28) else -ctx.dpf(28)),
+                ).apply {
+                    duration = removeDuration
+                    interpolator = Theme.surfaceCurve
+                    start()
+                }
             }
-        })
-        departAnim = a
-        a.start()
-    }
-
-    private fun eachDeparting(block: (BubbleRow) -> Unit) {
-        for (i in 0 until list.childCount) {
-            val h = list.getChildViewHolder(list.getChildAt(i)) as? MessageHolder ?: continue
-            if (h.row.message.str("id") in departing) block(h.row)
+            return started
         }
     }
 
-    private fun finishDeparture() {
-        departAnim = null
-        if (departing.isEmpty()) return
-        val ids = departing.keys.toHashSet()
-        departing.clear()
-        messages = messages.filter { it.str("id") !in ids }
-        known.removeAll(ids)
-        adapter.setItems(build(messages))
-        if (atBottom()) scrollToBottom(false)
+    /** A short burst of dust where a deleted row was, drawn above the history. */
+    private fun dustAt(v: View) {
+        if (Theme.reducedMotion) return
+        val r = android.graphics.Rect()
+        if (!v.getGlobalVisibleRect(r)) return
+        listHolder.offsetDescendantRectToMyCoords(v, r)
+        val box = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
+        val id = (v as? SwipeToReplyLayout)?.let { (it.getChildAt(1) as? BubbleRow)?.message?.str("id") }.orEmpty()
+        listHolder.addView(DustBurst(ctx, box, id.hashCode()), flp(MATCH, MATCH))
     }
 
     private fun build(ms: List<JSONObject>): List<Any> {
@@ -1004,7 +984,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val plain = m.str("kind") != "service"
             val sameAsPrev = plain && prev != null && prev.str("kind") != "service" && prev.str("sender_user_id") == m.str("sender_user_id") && dayKey(prev.optLong("sent_at")) == day
             val sameAsNext = plain && next != null && next.str("kind") != "service" && next.str("sender_user_id") == m.str("sender_user_id") && dayKey(next.optLong("sent_at")) == day
-            out += Item(m, firstInRun = !sameAsPrev, lastInRun = !sameAsNext, going = m.str("id") in departing)
+            out += Item(m, firstInRun = !sameAsPrev, lastInRun = !sameAsNext)
         }
         return out
     }
@@ -1040,7 +1020,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         CoreClient.call("mark_read", JSONObject().put("conversation_id", conversationId)) { _, _ -> readPending = false }
     }
 
-    private data class Item(val m: JSONObject, val firstInRun: Boolean, val lastInRun: Boolean, val going: Boolean = false)
+    private data class Item(val m: JSONObject, val firstInRun: Boolean, val lastInRun: Boolean)
 
     private inner class MessageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         private var items: List<Any> = emptyList()
@@ -1057,7 +1037,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 override fun areContentsTheSame(o: Int, n: Int): Boolean {
                     val a = old[o]
                     val b = v[n]
-                    if (a is Item && b is Item) return a.firstInRun == b.firstInRun && a.lastInRun == b.lastInRun && a.going == b.going && a.m.toString() == b.m.toString()
+                    if (a is Item && b is Item) return a.firstInRun == b.firstInRun && a.lastInRun == b.lastInRun && a.m.toString() == b.m.toString()
                     return a == b
                 }
             }, false).dispatchUpdatesTo(this)
@@ -1103,39 +1083,31 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             holder.row.bind(item)
             val appear = holder.itemView
             val id = item.m.str("id")
-            if (item.going) {
-                // A row on its way out keeps the farewell already in progress.
-                appear.animate().cancel()
-                appear.stopSprings(Prop.Y, Prop.SCALE)
-                appear.alpha = 1f
-                appear.translationY = 0f
-                appear.scaleX = 1f
-                appear.scaleY = 1f
-                holder.row.applyDepart(departT)
-                return
-            }
-            holder.row.resetDepart()
-            if (appear.layoutParams.height != WRAP) {
-                appear.layoutParams.height = WRAP
-                appear.requestLayout()
-            }
+            // The list animator owns the row's fade and drift and restores them when it ends;
+            // cancelling it from a rebind crashes RecyclerView on tmp-detached rows. Only the
+            // scale and drift of our own farewell animator are put back here, plus the inner
+            // view, which the list animator never touches.
+            appear.scaleX = 1f
+            appear.scaleY = 1f
+            appear.translationX = 0f
+            val row = holder.row
+            row.stopSprings(Prop.Y, Prop.SCALE)
+            row.animate().cancel()
             if (id in animate && !Theme.reducedMotion) {
                 animate = animate - id
-                appear.pivotX = if (item.m.optBoolean("outgoing")) appear.width.toFloat() else 0f
-                appear.pivotY = appear.height.toFloat()
-                appear.alpha = 0f
-                appear.animate().alpha(1f).setDuration(120).start()
-                appear.spring(Prop.Y).snap(ctx.dpf(22))
-                appear.spring(Prop.SCALE).snap(0.82f)
-                appear.springTo(Prop.Y, 0f, 0.46f, 0.74f)
-                appear.springTo(Prop.SCALE, 1f, 0.42f, 0.62f)
+                row.pivotX = if (item.m.optBoolean("outgoing")) row.width.toFloat() else 0f
+                row.pivotY = row.height.toFloat()
+                row.alpha = 0f
+                row.animate().alpha(1f).setDuration(120).start()
+                row.spring(Prop.Y).snap(ctx.dpf(22))
+                row.spring(Prop.SCALE).snap(0.82f)
+                row.springTo(Prop.Y, 0f, 0.46f, 0.74f)
+                row.springTo(Prop.SCALE, 1f, 0.42f, 0.62f)
             } else {
-                appear.animate().cancel()
-                appear.stopSprings(Prop.Y, Prop.SCALE)
-                appear.alpha = 1f
-                appear.translationY = 0f
-                appear.scaleX = 1f
-                appear.scaleY = 1f
+                row.alpha = 1f
+                row.translationY = 0f
+                row.scaleX = 1f
+                row.scaleY = 1f
             }
         }
 
@@ -1229,8 +1201,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         private var statusId = ""
         private var statusSig = ""
         private var pendingTap: Runnable? = null
-        private var departT = -1f
-        private var departHeight = 0
 
         /**
          * A tap opens the menu; a second tap within the double-tap time puts the quick
@@ -1256,49 +1226,15 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
         /** Moves the cover of a hidden picture at once; the core confirms it a moment later. */
         fun animateReveal(target: Float) {
-            if (photo.hidden) photo.revealTo(target)
+            if (!photo.hidden) return
+            photo.revealTo(target)
+            // A breath of scale as the cover leaves, so the reveal lands instead of just fading.
+            if (target == 1f) photo.kick(Prop.SCALE, 0.05f, 0.5f, 0.62f)
         }
 
-        /**
-         * The farewell of a deleted message: it dissolves into dust, drifts to its own side and
-         * the row closes under it, so the history slides together instead of jumping.
-         */
-        fun applyDepart(t: Float) {
-            departT = t
-            val fade = (t / 0.5f).coerceIn(0f, 1f)
-            alpha = 1f - fade
-            val s = 1f - 0.1f * fade
-            scaleX = s
-            scaleY = s
-            translationX = (if (m.optBoolean("outgoing")) 1f else -1f) * dpf(24) * fade
-            val host = parent as? View ?: return
-            if (departHeight == 0) departHeight = host.height
-            val collapse = Theme.surfaceCurve.getInterpolation(((t - 0.35f) / 0.65f).coerceIn(0f, 1f))
-            val h = (departHeight * (1f - collapse)).toInt()
-            val lp = host.layoutParams
-            if (lp != null && lp.height != h) {
-                lp.height = h
-                host.layoutParams = lp
-            }
-            invalidate()
-        }
-
-        fun resetDepart() {
-            if (departT < 0f) return
-            departT = -1f
-            departHeight = 0
-            alpha = 1f
-            scaleX = 1f
-            scaleY = 1f
-            translationX = 0f
-            invalidate()
-        }
-
-        override fun dispatchDraw(c: Canvas) {
-            super.dispatchDraw(c)
-            if (departT < 0f || departT >= 1f) return
-            val r = RectF(bubble.left.toFloat(), bubble.top.toFloat(), bubble.right.toFloat(), bubble.bottom.toFloat())
-            SpoilerFx.dust(c, r, m.str("id").hashCode(), (1f - departT) * 0.85f, departT, resources.displayMetrics.density, density = 0.6f)
+        /** The sharp original, once it arrives, under the melting cover. */
+        fun showFull(bmp: Bitmap) {
+            if (photo.hidden) photo.setImageBitmap(bmp)
         }
 
         /** A tap on a hidden run of text opens it, a tap on an open one closes it again. */
@@ -1554,13 +1490,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 val id = m.str("id")
                 val once = isOnce(m)
                 val seen = isViewed(m)
-                val hiddenMark = isHiddenMedia(m)
                 val closed = isSpoiler(m)
+                val hiddenMark = isHiddenMedia(m) || closed
                 val shot = once && seen && f.optBoolean("shot")
                 val length = if (video && !once && f.optLong("duration") > 0) Videos.clock(f.optLong("duration")) else ""
                 val noun = if (video) "видео" else "фото"
                 photo.video = video && !once
                 photo.once = once
+                photo.onceSeen = seen
                 photo.length = length
                 photo.hidden = false
                 photo.onReveal = null
@@ -1906,6 +1843,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         val closed = isSpoiler(m)
         Haptics.tick(root)
         rowOf(id)?.animateReveal(if (closed) 1f else 0f)
+        // The original is fetched while the cover melts, so the reveal ends on a sharp picture.
+        if (closed) Photos.load(m) { bmp -> rowOf(id)?.showFull(bmp) }
         CoreClient.call("media_shown", JSONObject().put("_account_id", accountId).put("message_id", id).put("on", closed)) { _, e ->
             if (e == null) return@call
             act.toast(e.message)
@@ -2895,9 +2834,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         reveals.clear()
         inks.clear()
         openText.clear()
-        departAnim?.cancel()
-        departAnim = null
-        departing.clear()
         CoreClient.call("burn_viewed", JSONObject().put("_account_id", accountId).put("conversation_id", conversationId)) { _, _ -> }
     }
 
@@ -2907,9 +2843,6 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 gen++
                 messages = emptyList()
                 known.clear()
-                departing.clear()
-                departAnim?.cancel()
-                departAnim = null
                 loading = false
                 hasMore = true
                 searching = false

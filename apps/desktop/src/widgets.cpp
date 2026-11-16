@@ -71,6 +71,10 @@ const QHash<QString, QString> &icons()
         {"pause", R"(<rect x="6.5" y="5" width="3.8" height="14" rx="1.2" fill="#C"/><rect x="13.7" y="5" width="3.8" height="14" rx="1.2" fill="#C"/>)"},
         {"stop", R"(<rect x="6.5" y="6.5" width="11" height="11" rx="2.4" fill="#C"/>)"},
         {"transcript", R"(<path d="M4 6.5h16M4 12h10M4 17.5h13"/>)"},
+        {"speaker", R"(<path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5H4Z"/><path d="M15.5 9.2a4.2 4.2 0 0 1 0 5.6M18 6.8a7.4 7.4 0 0 1 0 10.4"/>)"},
+        {"speaker-off", R"(<path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5H4Z"/><path d="m16 9.5 5 5M21 9.5l-5 5"/>)"},
+        {"expand", R"(<path d="M9 3H3v6M15 3h6v6M9 21H3v-6M15 21h6v-6"/>)"},
+        {"collapse", R"(<path d="M3 9h6V3M21 9h-6V3M3 15h6v6M21 15h-6v6"/>)"},
     };
     return map;
 }
@@ -868,6 +872,13 @@ void Toggle::paintEvent(QPaintEvent *)
     p.setPen(Qt::NoPen);
     p.setBrush(bg);
     p.drawRoundedRect(track, 13, 13);
+    // In the light palette an unchecked track is nearly the colour of the sheet under it;
+    // a blue rim keeps the switch readable as a control instead of a blank pill.
+    if (!Theme::instance()->isDark()) {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(54, 127, 244, k > 0.5 ? 255 : 150), 1.4));
+        p.drawRoundedRect(track.adjusted(0.7, 0.7, -0.7, -0.7), 12.3, 12.3);
+    }
     const qreal cx = track.left() + 13 + t * 20;
     // The knob sits above the track on its own shadow, which is what makes the switch look
     // like something you can push rather than a painted rectangle.

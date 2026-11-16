@@ -8,6 +8,18 @@ import kotlin.math.PI
 import kotlin.math.abs
 
 /**
+ * The system animator duration scale. The developer slow-motion option scales ValueAnimator and
+ * view animations; our Choreographer springs and dust must follow it too, or they flash past
+ * while everything else crawls.
+ */
+fun animatorScale(): Float = runCatching {
+    android.provider.Settings.Global.getFloat(
+        app.neochat.App.instance.contentResolver,
+        android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f,
+    )
+}.getOrDefault(1f).coerceAtLeast(0.05f)
+
+/**
  * Damped spring stepped on display frames. [response] is the period of the undamped motion in
  * seconds and [damping] the damping ratio (1 settles without overshoot), as in SwiftUI.
  * A new target keeps the current velocity, so an interrupted motion never jumps.
@@ -30,6 +42,7 @@ class Spring(
         private set
     private var last = 0L
     private var rest: (() -> Unit)? = null
+    private var scale = 1f
 
     /** Jumps to [v] and stops. */
     fun snap(v: Float) {
@@ -54,6 +67,7 @@ class Spring(
         target = t
         this.velocity = velocity
         rest = onRest
+        scale = animatorScale()
         if (!running) {
             running = true
             last = 0L
@@ -69,7 +83,7 @@ class Spring(
 
     override fun doFrame(now: Long) {
         if (!running) return
-        val dt = (if (last == 0L) 1f / 60 else (now - last) / 1e9f).coerceIn(0f, 1f / 20)
+        val dt = ((if (last == 0L) 1f / 60 else (now - last) / 1e9f).coerceIn(0f, 1f / 20)) / scale
         last = now
         val w = 2 * PI.toFloat() / response
         val k = w * w
