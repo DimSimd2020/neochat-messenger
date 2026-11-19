@@ -340,9 +340,21 @@ Connection: close
         assert_eq!(check["version"], "9.9.9");
         assert_eq!(check["tag"], "alpha");
         assert!(check["url"].as_str().unwrap().ends_with("/v1/app/alpha/files/NeoChat-9.9.9-alpha-x64.msi"));
-        let got = tester.inner.download_update(&ask).unwrap();
+        let updates = dir.join("updates");
+        std::fs::create_dir_all(&updates).unwrap();
+        let old = updates.join("NeoChat-0.6.9.4-x64.msi");
+        std::fs::write(&old, b"previous verified installer").unwrap();
+        let got = std::thread::scope(|scope| {
+            let first = scope.spawn(|| tester.inner.download_update(&ask).unwrap());
+            let second = scope.spawn(|| tester.inner.download_update(&ask).unwrap());
+            let got = first.join().unwrap();
+            assert_eq!(second.join().unwrap(), got);
+            got
+        });
         assert_eq!(got["tag"], "alpha");
         assert_eq!(std::fs::read(got["path"].as_str().unwrap()).unwrap(), BUILD);
+        assert!(old.exists());
+        assert_eq!(seen.lock().unwrap().iter().filter(|(path, _)| path.starts_with("/v1/app/alpha/files/")).count(), 1);
         // Already on that build: nothing more to offer.
         assert_eq!(tester.inner.check_update(&json!({"platform": "windows", "version": "9.9.9"})).unwrap()["available"], false);
         drop(tester);

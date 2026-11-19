@@ -208,7 +208,7 @@ impl Inner {
             "history" => {
                 let fresh: i64 = kv_get_str(&self.db().conn, "history_fresh_until")?.and_then(|v| v.parse().ok()).unwrap_or(0);
                 if fresh > crate::store::now_ms() && self.backup_key()?.is_some() {
-                    kv_set(&self.db().conn, "history_restore_pending", b"1")?;
+                    kv_set(&self.db().conn, "history_restore_pending", event_id.as_bytes())?;
                 }
                 self.mark_processed(event_id)
             }
