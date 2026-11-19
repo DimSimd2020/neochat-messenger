@@ -83,20 +83,23 @@ pub fn encrypt_with(src: &Path, dst: &Path, key: [u8; 32], nonce: [u8; 19]) -> R
 
 /// Decrypts to `dst`; on any failure the partial output is removed.
 pub fn decrypt_file(src: &Path, dst: &Path, key: &[u8], nonce: &[u8]) -> Result<()> {
-    let res = decrypt_inner(src, dst, key, nonce);
+    decrypt_reader(BufReader::new(File::open(src)?), dst, key, nonce)
+}
+
+pub(crate) fn decrypt_reader(input: impl Read, dst: &Path, key: &[u8], nonce: &[u8]) -> Result<()> {
+    let res = decrypt_inner(input, dst, key, nonce);
     if res.is_err() {
         let _ = std::fs::remove_file(dst);
     }
     res
 }
 
-fn decrypt_inner(src: &Path, dst: &Path, key: &[u8], nonce: &[u8]) -> Result<()> {
+fn decrypt_inner(mut input: impl Read, dst: &Path, key: &[u8], nonce: &[u8]) -> Result<()> {
     let bad = || Error::Crypto("Файл повреждён или изменён".into());
     let key: [u8; 32] = key.try_into().map_err(|_| bad())?;
     let nonce: [u8; 19] = nonce.try_into().map_err(|_| bad())?;
     let aead = XChaCha20Poly1305::new((&key).into());
     let mut dec = Some(DecryptorBE32::from_aead(aead, (&nonce).into()));
-    let mut input = BufReader::new(File::open(src)?);
     let mut out = BufWriter::new(File::create(dst)?);
     let mut cur = vec![0u8; CHUNK + TAG];
     let mut next = vec![0u8; CHUNK + TAG];

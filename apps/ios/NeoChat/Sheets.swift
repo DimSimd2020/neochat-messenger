@@ -568,7 +568,18 @@ final class SettingsViewController: SheetViewController {
             cache?.value.text = self?.sizeOf(self?.cacheDirs() ?? [])
             self?.toast("Кэш очищен")
         }, for: .touchUpInside)
-        section("Данные", [cache], footer: "Удаляет временные файлы и расшифрованные копии фото. Переписка остаётся.")
+        let restore = NavRow("clock.arrow.circlepath", "Восстановить переписку") { [weak self] in
+            self?.toast("Проверяем зашифрованную копию переписки…")
+            Core.shared.call("restore_history") { [weak self] result in
+                switch result {
+                case .failure(let e): self?.toast(e.message)
+                case .success(let value):
+                    let restored = (value as? JSON)?.bool("restored") == true
+                    self?.toast(restored ? "Копия переписки загружена" : "Сохранённой копии пока нет")
+                }
+            }
+        }
+        section("Данные", [cache, restore], footer: "Удаляет временные файлы и расшифрованные копии фото. Переписка остаётся.")
 
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         let channel = NavRow("arrow.triangle.2.circlepath", "Сообщать об обновлениях:", value: Prefs.updateChannel) {}

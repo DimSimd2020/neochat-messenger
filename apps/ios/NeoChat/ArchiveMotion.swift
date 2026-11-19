@@ -2,6 +2,88 @@ import UIKit
 
 func replyHaptic() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
 
+final class GestureProgressView: UIView {
+    private let track = CAShapeLayer()
+    private let ring = CAShapeLayer()
+    private let burst = CAShapeLayer()
+    private let radius: CGFloat
+
+    init(radius: CGFloat) {
+        self.radius = radius
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false
+        accessibilityElementsHidden = true
+        for shape in [track, ring, burst] {
+            shape.fillColor = nil
+            shape.lineWidth = 1.7
+            shape.lineCap = .round
+            layer.addSublayer(shape)
+        }
+        track.opacity = 0
+        ring.opacity = 0
+        ring.strokeEnd = 0
+        burst.opacity = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let circle = UIBezierPath(arcCenter: center, radius: radius, startAngle: -.pi / 2, endAngle: 1.5 * .pi, clockwise: true)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for shape in [track, ring, burst] {
+            shape.frame = bounds
+            shape.strokeColor = Theme.accent.resolvedColor(with: traitCollection).cgColor
+        }
+        track.path = circle.cgPath
+        ring.path = circle.cgPath
+        CATransaction.commit()
+    }
+
+    func setProgress(_ progress: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        track.opacity = progress > 0.02 ? 0.22 : 0
+        ring.opacity = progress > 0.02 ? 1 : 0
+        ring.strokeEnd = min(1, max(0, progress))
+        CATransaction.commit()
+    }
+
+    func reset() {
+        setProgress(0)
+        burst.removeAllAnimations()
+    }
+
+    func complete() {
+        guard !Theme.reducedMotion else { return }
+        func rays(distance: CGFloat, length: CGFloat) -> CGPath {
+            let path = UIBezierPath()
+            for i in 0..<8 {
+                let angle = (CGFloat(i) + 0.5) * .pi / 4
+                let x = cos(angle), y = sin(angle)
+                path.move(to: CGPoint(x: bounds.midX + x * distance, y: bounds.midY + y * distance))
+                path.addLine(to: CGPoint(x: bounds.midX + x * (distance + length), y: bounds.midY + y * (distance + length)))
+            }
+            return path.cgPath
+        }
+        let travel = CABasicAnimation(keyPath: "path")
+        travel.fromValue = rays(distance: radius + 3, length: 5)
+        travel.toValue = rays(distance: radius + 11, length: 3)
+        travel.duration = 0.32
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.9
+        fade.toValue = 0
+        fade.duration = travel.duration
+        let animation = CAAnimationGroup()
+        animation.animations = [travel, fade]
+        animation.duration = travel.duration
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        burst.add(animation, forKey: "completion")
+    }
+}
+
 final class ArchiveIconView: UIView {
     var progress: CGFloat = 0 { didSet { setNeedsDisplay() } }
 

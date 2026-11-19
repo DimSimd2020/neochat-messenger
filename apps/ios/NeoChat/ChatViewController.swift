@@ -437,7 +437,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 self.input.text = ""; self.textViewDidChange(self.input); self.setReply(nil)
                 if ev.bool("hidden") { self.navigationController?.popViewController(animated: !Theme.reducedMotion) }
             case "messages_changed" where ev.str("conversation_id") == self.conversationId: self.scheduleReload()
-            case "sync_reset": self.scheduleReload(); self.refreshConversation(first: false)
+            case "sync_reset", "history_restored": self.scheduleReload(); self.refreshConversation(first: false)
             case "conversations_changed", "contacts_changed", "identity_changed", "connection": self.refreshConversation(first: false)
             case "presence" where self.presenceIds().contains(ev.str("user_id")): self.refreshConversation(first: false)
             default: break
@@ -2214,6 +2214,9 @@ final class BubbleCell: UITableViewCell {
     private let replyPan = UIPanGestureRecognizer()
     private let replyPanDelegate = ReplySwipeDelegate()
     private let replyIcon = UIImageView(image: UIImage(systemName: "arrowshape.turn.up.left.fill"))
+    private let replyHalo = GestureProgressView(radius: 16)
+    private let replyImpact = UIImpactFeedbackGenerator(style: .light)
+    private var replyThresholdCrossed = false
     private var replyArmed = false
     private var replyIconTrailing: NSLayoutConstraint!
     private var replyIconLeading: NSLayoutConstraint!
@@ -2398,6 +2401,8 @@ final class BubbleCell: UITableViewCell {
         replyIcon.alpha = 0
         replyIcon.isAccessibilityElement = false
         replyIcon.translatesAutoresizingMaskIntoConstraints = false
+        replyHalo.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(replyHalo)
         addSubview(replyIcon)
         replyIconTrailing = replyIcon.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18)
         replyIconLeading = replyIcon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18)
@@ -2405,6 +2410,10 @@ final class BubbleCell: UITableViewCell {
         NSLayoutConstraint.activate([
             replyIcon.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             replyIcon.widthAnchor.constraint(equalToConstant: 24), replyIcon.heightAnchor.constraint(equalToConstant: 24),
+            replyHalo.centerXAnchor.constraint(equalTo: replyIcon.centerXAnchor),
+            replyHalo.centerYAnchor.constraint(equalTo: replyIcon.centerYAnchor),
+            replyHalo.widthAnchor.constraint(equalToConstant: 60),
+            replyHalo.heightAnchor.constraint(equalToConstant: 60),
         ])
         bubble.isUserInteractionEnabled = true
         inner.isLayoutMarginsRelativeArrangement = true
@@ -2526,6 +2535,11 @@ final class BubbleCell: UITableViewCell {
     @objc private func panned(_ g: UIPanGestureRecognizer) {
         let threshold: CGFloat = 56
         switch g.state {
+        case .began:
+            replyThresholdCrossed = false
+            replyHalo.reset()
+            replyImpact.prepare()
+            fallthrough
         case .changed:
             let translation = g.translation(in: contentView).x
             let sign: CGFloat = translation >= 0 ? 1 : -1
@@ -2540,16 +2554,20 @@ final class BubbleCell: UITableViewCell {
             let dx = raw < threshold ? raw : threshold + (raw - threshold) * 0.3
             contentView.transform = CGAffineTransform(translationX: sign * min(dx, 88), y: 0)
             let p = min(1, raw / threshold)
+            replyHalo.setProgress(p)
             replyIcon.alpha = p
             replyIcon.transform = CGAffineTransform(scaleX: 0.5 + 0.5 * p, y: 0.5 + 0.5 * p)
-            let armed = raw >= threshold
-            if armed != replyArmed {
-                replyArmed = armed
-                if armed { replyHaptic() }
+            replyArmed = raw >= threshold
+            if replyArmed && !replyThresholdCrossed {
+                replyThresholdCrossed = true
+                layoutIfNeeded()
+                replyImpact.impactOccurred(intensity: 0.85)
+                replyHalo.complete()
             }
         case .ended, .cancelled, .failed:
             let fire = g.state == .ended && replyArmed
             replyArmed = false
+            replyHalo.setProgress(0)
             let reset = { [self] in
                 contentView.transform = .identity
                 replyIcon.alpha = 0
@@ -2569,6 +2587,7 @@ final class BubbleCell: UITableViewCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         replyArmed = false
+        replyHalo.reset()
         replyIcon.alpha = 0
         replyIcon.transform = .identity
     }

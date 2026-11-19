@@ -41,6 +41,8 @@ pub struct Inner {
     pub shutdown: AtomicBool,
     pub conn_state: AtomicU8,
     refresh_lock: Mutex<()>,
+    pub(crate) history_lock: Mutex<()>,
+    pub(crate) update_lock: Mutex<()>,
     pub ws_active: AtomicBool,
     /// Serializes sync cycles between the worker and `sync_now`.
     pub cycle_lock: Mutex<()>,
@@ -82,6 +84,8 @@ impl Core {
             shutdown: AtomicBool::new(false),
             conn_state: AtomicU8::new(STATE_OFFLINE),
             refresh_lock: Mutex::new(()),
+            history_lock: Mutex::new(()),
+            update_lock: Mutex::new(()),
             ws_active: AtomicBool::new(false),
             cycle_lock: Mutex::new(()),
             presence: Mutex::new(HashMap::new()),
@@ -285,6 +289,7 @@ impl Inner {
             "set_avatar" => self.set_avatar(p),
             "check_update" => self.check_update(p),
             "download_update" => self.download_update(p),
+            "restore_history" => self.restore_account_history(),
             "set_two_factor" => self
                 .authed("PUT", "/v1/accounts/current/settings", Some(&json!({"two_factor": p["enabled"].as_bool().unwrap_or(false)})))
                 .map(|_| Value::Null),
@@ -724,6 +729,7 @@ impl Inner {
             kv_set(&tx, "account_identity", &account.serialize())?;
             kv_set(&tx, "backup_key", &history_key)?;
             self.store_own_roster(&tx, &r.revision.to_string(), &nb, &ns, &account_key)?;
+            kv_set(&tx, "history_restore_pending", b"1")?;
             tx.commit()?;
         }
         let _ = self.upload_key_backup(pw);
@@ -803,6 +809,7 @@ impl Inner {
         kv_set(&tx, "account_identity", &account.serialize())?;
         kv_set(&tx, "backup_key", &history_key)?;
         kv_set(&tx, "pending_recovery_secret", &secret)?;
+        kv_set(&tx, "history_restore_pending", b"1")?;
         self.store_own_roster(&tx, &rev.to_string(), &blob, &sig, &account.identity_key().serialize())?;
         tx.commit()?;
         drop(db);
@@ -872,6 +879,7 @@ impl Inner {
             kv_set(&tx, "primary", b"1")?;
             kv_set(&tx, "account_identity", &account.serialize())?;
             kv_set(&tx, "backup_key", &backup_key)?;
+            kv_set(&tx, "history_restore_pending", b"1")?;
             self.store_tokens(&tx, &out["session"])?;
             for k in ["link_id", "link_secret", "link_transfer"] {
                 kv_del(&tx, k)?;

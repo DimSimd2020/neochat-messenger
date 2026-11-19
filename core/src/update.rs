@@ -8,6 +8,7 @@
 //! offered whichever is newer, the alpha or the public build.
 
 use std::io::Read;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{Value, json};
@@ -91,6 +92,7 @@ impl Inner {
     /// Downloads the newer build into data_dir/updates and returns its path after the
     /// SHA-256 check; an already downloaded file with the right hash is reused.
     pub fn download_update(&self, p: &Value) -> Result<Value> {
+        let _update = self.update_lock.lock().unwrap_or_else(|e| e.into_inner());
         let current = s(p, "version")?;
         let Some((e, _, alpha)) = self.update_entry(s(p, "platform")?, channel_of(p))? else {
             return Err(Error::Invalid("Обновлений нет".into()));
@@ -107,22 +109,32 @@ impl Inner {
         let dir = self.data_dir.join("updates");
         std::fs::create_dir_all(&dir)?;
         let dest = dir.join(file);
-        if dest.exists() && sha256_file(&dest)? == want {
+        if sha256_file(&dest).is_ok_and(|hash| hash == want) {
             return Ok(json!({"path": dest.to_string_lossy(), "version": version, "tag": e["tag"]}));
-        }
-        // Old builds are no longer needed.
-        for old in std::fs::read_dir(&dir)?.flatten() {
-            let _ = std::fs::remove_file(old.path());
         }
         let part = dir.join(format!("{file}.part"));
         let server = self.update_server()?;
         let (path, token) = if alpha { (format!("/v1/app/alpha/files/{file}"), self.access_token()?) } else { (format!("/v1/app/files/{file}"), String::new()) };
-        Api::new(&server).download(&path, &token, &part, MAX_UPDATE)?;
-        if sha256_file(&part)? != want {
+        let result: Result<()> = (|| {
+            let total = e["size"].as_u64().filter(|&size| size > 0).unwrap_or(0);
+            let mut last = Instant::now();
+            self.emit(json!({"type":"update_progress","done":0,"total":total}));
+            let downloaded = Api::new(&server).download_progress(&path, &token, &part, MAX_UPDATE, |done, length| {
+                if last.elapsed() >= Duration::from_millis(100) {
+                    self.emit(json!({"type":"update_progress","done":done,"total":if total > 0 { total } else { length }}));
+                    last = Instant::now();
+                }
+            })?;
+            if (total > 0 && downloaded != total) || sha256_file(&part)? != want {
+                return Err(Error::Crypto("Файл обновления повреждён. Попробуйте загрузить его ещё раз".into()));
+            }
+            std::fs::rename(&part, &dest)?;
+            Ok(())
+        })();
+        if result.is_err() {
             let _ = std::fs::remove_file(&part);
-            return Err(Error::Crypto("Файл обновления повреждён. Попробуйте позже".into()));
         }
-        std::fs::rename(&part, &dest)?;
+        result?;
         Ok(json!({"path": dest.to_string_lossy(), "version": version, "tag": e["tag"]}))
     }
 }

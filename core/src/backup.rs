@@ -23,10 +23,11 @@ use crate::engine::Inner;
 use crate::error::{Error, Result};
 use crate::files;
 use crate::keys::{b64, random_bytes, sha256};
-use crate::store::{kv_get, kv_get_str, kv_set, now_ms};
+use crate::store::{kv_del, kv_get, kv_get_str, kv_set, now_ms};
 
 /// History is re-uploaded at most this often, and only after something changed.
 const UPLOAD_EVERY_MS: i64 = 10 * 60 * 1000;
+const RESTORE_RETRY_MS: i64 = 60_000;
 /// Server-side cap for one history backup.
 pub const MAX_HISTORY: u64 = 200 << 20;
 
@@ -162,6 +163,17 @@ impl Inner {
     /// Uploads the history when it changed and the last upload is old enough.
     pub fn maybe_upload_history(&self) -> Result<()> {
         let Some(key) = self.backup_key()? else { return Ok(()) };
+        let (pending, next) = {
+            let db = self.db();
+            (kv_get(&db.conn, "history_restore_pending")?.is_some(),
+                kv_get_str(&db.conn, "history_restore_retry_at")?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0))
+        };
+        if pending {
+            if now_ms() >= next && self.restore_history(&key)? {
+                self.history_restored();
+            }
+            return Ok(());
+        }
         let (last_at, last_mark, mark) = {
             let db = self.db();
             let last_at: i64 = kv_get_str(&db.conn, "history_uploaded_at")?.and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -178,7 +190,9 @@ impl Inner {
         if !force && (mark == last_mark || now_ms() - last_at < UPLOAD_EVERY_MS) {
             return Ok(());
         }
-        self.upload_history(&key)?;
+        if !self.upload_history(&key)? {
+            return Ok(());
+        }
         let db = self.db();
         crate::store::kv_del(&db.conn, "history_force")?;
         kv_set(&db.conn, "history_uploaded_at", now_ms().to_string().as_bytes())?;
@@ -186,7 +200,21 @@ impl Inner {
         Ok(())
     }
 
-    pub fn upload_history(&self, key: &[u8; 32]) -> Result<()> {
+    pub fn upload_history(&self, key: &[u8; 32]) -> Result<bool> {
+        let _history = self.history_lock.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let db = self.db();
+            if kv_get(&db.conn, "history_restore_pending")?.is_some() {
+                return Ok(false);
+            }
+            let has_history: bool = db.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE kind IN ('text','file','poll') AND status NOT IN ('queued','sending','failed'))
+                 OR EXISTS(SELECT 1 FROM deleted_messages)", [], |r| r.get(0),
+            )?;
+            if !has_history {
+                return Ok(false);
+            }
+        }
         let tmp = self.data_dir.join("tmp");
         let plain = tmp.join("history.jsonl");
         let enc = tmp.join("history.enc");
@@ -208,32 +236,48 @@ impl Inner {
         for p in [&plain, &enc, &out] {
             let _ = std::fs::remove_file(p);
         }
-        res
+        res.map(|()| true)
     }
 
     /// Downloads and imports the history backup, if the account has one.
-    pub fn restore_history(&self, key: &[u8; 32]) -> Result<()> {
+    pub fn restore_history(&self, key: &[u8; 32]) -> Result<bool> {
+        let _history = self.history_lock.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let db = self.db();
+            kv_set(&db.conn, "history_restore_pending", b"1")?;
+            kv_set(&db.conn, "history_restore_retry_at", (now_ms() + RESTORE_RETRY_MS).to_string().as_bytes())?;
+        }
         let tmp = self.data_dir.join("tmp");
         let down = tmp.join("history.down");
-        let enc = tmp.join("history.enc");
         let plain = tmp.join("history.jsonl");
-        let res = (|| {
+        let res: Result<bool> = (|| {
             let token = self.access_token()?;
             match self.api()?.download("/v1/accounts/current/history", &token, &down, MAX_HISTORY) {
-                Err(Error::Api { status: 404, .. }) => return Ok(()),
+                Err(Error::Api { status: 404, .. }) => return Ok(false),
                 r => r?,
             };
             let mut r = BufReader::new(File::open(&down)?);
             let mut nonce = [0u8; 19];
             r.read_exact(&mut nonce).map_err(|_| Error::Crypto("Копия переписки повреждена".into()))?;
-            std::io::copy(&mut r, &mut BufWriter::new(File::create(&enc)?))?;
-            files::decrypt_file(&enc, &plain, &subkey(key, "history")?, &nonce)?;
-            self.import_history(&plain)
+            files::decrypt_reader(r, &plain, &subkey(key, "history")?, &nonce)?;
+            self.import_history(&plain, key)?;
+            Ok(true)
         })();
-        for p in [&down, &enc, &plain] {
+        for p in [&down, &plain] {
             let _ = std::fs::remove_file(p);
         }
-        res?;
+        let restored = res?;
+        {
+            let db = self.db();
+            if kv_get(&db.conn, "backup_key")?.as_deref() == Some(key.as_slice()) {
+                kv_del(&db.conn, "history_restore_pending")?;
+                kv_del(&db.conn, "history_restore_retry_at")?;
+            }
+        }
+        drop(_history);
+        if !restored {
+            return Ok(false);
+        }
         // Imported contacts need their current device lists before anyone can write to them.
         let ids: Vec<String> = {
             let db = self.db();
@@ -243,7 +287,21 @@ impl Inner {
         for id in ids {
             let _ = self.refresh_user(&id);
         }
-        Ok(())
+        Ok(true)
+    }
+
+    pub(crate) fn restore_account_history(&self) -> Result<Value> {
+        let key = self.backup_key()?.ok_or(Error::NotLoggedIn)?;
+        let restored = self.restore_history(&key)?;
+        if restored {
+            self.history_restored();
+        }
+        Ok(json!({"restored": restored}))
+    }
+
+    fn history_restored(&self) {
+        self.emit(json!({"type": "history_restored"}));
+        self.emit(json!({"type": "conversations_changed"}));
     }
 
     /// One JSON object per line, streamed so large histories never sit in memory.
@@ -303,9 +361,12 @@ impl Inner {
         Ok(())
     }
 
-    fn import_history(&self, path: &Path) -> Result<()> {
-        let me = kv_get_str(&self.db().conn, "user_id")?.unwrap_or_default();
+    fn import_history(&self, path: &Path, key: &[u8; 32]) -> Result<()> {
         let mut db = self.db();
+        if kv_get(&db.conn, "backup_key")?.as_deref() != Some(key.as_slice()) {
+            return Err(Error::NotLoggedIn);
+        }
+        let me = kv_get_str(&db.conn, "user_id")?.ok_or(Error::NotLoggedIn)?;
         let tx = db.conn.transaction()?;
         for line in BufReader::new(File::open(path)?).lines() {
             let v: Value = serde_json::from_str(&line?)?;
