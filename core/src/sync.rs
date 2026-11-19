@@ -107,7 +107,7 @@ impl Inner {
         let mut stats = CycleStats::default();
         loop {
             let cursor = kv_get_str(&self.db().conn, "cursor")?.unwrap_or_default();
-            let res = match self.authed("GET", &format!("/v1/sync?cursor={cursor}&limit=100"), None) {
+            let res = match self.authed("GET", &format!("/v1/sync?cursor={cursor}&limit=100&copy_protection=1"), None) {
                 Err(e) if e.is_api("sync_reset_required") || e.is_api("cursor_expired") => {
                     // The server restored a backup or expired our feed: start a new cursor.
                     // Messages that were never delivered cannot be recovered.
@@ -119,6 +119,11 @@ impl Inner {
             };
             for ev in res["events"].as_array().cloned().unwrap_or_default() {
                 self.handle_event(&ev, &mut stats)?;
+            }
+            for item in res["copy_protection"].as_array().into_iter().flatten() {
+                if self.apply_copy_protection(s(item, "conversation_id")?, &item["copy_protection"])? {
+                    self.emit(json!({"type": "conversations_changed"}));
+                }
             }
             // The cursor advances only after every event in the batch is committed.
             if let Some(next) = res["next_cursor"].as_str() {
@@ -151,6 +156,13 @@ impl Inner {
         }
         match ev["kind"].as_str().unwrap_or("") {
             "message" => self.handle_message(ev, stats, false),
+            "copy_protection" => {
+                let payload = &ev["payload"];
+                if self.apply_copy_protection(s(payload, "conversation_id")?, &payload["copy_protection"])? {
+                    self.emit(json!({"type": "conversations_changed"}));
+                }
+                self.mark_processed(event_id)
+            }
             "membership" => {
                 let cid = ev["payload"]["conversation_id"].as_str().unwrap_or_default().to_string();
                 match self.fetch_conversation(&cid) {

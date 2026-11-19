@@ -268,11 +268,16 @@ private enum Item {
 /// The message field: pasting pictures (a screenshot, a copied photo) goes to the attach window, text pastes as usual.
 final class ComposerTextView: UITextView {
     var onPasteImages: (([UIImage]) -> Void)?
+    var protectSelection = false
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if protectSelection && (action == #selector(copy(_:)) || action == #selector(cut(_:))) { return false }
         if action == #selector(paste(_:)), onPasteImages != nil, UIPasteboard.general.hasImages { return true }
         return super.canPerformAction(action, withSender: sender)
     }
+
+    override func copy(_ sender: Any?) { if !protectSelection { super.copy(sender) } }
+    override func cut(_ sender: Any?) { if !protectSelection { super.cut(sender) } }
 
     override func paste(_ sender: Any?) {
         if let onPasteImages, UIPasteboard.general.hasImages, let images = UIPasteboard.general.images, !images.isEmpty {
@@ -300,6 +305,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private let table = UITableView(frame: .zero, style: .plain)
     private let notice = UIStackView()
     private let noticeText = label("", 14, color: Theme.warning)
+    private let noticeAction = LinkButton("Сверить код")
+    private let captureCover = label("Переписка скрыта во время захвата экрана", 16, .medium)
+    private var captureInactive = false
     // Pinned messages: the bar shows one at a time, a tap goes to it and on to the next older one.
     private let pinBar = UIStackView()
     private let pinTap = UIControl()
@@ -388,13 +396,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         notice.layer.cornerRadius = 18
         notice.isLayoutMarginsRelativeArrangement = true
         notice.layoutMargins = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 10)
-        let verify = LinkButton("Сверить код")
-        verify.addAction(UIAction { [weak self] _ in
+        noticeAction.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            self.openProfile()
+            if self.conv.bool("copy_permission_requested"), (self.conv["key_changed_users"] as? [Any] ?? []).isEmpty {
+                self.openCopyProtection()
+            } else {
+                self.openProfile()
+            }
         }, for: .touchUpInside)
         notice.addArrangedSubview(noticeText)
-        notice.addArrangedSubview(verify)
+        notice.addArrangedSubview(noticeAction)
         notice.isHidden = true
 
         buildPinBar()
@@ -440,6 +451,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self?.heights.removeAll()
             self?.table.reloadData()
         }
+        captureCover.textAlignment = .center
+        captureCover.backgroundColor = Theme.canvas
+        captureCover.isUserInteractionEnabled = true
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(captureChanged(_:)), name: UIScreen.capturedDidChangeNotification, object: nil)
+        center.addObserver(self, selector: #selector(captureChanged(_:)), name: UIApplication.willResignActiveNotification, object: nil)
+        center.addObserver(self, selector: #selector(captureChanged(_:)), name: UIApplication.didBecomeActiveNotification, object: nil)
+        center.addObserver(self, selector: #selector(captureChanged(_:)), name: UIApplication.userDidTakeScreenshotNotification, object: nil)
         buildJump()
         refreshConversation(first: true)
         load(older: false)
@@ -509,6 +528,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         more.accessibilityLabel = "Действия чата"
         more.menu = UIMenu(children: [
             UIAction(title: "Сведения", image: UIImage(systemName: "info.circle")) { [weak self] _ in self?.openProfile() },
+            UIDeferredMenuElement.uncached { [weak self] complete in
+                guard self?.conv.bool("can_set_copy_protection") == true else { return complete([]) }
+                complete([UIAction(title: "Копирование", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
+                    self?.openCopyProtection()
+                }])
+            },
             UIAction(title: "Очистить чат…", image: UIImage(systemName: "trash.slash"), attributes: .destructive) { [weak self] _ in
                 guard let self else { return }
                 confirmClearConversation(self) { [weak self] in
@@ -594,6 +619,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        updateCaptureProtection()
         Notifier.visibleConversation = conversationId
         if let back = navigationController?.interactivePopGestureRecognizer {
             back.isEnabled = true
@@ -617,6 +643,58 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         Core.shared.call("set_draft", ["_account_id": accountId, "conversation_id": conversationId, "text": editTarget != nil ? savedDraft : (input.text ?? "")])
         // Leaving the chat is the last chance: whatever of a view-once file is still here goes now.
         Core.shared.call("burn_viewed", ["conversation_id": conversationId]) { _ in }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        updateCaptureProtection()
+    }
+
+    private func copyBlocked(_ key: String) -> Bool {
+        conv.obj("copy_protection")?.obj(key)?.bool("blocked") == true
+    }
+
+    private func openCopyProtection() {
+        guard conv.bool("can_set_copy_protection") else { return }
+        presentSheet(CopyProtectionViewController(conversation: conv))
+    }
+
+    private var captureWindow: UIWindow? {
+        guard isViewLoaded, navigationController.map({ $0.topViewController === self }) ?? true else { return nil }
+        return view.window ?? presentedViewController?.viewIfLoaded?.window
+    }
+
+    @objc private func captureChanged(_ note: Notification) {
+        switch note.name {
+        case UIApplication.willResignActiveNotification: captureInactive = true
+        case UIApplication.didBecomeActiveNotification: captureInactive = false
+        case UIApplication.userDidTakeScreenshotNotification:
+            if copyBlocked("screenshot"), captureWindow != nil {
+                (presentedViewController ?? self).toast("Сделан снимок защищённой переписки")
+            }
+            return
+        default: break
+        }
+        updateCaptureProtection()
+    }
+
+    private func updateCaptureProtection() {
+        let player = presentedViewController as? AVPlayerViewController
+        player?.allowsPictureInPicturePlayback = !copyBlocked("screenshot")
+        guard conv.isEmpty || copyBlocked("screenshot"), let window = captureWindow,
+              captureInactive || window.screen.isCaptured else {
+            captureCover.removeFromSuperview()
+            return
+        }
+        let presented = presentedViewController
+        let media = presented is PhotoGalleryController || presented is AVPlayerViewController
+            || presented is VideoHostController || presented is QLPreviewController
+        let surface = media ? (presented?.viewIfLoaded ?? view!) : view!
+        let top = media || captureInactive ? 0 : header.frame.maxY
+        captureCover.frame = CGRect(x: 0, y: top, width: surface.bounds.width, height: max(0, surface.bounds.height - top))
+        captureCover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        if captureCover.superview !== surface { surface.addSubview(captureCover) }
+        surface.bringSubviewToFront(captureCover)
     }
 
     private func scheduleReload() {
@@ -800,6 +878,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private func setEdit(_ m: JSON) {
         if editTarget == nil { savedDraft = input.text ?? "" }
         editTarget = m
+        input.protectSelection = copyBlocked("copy")
         replyTo = nil
         let t = m.str("text").replacingOccurrences(of: "\n", with: " ")
         replyTitle.text = "Изменение сообщения"
@@ -818,6 +897,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private func leaveEdit() {
         guard editTarget != nil else { return }
         editTarget = nil
+        input.protectSelection = false
         input.text = savedDraft
         savedDraft = ""
         textViewDidChange(input)
@@ -1392,7 +1472,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 if case .failure(let e) = r { self.toast(e.message) }
                 return
             }
+            guard c.int64("copy_protection_revision") >= self.conv.int64("copy_protection_revision") else { return }
             self.conv = c
+            self.input.protectSelection = self.editTarget != nil && self.copyBlocked("copy")
+            self.updateCaptureProtection()
             if let nav = self.navigationController, nav.topViewController === self, nav.transitionCoordinator == nil,
                let root = nav.viewControllers.first, root is ChatsViewController {
                 let returnsToArchive = nav.viewControllers.dropLast().last is ArchiveViewController
@@ -1436,7 +1519,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.updateSend(animated: false)
             let n = c["notice"] as? String
             self.noticeText.text = n
-            self.notice.arrangedSubviews.last?.isHidden = !keyChanged
+            let copyRequest = c.bool("copy_permission_requested") && c.bool("can_set_copy_protection")
+            self.noticeAction.isHidden = !keyChanged && !copyRequest
+            self.noticeAction.setTitle(!keyChanged && copyRequest ? "Копирование" : "Сверить код", for: .normal)
             if self.notice.isHidden != (n?.isEmpty ?? true) { Theme.animate(0.18) { self.notice.isHidden = n?.isEmpty ?? true } }
             self.refreshPins()
             if first, !c.str("draft").isEmpty {
@@ -1705,7 +1790,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         var acts: [MenuAction] = []
         let ok = m.str("kind") != "undecryptable"
         if ok && !composer.isHidden { acts.append(MenuAction(title: "Ответить", icon: "arrowshape.turn.up.left") { [weak self] in self?.setReply(m) }) }
-        if ok && !m.str("text").isEmpty { acts.append(MenuAction(title: "Копировать текст", icon: "doc.on.doc") { UIPasteboard.general.string = m.str("text") }) }
+        if ok && !copyBlocked("copy") && !m.str("text").isEmpty {
+            acts.append(MenuAction(title: "Копировать текст", icon: "doc.on.doc") { [weak self] in
+                guard let self, !self.copyBlocked("copy") else { return }
+                UIPasteboard.general.string = m.str("text")
+            })
+        }
         for l in links(m).prefix(3) {
             if let u = URL(string: l) { acts.append(MenuAction(title: "Открыть ссылку: " + (u.host ?? l), icon: "safari") { UIApplication.shared.open(u) }) }
         }
@@ -1728,7 +1818,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 Core.shared.call("pin_message", ["message_id": m.str("id"), "on": on]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
             })
         }
-        if postable && !conv.bool("saved") && !isOnce(m) {
+        if postable && !conv.bool("saved") && !isOnce(m) && !copyBlocked("copy") && !copyBlocked("forward") {
             acts.append(MenuAction(title: "В избранное", icon: "bookmark") { [weak self] in
                 Core.shared.call("save_message", ["message_id": m.str("id")]) { r in
                     if case .failure(let e) = r { self?.toast(e.message) } else { self?.toast("Сохранено в избранное") }
@@ -1757,12 +1847,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             }
         }
         // A view-once file is never handed to another app and never kept; the core refuses it too.
-        if m.str("kind") == "file" && !isOnce(m) {
+        if m.str("kind") == "file" && !isOnce(m) && !copyBlocked("copy") {
             acts.append(MenuAction(title: "Открыть файл", icon: "doc") { [weak self] in self?.openFile(m) })
             acts.append(MenuAction(title: "Сохранить как…", icon: "square.and.arrow.down") { [weak self] in self?.saveFile(m) })
         }
         if m.str("status") == "failed" { acts.append(MenuAction(title: "Повторить отправку", icon: "arrow.clockwise") { [weak self] in self?.retry(m) }) }
-        if ok && m.str("status") != "failed", ["text", "file", "poll"].contains(m.str("kind")), !isOnce(m) {
+        if ok && m.str("status") != "failed", ["text", "file", "poll"].contains(m.str("kind")), !isOnce(m), !copyBlocked("forward") {
             acts.append(MenuAction(title: "Переслать", icon: "arrowshape.turn.up.right") { [weak self] in
                 self?.presentSheet(ForwardPickerViewController(msgs: [m]))
             })
@@ -1823,7 +1913,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         // A view-once file never joins the album: it is shown alone and destroyed after that.
         let photos = messages.filter { isImage($0) && !isOnce($0) }
         let at = photos.firstIndex { $0.str("id") == m.str("id") }
-        present(PhotoGalleryController(photos: at == nil ? [m] : photos, start: at ?? 0), animated: !Theme.reducedMotion)
+        present(PhotoGalleryController(photos: at == nil ? [m] : photos, start: at ?? 0), animated: !Theme.reducedMotion) { [weak self] in
+            self?.updateCaptureProtection()
+        }
     }
 
     /// A tap on a picture: opening a spoiler is a mark of this device, a view-once file goes to the viewer.
@@ -1847,8 +1939,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 if CallManager.shared.call.isEmpty { try? AVAudioSession.sharedInstance().setCategory(.playback) }
                 let player = AVPlayerViewController()
                 player.player = AVPlayer(url: URL(fileURLWithPath: path))
+                player.allowsPictureInPicturePlayback = !self.copyBlocked("screenshot")
                 guard isOnce(m) else {
-                    self.present(player, animated: !Theme.reducedMotion) { player.player?.play() }
+                    self.present(player, animated: !Theme.reducedMotion) {
+                        self.updateCaptureProtection()
+                        player.player?.play()
+                    }
                     return
                 }
                 // A view-once video plays inside a host of ours: closing it is the moment the file
@@ -1864,7 +1960,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                     host.dismiss(animated: !Theme.reducedMotion)
                 }
                 host.onLeave = { [weak self] in self?.burn(m, shot: false) }
-                self.present(host, animated: !Theme.reducedMotion) { player.player?.play() }
+                self.present(host, animated: !Theme.reducedMotion) {
+                    self.updateCaptureProtection()
+                    player.player?.play()
+                }
             }
         }
     }
@@ -1886,11 +1985,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
 
     private func decrypt(_ m: JSON, _ then: @escaping (URL) -> Void) {
+        guard !copyBlocked("copy") else { return }
         toast("Расшифровываем файл…")
-        Core.shared.call("download_file", ["message_id": m.str("id")]) { [weak self] r in
+        Core.shared.call("download_file", ["message_id": m.str("id"), "external": true]) { [weak self] r in
             switch r {
             case .failure(let e): self?.toast(e.message)
-            case .success(let v): then(URL(fileURLWithPath: (v as? JSON)?.str("path") ?? ""))
+            case .success(let v):
+                if self?.copyBlocked("copy") == false { then(URL(fileURLWithPath: (v as? JSON)?.str("path") ?? "")) }
             }
         }
     }
@@ -1901,7 +2002,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             self.previewURL = url
             let ql = QLPreviewController()
             ql.dataSource = self
-            self.present(ql, animated: true)
+            self.present(ql, animated: !Theme.reducedMotion) { self.updateCaptureProtection() }
         }
     }
 
@@ -1915,6 +2016,86 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
     func numberOfPreviewItems(in controller: QLPreviewController) -> Int { previewURL == nil ? 0 : 1 }
     func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem { previewURL! as NSURL }
+}
+
+private final class CopyProtectionViewController: SheetViewController {
+    private var conversation: JSON
+    private var busy = false
+    private var observer: NSObjectProtocol?
+
+    init(conversation: JSON) {
+        self.conversation = conversation
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Копирование"
+        render()
+        observer = NotificationCenter.default.addObserver(forName: .coreEvent, object: nil, queue: .main) { [weak self] note in
+            if (note.userInfo as? JSON)?.str("type") == "conversations_changed" { self?.refresh() }
+        }
+    }
+
+    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+
+    private func apply(_ state: JSON) {
+        if state.int64("copy_protection_revision") >= conversation.int64("copy_protection_revision") { conversation = state }
+        render()
+    }
+
+    private func refresh() {
+        Core.shared.call("get_conversation", ["conversation_id": conversation.str("id")]) { [weak self] result in
+            if case .success(let value) = result, let state = value as? JSON { self?.apply(state) }
+            else { self?.render() }
+        }
+    }
+
+    private func render() {
+        clear()
+        let rules = conversation.obj("copy_protection")
+        for (key, title) in [("copy", "Копирование текста и файлов"), ("forward", "Пересылка"), ("screenshot", "Снимки и запись экрана")] {
+            let rule = rules?.obj(key) ?? [:]
+            let blocked = rule.bool("blocked"), mine = rule.bool("mine"), requested = rule.bool("requested")
+            let status = !blocked ? "Разрешено"
+                : mine && requested ? "Запрещено · есть запрос на разрешение"
+                : mine ? "Запрещено вами"
+                : requested ? "Запрещено · запрос отправлен"
+                : "Запрещено участником"
+            let action = !blocked ? "block" : mine ? "allow" : "request"
+            let button = PillButton(!blocked ? "Запретить" : mine ? "Разрешить" : "Запросить разрешение", primary: false)
+            button.accessibilityLabel = title + ", " + (button.title(for: .normal) ?? "")
+            button.isEnabled = !busy && conversation.bool("can_set_copy_protection") && (!blocked || mine || !requested)
+            button.addAction(UIAction { [weak self] _ in self?.change(key, action) }, for: .touchUpInside)
+            let row = UIStackView(arrangedSubviews: [label(title, 15, .semibold), label(status, 13, color: Theme.muted), button])
+            row.axis = .vertical
+            row.spacing = 6
+            if key == "screenshot" {
+                row.addArrangedSubview(label("iOS сообщает о снимке после его создания. При записи экрана переписка скрывается.", 13, color: Theme.muted))
+            }
+            stack.addArrangedSubview(row)
+        }
+    }
+
+    private func change(_ key: String, _ action: String) {
+        busy = true
+        render()
+        Core.shared.call("set_copy_protection", ["conversation_id": conversation.str("id"), "rule": key, "action": action,
+            "revision": conversation.int64("copy_protection_revision")]) { [weak self] result in
+            guard let self else { return }
+            self.busy = false
+            switch result {
+            case .success(let value):
+                if let state = value as? JSON { self.apply(state) }
+                else { self.render() }
+            case .failure(let error):
+                self.toast(error.message)
+                self.refresh()
+            }
+        }
+    }
 }
 
 final class DateCell: UITableViewCell {

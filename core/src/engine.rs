@@ -339,6 +339,7 @@ impl Inner {
             "close_poll" => self.close_poll(p),
             "list_conversations" => self.list_conversations(p),
             "get_conversation" => self.get_conversation(p),
+            "set_copy_protection" => self.set_copy_protection(p),
             "list_messages" => self.list_messages(p),
             "search_messages" => self.search_messages(p),
             "send_text" => self.send_text(p),

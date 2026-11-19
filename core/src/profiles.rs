@@ -73,6 +73,10 @@ impl Inner {
         let uid = s(p, "user_id")?;
         let direct: Option<String> = self.db().conn.query_row("SELECT id FROM conversations WHERE kind='direct' AND peer_user_id=?1 LIMIT 1", [uid], |r| r.get(0)).optional()?;
         let Some(conv) = direct else { return Ok(json!([])); };
+        let policy = self.copy_protection(&conv)?;
+        if ["copy", "screenshot"].iter().any(|&key| policy["rules"][key]["by"].is_string()) {
+            return Ok(json!([]));
+        }
         let filter = match p["kind"].as_str().unwrap_or("media") {
             // A view-once file is not part of the shared history of the two people: it is gone
             // after it has been seen, so it never appears in these lists.

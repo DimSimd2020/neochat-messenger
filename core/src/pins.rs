@@ -122,6 +122,8 @@ impl Inner {
             .query_row("SELECT kind, conversation_id FROM messages WHERE id=?1 AND kind IN ('text','file','poll')", [id], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?
             .ok_or_else(|| Error::Invalid("Сообщение не найдено".into()))?;
+        self.check_copy_rule(&conv, "forward")?;
+        self.check_copy_rule(&conv, "copy")?;
         if kind == "file" && !self.data_dir.join("files").join(format!("{id}.enc")).exists() {
             self.download_file(&json!({"message_id": id}))?;
         }

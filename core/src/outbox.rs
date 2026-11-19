@@ -767,6 +767,7 @@ impl Inner {
             })
             .optional()?
             .ok_or_else(|| Error::Invalid("Сообщение не найдено".into()))?;
+        self.check_copy_rule(&sconv, "forward")?;
         self.check_can_send(&conv)?;
         let rights = self.conversation_json(&conv)?;
         if (kind == "file" && rights["can_media"] == false) || (kind == "poll" && rights["can_polls"] == false) {
@@ -820,6 +821,12 @@ impl Inner {
     pub fn download_file(&self, p: &Value) -> Result<Value> {
         let id = s(p, "message_id")?;
         let meta = self.file_meta(id)?;
+        if p["external"] == true {
+            self.check_copy_rule(&self.message_conv(id)?, "copy")?;
+            if meta.once == Some(true) {
+                return Err(Error::Invalid("Одноразовые фото и видео нельзя сохранить".into()));
+            }
+        }
         if meta.is_viewed() {
             return Err(Error::Invalid("Это фото или видео уже просмотрено".into()));
         }
@@ -857,6 +864,8 @@ impl Inner {
     /// Decrypts a downloaded file to a location the user picked.
     pub fn export_file(&self, p: &Value) -> Result<Value> {
         let id = s(p, "message_id")?;
+        let conv = self.message_conv(id)?;
+        self.check_copy_rule(&conv, "copy")?;
         let meta = self.file_meta(id)?;
         if meta.once == Some(true) {
             return Err(Error::Invalid("Одноразовые фото и видео нельзя сохранить".into()));
@@ -865,6 +874,7 @@ impl Inner {
         if !enc.exists() {
             self.download_file(p)?;
         }
+        self.check_copy_rule(&conv, "copy")?;
         files::decrypt_file(&enc, Path::new(s(p, "dest")?), &unb64(&meta.key)?, &unb64(&meta.nonce)?)?;
         Ok(Value::Null)
     }

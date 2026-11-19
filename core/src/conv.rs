@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::engine::{Inner, display_name, s};
 use crate::error::{Error, Result};
 use crate::keys::{self, GroupState, b64, unb64};
-use crate::store::{kv_get, kv_get_str, now_ms};
+use crate::store::{kv_get, kv_get_str, kv_set, now_ms};
 
 pub const MAX_GROUP: usize = 50;
 pub const MAX_CHANNEL: usize = 200;
@@ -146,7 +146,58 @@ impl Inner {
                 params![id, serde_json::to_string(&st.admins)?, c["settings"].to_string(), st.revision as i64, blob],
             )?;
         }
+        drop(db);
+        self.apply_copy_protection(&id, &c["copy_protection"])?;
         Ok(())
+    }
+
+    pub(crate) fn apply_copy_protection(&self, id: &str, policy: &Value) -> Result<bool> {
+        let Some(revision) = policy["revision"].as_i64() else { return Ok(false); };
+        // The sync snapshot can arrive before this conversation is imported from history.
+        let db = self.db();
+        let key = format!("copy_protection:{id}");
+        let current: Value = serde_json::from_str(&kv_get_str(&db.conn, &key)?.unwrap_or_else(|| "{}".into()))?;
+        if revision <= current["revision"].as_i64().unwrap_or(0) {
+            return Ok(false);
+        }
+        kv_set(&db.conn, &key, &serde_json::to_vec(policy)?)?;
+        Ok(true)
+    }
+
+    pub(crate) fn copy_protection(&self, id: &str) -> Result<Value> {
+        let raw = kv_get_str(&self.db().conn, &format!("copy_protection:{id}"))?;
+        Ok(serde_json::from_str(raw.as_deref().unwrap_or("{}"))?)
+    }
+
+    pub(crate) fn check_copy_rule(&self, id: &str, rule: &str) -> Result<()> {
+        if self.copy_protection(id)?["rules"][rule]["by"].is_string() {
+            return Err(Error::Invalid(if rule == "forward" {
+                "Пересылка в этой переписке запрещена"
+            } else {
+                "Копирование в этой переписке запрещено"
+            }.into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_copy_protection(&self, p: &Value) -> Result<Value> {
+        let id = s(p, "conversation_id")?;
+        let revision = p["revision"].as_i64().ok_or_else(|| Error::Invalid("Нет версии настроек копирования".into()))?;
+        let request = json!({"rule": s(p, "rule")?, "action": s(p, "action")?, "revision": revision});
+        match self.authed("PUT", &format!("/v1/conversations/{id}/copy-protection"), Some(&request)) {
+            Ok(policy) => {
+                if self.apply_copy_protection(id, &policy)? {
+                    self.emit(json!({"type": "conversations_changed"}));
+                }
+                self.conversation_json(id)
+            }
+            Err(e) => {
+                if e.is_api("copy_protection_changed") && self.fetch_conversation(id).is_ok() {
+                    self.emit(json!({"type": "conversations_changed"}));
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Refreshes one conversation; a 404 means we are no longer a member.
@@ -389,6 +440,12 @@ impl Inner {
         let (id, kind, title, peer, owner, members, archived, left, unread, draft, preview, activity, description, tags, in_archive, pinned, group_avatar, muted, saved) = row;
         drop(db);
         let rights = self.rights(&id)?;
+        let policy = self.copy_protection(&id)?;
+        let copy_request = policy["rules"].as_object().into_iter().flatten().any(|(_, r)| r["by"] == me && r["requested"] == true);
+        let copy_rules: serde_json::Map<_, _> = ["copy", "forward", "screenshot"].into_iter().map(|key| {
+            let r = &policy["rules"][key];
+            (key.to_string(), json!({"blocked": r["by"].is_string(), "mine": r["by"] == me, "requested": r["requested"] == true}))
+        }).collect();
         let db = self.db();
         let tags: serde_json::Map<String, Value> = serde_json::from_str(&tags).unwrap_or_default();
         let role_of = |u: &str| if owner.as_deref() == Some(u) { "owner" } else if rights.admins.iter().any(|a| a == u) { "admin" } else { "member" };
@@ -444,6 +501,8 @@ impl Inner {
             Some("Вам запретили писать в этой группе")
         } else if archived == 1 {
             Some("Группа архивирована: владелец вышел")
+        } else if copy_request {
+            Some("Есть запрос на разрешение копирования")
         } else {
             None
         };
@@ -454,7 +513,7 @@ impl Inner {
         } else {
             0
         };
-        Ok(json!({
+        let mut view = json!({
             "id": id,
             "kind": kind,
             "title": display,
@@ -506,7 +565,12 @@ impl Inner {
             "pinned": pinned > 0,
             "pinned_at": pinned,
             "presence": peer.as_deref().and_then(|u| self.cached_presence(u)),
-        }))
+        });
+        view["can_set_copy_protection"] = json!(kind != "system" && saved == 0 && left == 0 && archived == 0);
+        view["copy_permission_requested"] = json!(copy_request);
+        view["copy_protection_revision"] = json!(policy["revision"].as_i64().unwrap_or(0));
+        view["copy_protection"] = Value::Object(copy_rules);
+        Ok(view)
     }
 
     /// The main list (pinned first) or, with `archived`, the archive. `sort`:
