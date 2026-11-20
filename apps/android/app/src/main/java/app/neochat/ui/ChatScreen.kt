@@ -178,6 +178,8 @@ fun isCircle(m: JSONObject) = m.str("kind") == "file" && m.optJSONObject("file")
 fun isOnce(m: JSONObject) = m.optJSONObject("file")?.optBoolean("once") == true
 
 /** True once it has been opened here or on any other device of the account; the copies are gone. */
+fun isTimed(m: JSONObject) = (m.optJSONObject("file")?.optLong("ttl_ms") ?: 0L) > 0
+
 fun isViewed(m: JSONObject) = isOnce(m) && m.optJSONObject("file")?.optBoolean("viewed") == true
 
 /** A picture that still has to be shown blurred on this device. */
@@ -1597,6 +1599,7 @@ class ChatScreen(
                 photo.layoutParams = plp
                 val id = m.str("id")
                 val once = isOnce(m)
+                val timed = isTimed(m)
                 val seen = isViewed(m)
                 val closed = isSpoiler(m)
                 val hiddenMark = isHiddenMedia(m) || closed
@@ -1604,20 +1607,21 @@ class ChatScreen(
                 val length = if (video && !once && f.optLong("duration") > 0) Videos.clock(f.optLong("duration")) else ""
                 val noun = if (video) "видео" else "фото"
                 photo.video = video && !once
-                photo.once = once
+                photo.once = once || timed
+                photo.timed = timed
                 photo.onceSeen = seen
                 photo.length = length
                 photo.hidden = false
                 photo.onReveal = null
                 photo.note = when {
                     once && seen -> if (shot) "Скриншот сделан · Удалено" else "Удалено"
-                    once && f.optLong("ttl_ms") > 0 -> if (video) "Видео · таймер" else "Фото · таймер"
+                    timed -> if (video) "Видео · таймер" else "Фото · таймер"
                     once -> if (video) "Видео" else "Фото"
                     else -> ""
                 }
                 photo.contentDescription = when {
                     once && seen -> "$noun удалено после просмотра" + if (shot) ", был сделан скриншот" else ""
-                    once && f.optLong("ttl_ms") > 0 -> "Самоудаляющееся $noun. Таймер запустится после открытия"
+                    timed -> "Самоудаляющееся $noun. Таймер запустится после открытия"
                     once -> "Одноразовое $noun. Нажмите, чтобы посмотреть один раз"
                     hiddenMark && closed -> "${if (video) "Видео" else "Фото"} скрыто. Нажмите, чтобы показать"
                     hiddenMark -> "${if (video) "Видео" else "Фото"} показано. Нажмите, чтобы открыть в просмотрщике"
@@ -1625,7 +1629,7 @@ class ChatScreen(
                 }
                 when {
                     // A view-once file has nothing to show before it is opened, and nothing after.
-                    once -> {
+                    once || timed -> {
                         photo.background = null
                         photo.setImageDrawable(null)
                     }
@@ -1960,9 +1964,6 @@ class ChatScreen(
                         else "%.1f с".format(java.util.Locale.US, remaining / 1000.0)
                     badge.contentDescription = "Удаление через ${label.text}"
                     if (remaining == 0L) {
-                        // The core physically destroys the encrypted and plaintext copies.
-                        CoreClient.call("media_viewed", JSONObject().put("_account_id", accountId)
-                            .put("message_id", id)) { _, _ -> }
                         closeViewer()
                     } else viewerTimerHandler.postDelayed(this, 100)
                 }
@@ -1980,7 +1981,7 @@ class ChatScreen(
     private fun tapMedia(m: JSONObject) {
         when {
             isViewed(m) -> act.toast(if (m.optJSONObject("file")?.optBoolean("shot") == true) "Скриншот сделан · Просмотрено" else "Просмотрено")
-            isOnce(m) -> openNow(m)
+            isOnce(m) || isTimed(m) -> openNow(m)
             isHiddenMedia(m) && !isMediaRevealed(m) -> revealHidden(m)
             else -> openNow(m)
         }
@@ -1991,13 +1992,13 @@ class ChatScreen(
     /** The menu's way in: a hidden picture is opened here first and then shown full screen. */
     private fun openMedia(m: JSONObject) {
         if (isViewed(m)) return act.toast(if (m.optJSONObject("file")?.optBoolean("shot") == true) "Скриншот сделан · Просмотрено" else "Просмотрено")
-        if (!isOnce(m) && isHiddenMedia(m) && !isMediaRevealed(m)) revealHidden(m)
+        if (!isOnce(m) && !isTimed(m) && isHiddenMedia(m) && !isMediaRevealed(m)) revealHidden(m)
         openNow(m)
     }
 
     /** Reveal once per chat visit. A second tap, even before the core replies, opens the viewer. */
     private fun revealHidden(m: JSONObject) {
-        if (isOnce(m) || isMediaRevealed(m)) return
+        if (isOnce(m) || isTimed(m) || isMediaRevealed(m)) return
         val id = m.str("id")
         val request = (revealRequests[id] ?: 0) + 1
         revealRequests[id] = request
@@ -2040,7 +2041,7 @@ class ChatScreen(
     /** Opens the photo among all pictures of the chat; swiping left and right moves between them. */
     private fun openPhoto(m: JSONObject) {
         // A view-once file never joins the album, and neither does a picture still under its cover.
-        val photos = messages.filter { isImage(it) && !isOnce(it) && !(isHiddenMedia(it) && !isMediaRevealed(it)) }
+        val photos = messages.filter { isImage(it) && !isOnce(it) && !isTimed(it) && !(isHiddenMedia(it) && !isMediaRevealed(it)) }
         val at = photos.indexOfFirst { it.str("id") == m.str("id") }
         if (at < 0) showViewer(listOf(m), 0) else showViewer(photos, at)
     }
@@ -2054,8 +2055,8 @@ class ChatScreen(
         closeViewer()
         hideKeyboard()
         val shown = photos.getOrElse(start) { photos.first() }
-        viewerOnce = if (isOnce(shown)) shown.str("id") else null
-        viewerTimed = shown.optJSONObject("file")?.optLong("ttl_ms", 0L)?.let { it > 0 } == true
+        viewerTimed = isTimed(shown)
+        viewerOnce = if (isOnce(shown) || viewerTimed) shown.str("id") else null
         updateScreenProtection()
         val v = FrameLayout(ctx)
         v.setBackgroundColor(0xF2040914.toInt())
@@ -2178,8 +2179,8 @@ class ChatScreen(
     private fun showVideo(m: JSONObject, path: String) {
         closeViewer()
         hideKeyboard()
-        viewerOnce = if (isOnce(m)) m.str("id") else null
-        viewerTimed = m.optJSONObject("file")?.optLong("ttl_ms", 0L)?.let { it > 0 } == true
+        viewerTimed = isTimed(m)
+        viewerOnce = if (isOnce(m) || viewerTimed) m.str("id") else null
         updateScreenProtection()
         val v = FrameLayout(ctx)
         v.setBackgroundColor(0xF2040914.toInt())
@@ -2379,7 +2380,7 @@ class ChatScreen(
                 CoreClient.call("pin_message", JSONObject().put("message_id", m.str("id")).put("on", on)) { _, e -> if (e != null) act.toast(e.message) }
             }
         }
-        if (postable && !conv.optBoolean("saved") && !isOnce(m) && !copyBlocked("forward") && !copyBlocked("copy")) pm.add("В избранное") { savedCopy(m) }
+        if (postable && !conv.optBoolean("saved") && !isOnce(m) && !isTimed(m) && !copyBlocked("forward") && !copyBlocked("copy")) pm.add("В избранное") { savedCopy(m) }
         if (!gone && m.optBoolean("outgoing") && m.str("status") in setOf("sent", "delivered", "read") && m.str("kind") in setOf("text", "file") && !isVoice(m) && !isCircle(m))
             pm.add("Изменить") { setEdit(m) }
         if (m.str("kind") == "poll" && m.optBoolean("outgoing") && m.optJSONObject("poll")?.optBoolean("closed") != true) pm.add("Завершить опрос") {
@@ -2390,12 +2391,12 @@ class ChatScreen(
             else pm.add("Расшифровать") { Transcription.request(act, m) }
         }
         // A view-once file is never handed to another app and never kept; the core refuses it too.
-        if (m.str("kind") == "file" && !isOnce(m) && !copyBlocked("copy")) {
+        if (m.str("kind") == "file" && !isOnce(m) && !isTimed(m) && !copyBlocked("copy")) {
             pm.add("Открыть файл") { openFile(m) }
             pm.add("Сохранить как…") { saveFile(m) }
         }
         if (m.str("status") == "failed") pm.add("Повторить отправку") { retry(m) }
-        if (ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll") && !isOnce(m) && !copyBlocked("forward"))
+        if (ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll") && !isOnce(m) && !isTimed(m) && !copyBlocked("forward"))
             pm.add("Переслать") { Dialogs.forward(act, listOf(m)) }
         if (m.optBoolean("outgoing") && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll"))
             pm.add("Удалить у всех", danger = true) {

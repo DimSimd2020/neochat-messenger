@@ -103,7 +103,7 @@ impl Inner {
                         // "shot" are local facts about a view-once file, "once" is how it was sent.
                         // "hidden" is the sender's spoiler mark itself, open or closed here, so a client
                         // can animate the cover of a picture it has already opened.
-                        "spoiler": meta.is_spoiler(), "hidden": meta.spoiler == Some(true), "once": meta.once == Some(true),
+                        "spoiler": meta.is_spoiler(), "hidden": meta.spoiler == Some(true), "once": meta.is_once(), "ttl_ms": meta.ttl_ms,
                         "viewed": meta.viewed == Some(true), "shot": meta.shot == Some(true)}))
                 }
                 None => None,

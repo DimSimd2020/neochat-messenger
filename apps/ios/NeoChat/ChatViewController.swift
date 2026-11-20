@@ -84,6 +84,7 @@ func isCircle(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bo
 
 /// A view-once picture or video: every copy of it is destroyed as soon as it has been opened.
 func isOnce(_ m: JSON) -> Bool { m.str("kind") == "file" && (m.obj("file")?.bool("once") ?? false) }
+func isTimed(_ m: JSON) -> Bool { (m.obj("file")?.int64("ttl_ms") ?? 0) > 0 }
 /// It has been opened here or on another device of the account; the copies are already gone.
 func isViewed(_ m: JSON) -> Bool { isOnce(m) && (m.obj("file")?.bool("viewed") ?? false) }
 /// A picture that still has to be shown blurred on this device.
@@ -100,8 +101,6 @@ enum OnceMedia {
     static func burn(_ m: JSON, shot: Bool) {
         let id = m.str("id")
         guard isOnce(m), !burned.contains(id) else { return }
-        // Timed media survives closing the viewer; the core owns its persisted deadline.
-        if !shot && (m.obj("file")?.int64("ttl_ms") ?? 0) > 0 { return }
         burned.insert(id)
         Photos.cache.removeObject(forKey: id as NSString)
         var p: JSON = ["message_id": id]
@@ -109,9 +108,16 @@ enum OnceMedia {
         Core.shared.call("media_viewed", p) { _ in }
     }
 
-    static func startTimer(_ m: JSON) {
-        guard isOnce(m), (m.obj("file")?.int64("ttl_ms") ?? 0) > 0 else { return }
-        Core.shared.call("media_timer_start", ["message_id": m.str("id")]) { _ in }
+    static func startTimer(_ m: JSON, onExpiry: @escaping () -> Void) {
+        guard isTimed(m) else { return }
+        Core.shared.call("media_timer_start", ["message_id": m.str("id")]) { result in
+            guard case .success(let value) = result, let deadline = (value as? JSON)?.int64("expires_at") else {
+                onExpiry()
+                return
+            }
+            let remaining = max(0, Double(deadline) / 1000 - Date().timeIntervalSince1970)
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: onExpiry)
+        }
     }
 }
 
@@ -1298,10 +1304,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         // Both marks belong to a picture or a video; the core drops them for anything else and
         // keeps the poster off a view-once file.
         if hidden { p["spoiler"] = true }
-        if timerMs != 0 {
-            p["once"] = true
-            if timerMs > 0 { p["ttl_ms"] = timerMs }
-        }
+        if timerMs < 0 { p["once"] = true }
+        if timerMs > 0 { p["ttl_ms"] = timerMs }
         if let t = thumb {
             p["thumb"] = t.0
             p["width"] = t.1
@@ -1828,7 +1832,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
                 Core.shared.call("pin_message", ["message_id": m.str("id"), "on": on]) { r in if case .failure(let e) = r { self?.toast(e.message) } }
             })
         }
-        if postable && !conv.bool("saved") && !isOnce(m) && !copyBlocked("copy") && !copyBlocked("forward") {
+        if postable && !conv.bool("saved") && !isOnce(m) && !isTimed(m) && !copyBlocked("copy") && !copyBlocked("forward") {
             acts.append(MenuAction(title: "В избранное", icon: "bookmark") { [weak self] in
                 Core.shared.call("save_message", ["message_id": m.str("id")]) { r in
                     if case .failure(let e) = r { self?.toast(e.message) } else { self?.toast("Сохранено в избранное") }
@@ -1857,12 +1861,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             }
         }
         // A view-once file is never handed to another app and never kept; the core refuses it too.
-        if m.str("kind") == "file" && !isOnce(m) && !copyBlocked("copy") {
+        if m.str("kind") == "file" && !isOnce(m) && !isTimed(m) && !copyBlocked("copy") {
             acts.append(MenuAction(title: "Открыть файл", icon: "doc") { [weak self] in self?.openFile(m) })
             acts.append(MenuAction(title: "Сохранить как…", icon: "square.and.arrow.down") { [weak self] in self?.saveFile(m) })
         }
         if m.str("status") == "failed" { acts.append(MenuAction(title: "Повторить отправку", icon: "arrow.clockwise") { [weak self] in self?.retry(m) }) }
-        if ok && m.str("status") != "failed", ["text", "file", "poll"].contains(m.str("kind")), !isOnce(m), !copyBlocked("forward") {
+        if ok && m.str("status") != "failed", ["text", "file", "poll"].contains(m.str("kind")), !isOnce(m), !isTimed(m), !copyBlocked("forward") {
             acts.append(MenuAction(title: "Переслать", icon: "arrowshape.turn.up.right") { [weak self] in
                 self?.presentSheet(ForwardPickerViewController(msgs: [m]))
             })
@@ -1921,7 +1925,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     private func openPhoto(_ m: JSON) {
         if isViewed(m) { return toast("Просмотрено") }
         // A view-once file never joins the album: it is shown alone and destroyed after that.
-        let photos = messages.filter { isImage($0) && !isOnce($0) }
+        let photos = messages.filter { isImage($0) && !isOnce($0) && !isTimed($0) }
         let at = photos.firstIndex { $0.str("id") == m.str("id") }
         present(PhotoGalleryController(photos: at == nil ? [m] : photos, start: at ?? 0), animated: !Theme.reducedMotion) { [weak self] in
             self?.updateCaptureProtection()
@@ -1945,16 +1949,19 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
             case .failure(let e): self?.toast(e.message)
             case .success(let v):
                 guard let self, let path = (v as? JSON)?.str("path"), !path.isEmpty else { return }
-                OnceMedia.startTimer(m)
                 // The silent switch must not mute a video; a running call keeps its own audio session.
                 if CallManager.shared.call.isEmpty { try? AVAudioSession.sharedInstance().setCategory(.playback) }
                 let player = AVPlayerViewController()
                 player.player = AVPlayer(url: URL(fileURLWithPath: path))
-                player.allowsPictureInPicturePlayback = !self.copyBlocked("screenshot")
+                player.allowsPictureInPicturePlayback = !isOnce(m) && !isTimed(m) && !self.copyBlocked("screenshot")
                 guard isOnce(m) else {
                     self.present(player, animated: !Theme.reducedMotion) {
                         self.updateCaptureProtection()
                         player.player?.play()
+                        OnceMedia.startTimer(m) { [weak player] in
+                            player?.player?.pause()
+                            player?.dismiss(animated: false)
+                        }
                     }
                     return
                 }
@@ -2685,20 +2692,21 @@ final class BubbleCell: UITableViewCell {
             photoW.isActive = true
             photoH.isActive = true
             let id = boundId
-            let once = isOnce(m), seen = isViewed(m), spoiler = isSpoiler(m)
-            mark.isHidden = !video || once
+            let once = isOnce(m), timed = isTimed(m), seen = isViewed(m), spoiler = isSpoiler(m)
+            mark.isHidden = !video || once || timed
             mark.length = video && !once && f.int64("duration") > 0 ? Videos.clock(f.int64("duration")) : ""
             photo.backgroundColor = video ? UIColor(red: 0.06, green: 0.09, blue: 0.13, alpha: 1) : nil
-            cover.isHidden = !(once || spoiler)
+            cover.isHidden = !(once || timed || spoiler)
             // The frost lies over a real picture; the card of a view-once file is opaque on its own.
-            coverBlur.isHidden = !spoiler
-            coverBadge.isHidden = !once || seen
-            coverNote.text = once ? (seen ? (isShot(m) ? "Скриншот сделан · Просмотрено" : "Просмотрено") : (video ? "Видео" : "Фото")) : "Скрыто"
+            coverBlur.isHidden = !spoiler || timed
+            coverBadge.text = timed ? "◷" : "1"
+            coverBadge.isHidden = !(once || timed) || seen
+            coverNote.text = timed ? (video ? "Видео · таймер" : "Фото · таймер") : once ? (seen ? (isShot(m) ? "Скриншот сделан · Просмотрено" : "Просмотрено") : (video ? "Видео" : "Фото")) : "Скрыто"
             photo.isAccessibilityElement = true
-            photo.accessibilityLabel = once
+            photo.accessibilityLabel = timed ? (video ? "Видео с таймером" : "Фото с таймером") : once
                 ? "Одноразовое \(video ? "видео" : "фото")" + (seen ? ", просмотрено" : "")
                 : (spoiler ? "\(video ? "Видео" : "Фото") скрыто" : (video ? "Видео" : "Фото"))
-            if once {
+            if once || timed {
                 // Nothing of a view-once file is drawn before it is opened, and nothing after.
                 photo.image = nil
             } else if video {
@@ -3063,10 +3071,16 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
         let params: JSON = profile ? ["user_id":message.str("profile_user_id"),"photo_id":message.str("id")] : ["message_id":message.str("id")]
         Core.shared.call(method, params) { [weak self] r in
             guard case .success(let v) = r, let path = (v as? JSON)?.str("path") else { return }
-            if let message = self?.message { OnceMedia.startTimer(message) }
             DispatchQueue.global(qos: .userInitiated).async {
                 let img = Photos.decode(URL(fileURLWithPath: path), maxSide: 2732)
-                DispatchQueue.main.async { if let img { self?.imageView.image = img } }
+                DispatchQueue.main.async {
+                    guard let self, let img, self.view.window != nil else { return }
+                    self.imageView.image = img
+                    OnceMedia.startTimer(self.message) { [weak self] in
+                        self?.imageView.image = nil
+                        self?.onClose?()
+                    }
+                }
             }
         }
     }

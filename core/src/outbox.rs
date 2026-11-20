@@ -61,7 +61,7 @@ pub struct FileMeta {
     /// copies after the picture has been opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub once: Option<bool>,
-    /// Open-to-expire timer, in milliseconds. None retains the original view-once semantics.
+    /// Open-to-expire timer, in milliseconds. Independent of view-once playback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
     /// The first local opening and its fixed deadline. Never trusted from the network.
@@ -92,12 +92,12 @@ impl FileMeta {
     /// A video sent as a video: it brings a poster or a length. Without them it is an ordinary file.
     /// A view-once video has no poster by design, so the flag alone is enough to show it as video.
     pub fn is_video(&self) -> bool {
-        self.mime.starts_with("video/") && (self.thumb.is_some() || self.duration.is_some() || self.once == Some(true))
+        self.mime.starts_with("video/") && (self.thumb.is_some() || self.duration.is_some() || self.is_ephemeral())
     }
 
     /// A picture shown as a picture: it brings a poster, or it is view-once and has none on purpose.
     pub fn is_photo(&self) -> bool {
-        self.mime.starts_with("image/") && (self.thumb.is_some() || self.once == Some(true))
+        self.mime.starts_with("image/") && (self.thumb.is_some() || self.is_ephemeral())
     }
 
     pub fn is_voice(&self) -> bool {
@@ -113,9 +113,17 @@ impl FileMeta {
         self.spoiler == Some(true) && self.shown != Some(true)
     }
 
+    pub fn is_once(&self) -> bool {
+        self.once == Some(true) && self.ttl_ms.is_none()
+    }
+
+    pub fn is_ephemeral(&self) -> bool {
+        self.once == Some(true) || self.ttl_ms.is_some()
+    }
+
     /// A view-once file that has already been opened on this device: its copies are gone.
     pub fn is_viewed(&self) -> bool {
-        self.once == Some(true) && self.viewed == Some(true)
+        self.is_ephemeral() && self.viewed == Some(true)
     }
 
     /// Makes metadata from another device safe to store: an unknown or mismatched kind and a
@@ -130,21 +138,21 @@ impl FileMeta {
         };
         let media = hideable(&self.mime, kind.as_deref());
         let spoiler = self.spoiler.filter(|v| *v && media);
-        let once = self.once.filter(|v| *v && media);
-        let ttl_ms = if once == Some(true) { self.ttl_ms.filter(|v| (1000..=86_400_000).contains(v)) } else { None };
+        let ttl_ms = self.ttl_ms.filter(|v| media && (1000..=86_400_000).contains(v));
+        let once = self.once.filter(|v| *v && media && ttl_ms.is_none());
         let wave = self.wave.clone().filter(|w| kind.as_deref() == Some("voice") && w.len() <= MAX_WAVE_B64 && unb64(w).is_ok());
-        let thumb = if once == Some(true) { None } else { self.thumb.clone() };
+        let thumb = if once == Some(true) || ttl_ms.is_some() { None } else { self.thumb.clone() };
         FileMeta { name: files::safe_name(&self.name), kind, wave, thumb, spoiler, once, ttl_ms, opened_at: None, expires_at: None,
             viewed: None, shown: None, shot: None, ..self.clone() }
     }
 
     /// The chat-list line for a message that carries this file.
     pub fn preview(&self) -> String {
-        if self.once == Some(true) {
-            if let Some(ttl) = self.ttl_ms {
-                return if self.mime.starts_with("video/") { format!("🎬 Видео · {} с", ttl / 1000) }
-                    else { format!("🖼 Фото · {} с", ttl / 1000) };
-            }
+        if let Some(ttl) = self.ttl_ms {
+            return if self.mime.starts_with("video/") { format!("🎬 Видео · {} с", ttl / 1000) }
+                else { format!("🖼 Фото · {} с", ttl / 1000) };
+        }
+        if self.is_once() {
             return if self.mime.starts_with("video/") { "🎬 Видео на один раз".to_string() } else { "🖼 Фото на один раз".to_string() };
         }
         if self.is_voice() {
@@ -350,13 +358,13 @@ impl Inner {
         if p["ttl_ms"].is_number() && timer.is_none() {
             return Err(Error::Invalid("Таймер медиа должен быть от 1 секунды до 24 часов".into()));
         }
-        let once = (p["once"] == true || timer.is_some()).then_some(true).filter(|_| media);
+        let once = (p["once"] == true && timer.is_none() && media).then_some(true);
         // A channel has hundreds of readers: a view-once file there would tell every subscriber
         // about every view, and "one time" would mean nothing. Spoilers stay allowed.
-        if once == Some(true) && self.conversation_json(conv)?["kind"] == "channel" {
-            return Err(Error::Invalid("Одноразовые фото и видео в каналах не отправляются".into()));
+        if (once == Some(true) || timer.is_some()) && self.conversation_json(conv)?["kind"] == "channel" {
+            return Err(Error::Invalid("Самоудаляющиеся фото и видео в каналах не отправляются".into()));
         }
-        let thumb = p["thumb"].as_str().filter(|t| !t.is_empty() && t.len() <= MAX_THUMB_B64).map(str::to_string).filter(|_| once != Some(true));
+        let thumb = p["thumb"].as_str().filter(|t| !t.is_empty() && t.len() <= MAX_THUMB_B64).map(str::to_string).filter(|_| once != Some(true) && timer.is_none());
         pl.file = Some(FileMeta {
             id: String::new(),
             key: b64(&enc.key),
@@ -488,8 +496,9 @@ impl Inner {
                     let mut db = self.db();
                     let tx = db.conn.transaction()?;
                     tx.execute(
-                        "UPDATE messages SET status=CASE WHEN status IN ('delivered','read') THEN status ELSE 'sent' END, server_id=?2, error=NULL WHERE id=?1",
-                        params![id, ack["message_id"].as_str()],
+                        "UPDATE messages SET status=CASE WHEN status IN ('delivered','read') THEN status ELSE 'sent' END, server_id=?2, error=NULL,
+                         file=CASE WHEN ?3 IS NOT NULL AND kind='file' THEN json_set(file,'$.id',?3) ELSE file END WHERE id=?1",
+                        params![id, ack["message_id"].as_str(), att_id],
                     )?;
                     if let Some(p) = att_path.as_ref().filter(|_| payload.kind != "story") {
                         let _ = std::fs::remove_file(p);
@@ -497,6 +506,11 @@ impl Inner {
                     tx.execute("DELETE FROM outbox WHERE id=?1", [id])?;
                     tx.commit()?;
                     drop(db);
+                    if let Some(r) = payload.receipt.as_ref().filter(|r| matches!(r.kind.as_str(), "viewed" | "screenshot" | "expired")) {
+                        for mid in &r.ids {
+                            let _ = self.burn_if_all_seen(mid);
+                        }
+                    }
                     self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
                     if matches!(payload.kind.as_str(), "text" | "file" | "poll") {
                         self.emit(json!({"type": "streak_changed", "conversation_id": conv}));
@@ -818,8 +832,8 @@ impl Inner {
         let mut att: Option<PathBuf> = None;
         if kind == "file" {
             let mut f: FileMeta = serde_json::from_str(&file.ok_or_else(|| Error::Invalid("В сообщении нет файла".into()))?)?;
-            if f.once == Some(true) {
-                return Err(Error::Invalid("Одноразовые фото и видео нельзя переслать".into()));
+            if f.is_ephemeral() {
+                return Err(Error::Invalid("Самоудаляющиеся фото и видео нельзя переслать".into()));
             }
             let src = self.data_dir.join("files").join(format!("{id}.enc"));
             if !src.exists() {
@@ -850,7 +864,11 @@ impl Inner {
     }
 
     fn file_meta(&self, id: &str) -> Result<FileMeta> {
-        let f: Option<String> = self.db().conn.query_row("SELECT file FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten();
+        Self::file_meta_in(&self.db().conn, id)
+    }
+
+    fn file_meta_in(conn: &rusqlite::Connection, id: &str) -> Result<FileMeta> {
+        let f: Option<String> = conn.query_row("SELECT file FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten();
         Ok(serde_json::from_str(&f.ok_or_else(|| Error::Invalid("В сообщении нет файла".into()))?)?)
     }
 
@@ -861,14 +879,19 @@ impl Inner {
         let meta = self.file_meta(id)?;
         if p["external"] == true {
             self.check_copy_rule(&self.message_conv(id)?, "copy")?;
-            if meta.once == Some(true) {
-                return Err(Error::Invalid("Одноразовые фото и видео нельзя сохранить".into()));
+            if meta.is_ephemeral() {
+                return Err(Error::Invalid("Самоудаляющиеся фото и видео нельзя сохранить".into()));
             }
         }
         if meta.is_viewed() || meta.expires_at.is_some_and(|v| v <= now_ms()) {
             return Err(Error::Invalid("Медиа удалено после просмотра".into()));
         }
-        self.open_media(id, &meta, true)
+        let opened = self.open_media(id, &meta, true);
+        if meta.is_ephemeral() && self.file_meta(id).is_err() {
+            self.erase_media(id);
+            return Err(Error::Invalid("Медиа уже удалено".into()));
+        }
+        opened
     }
 
     pub(crate) fn open_media(&self, id: &str, meta: &FileMeta, notify_chat: bool) -> Result<Value> {
@@ -898,7 +921,7 @@ impl Inner {
         let out = dir.join(files::safe_name(&meta.name));
         // Photos are shown again and again: reuse the decrypted copy while it is complete.
         // A view-once file is decrypted afresh every time so that no readable copy outlives it.
-        if meta.once != Some(true) && std::fs::metadata(&out).map(|m| m.len() == meta.size).unwrap_or(false) {
+        if !meta.is_ephemeral() && std::fs::metadata(&out).map(|m| m.len() == meta.size).unwrap_or(false) {
             return Ok(json!({"path": out.to_string_lossy()}));
         }
         files::decrypt_file(&enc, &out, &unb64(&meta.key)?, &unb64(&meta.nonce)?)?;
@@ -911,7 +934,7 @@ impl Inner {
         let conv = self.message_conv(id)?;
         self.check_copy_rule(&conv, "copy")?;
         let meta = self.file_meta(id)?;
-        if meta.once == Some(true) {
+        if meta.is_ephemeral() {
             return Err(Error::Invalid("Самоудаляющиеся фото и видео нельзя сохранить".into()));
         }
         let enc = self.data_dir.join("files").join(format!("{id}.enc"));
@@ -930,21 +953,36 @@ impl Inner {
         let _ = std::fs::remove_dir_all(self.data_dir.join("tmp").join(id));
     }
 
-    /// Writes the local marks of a view-once file: opened here and, when the system reported a
-    /// screen capture, captured. Only a view-once file carries them; nothing is sent here.
-    pub(crate) fn set_seen(conn: &rusqlite::Connection, id: &str, shot: bool) -> Result<bool> {
-        let raw: Option<String> = conn.query_row("SELECT file FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten();
-        let Some(raw) = raw else { return Ok(false) };
-        let mut meta: FileMeta = serde_json::from_str(&raw)?;
-        if meta.once != Some(true) || (meta.viewed == Some(true) && (!shot || meta.shot == Some(true))) {
-            return Ok(false);
+    /// A viewer can still hold the video file open. Retry failed removals on the next sweep.
+    pub(crate) fn cleanup_consumed_media(&self, id: &str) {
+        self.erase_media(id);
+        let enc = self.data_dir.join("files").join(format!("{id}.enc"));
+        let tmp = self.data_dir.join("tmp").join(id);
+        if enc.try_exists().ok() == Some(false) && tmp.try_exists().ok() == Some(false) {
+            let _ = self.db().conn.execute(
+                "UPDATE consumed_media SET cleanup_pending=0 WHERE message_id=?1", [id],
+            );
         }
-        meta.viewed = Some(true);
-        if shot {
-            meta.shot = Some(true);
+    }
+
+    /// Retains only the routing data needed to collect view receipts and burn the server object.
+    pub(crate) fn remove_ephemeral(conn: &rusqlite::Connection, id: &str, conv: &str, timed: bool) -> Result<bool> {
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO consumed_media(message_id, conversation_id, sender_user_id, attachment_id, timed)
+             SELECT id, conversation_id, sender_user_id, json_extract(file,'$.id'), ?3
+             FROM messages WHERE id=?1 AND conversation_id=?2 AND kind='file'
+             AND (json_extract(file,'$.ttl_ms') IS NOT NULL)=?3 AND (?3 OR json_extract(file,'$.once')=1)",
+            params![id, conv, timed],
+        )?;
+        if inserted != 0 {
+            conn.execute(
+                "INSERT OR IGNORE INTO deleted_messages(message_id, conversation_id, sender_user_id)
+                 SELECT id, conversation_id, sender_user_id FROM messages WHERE id=?1 AND conversation_id=?2",
+                params![id, conv],
+            )?;
+            Self::erase_message(conn, id, conv)?;
         }
-        conn.execute("UPDATE messages SET file=?2 WHERE id=?1", params![id, serde_json::to_string(&meta)?])?;
-        Ok(true)
+        Ok(inserted != 0)
     }
 
     /// Opens a spoiler on this device only; the other devices of the account keep it closed.
@@ -953,14 +991,14 @@ impl Inner {
         let id = s(p, "message_id")?;
         let on = p["on"].as_bool().unwrap_or(true);
         let conv = self.message_conv(id)?;
-        let raw: Option<String> = self.db().conn.query_row("SELECT file FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten();
-        if let Some(raw) = raw {
-            let mut meta: FileMeta = serde_json::from_str(&raw)?;
-            if meta.spoiler == Some(true) && (meta.shown == Some(true)) != on {
-                meta.shown = on.then_some(true);
-                self.db().conn.execute("UPDATE messages SET file=?2 WHERE id=?1", params![id, serde_json::to_string(&meta)?])?;
-                self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
-            }
+        let changed = self.db().conn.execute(
+            "UPDATE messages SET file=CASE WHEN ?2 THEN json_set(file,'$.shown',json('true'))
+                 ELSE json_remove(file,'$.shown') END
+             WHERE id=?1 AND json_extract(file,'$.spoiler')=1
+             AND (json_extract(file,'$.shown') IS 1)<>?2", params![id, on],
+        )?;
+        if changed > 0 {
+            self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         }
         Ok(Value::Null)
     }
@@ -970,19 +1008,21 @@ impl Inner {
     pub fn media_timer_start(&self, p: &Value) -> Result<Value> {
         let id = s(p, "message_id")?;
         let conv = self.message_conv(id)?;
-        let mut meta = self.file_meta(id)?;
+        let db = self.db();
+        let mut meta = Self::file_meta_in(&db.conn, id)?;
         let Some(ttl) = meta.ttl_ms else {
             return Err(Error::Invalid("У медиа нет таймера".into()));
         };
-        if meta.once != Some(true) || meta.is_viewed() {
+        if meta.is_viewed() || meta.expires_at.is_some_and(|v| v <= now_ms()) {
             return Err(Error::Invalid("Медиа уже удалено".into()));
         }
         if meta.opened_at.is_none() {
             let now = now_ms();
             meta.opened_at = Some(now);
             meta.expires_at = Some(now.saturating_add(ttl as i64));
-            self.db().conn.execute("UPDATE messages SET file=?2 WHERE id=?1",
+            db.conn.execute("UPDATE messages SET file=?2 WHERE id=?1",
                 params![id, serde_json::to_string(&meta)?])?;
+            drop(db);
             self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
             self.wake();
         }
@@ -993,8 +1033,7 @@ impl Inner {
     pub(crate) fn next_media_expiry(&self) -> Option<i64> {
         self.db().conn.query_row(
             "SELECT min(CAST(json_extract(file,'$.expires_at') AS INTEGER))
-             FROM messages WHERE kind='file' AND json_extract(file,'$.once')=1
-             AND json_extract(file,'$.viewed') IS NOT 1
+             FROM messages WHERE kind='file' AND json_extract(file,'$.ttl_ms') IS NOT NULL
              AND json_extract(file,'$.expires_at') IS NOT NULL", [], |r| r.get(0),
         ).ok().flatten()
     }
@@ -1005,42 +1044,59 @@ impl Inner {
     /// the system reported a capture: it counts as having been seen and marks it for the author.
     pub fn media_viewed(&self, p: &Value) -> Result<Value> {
         let id = s(p, "message_id")?;
-        let conv = self.message_conv(id)?;
-        let shot = p["screenshot"].as_bool().unwrap_or(false);
-        let was = self.file_meta(&id)?;
-        if was.once != Some(true) {
+        let (conv, once): (String, bool) = self.db().conn.query_row(
+            "SELECT conversation_id, json_extract(file,'$.once') IS 1 AND json_extract(file,'$.ttl_ms') IS NULL
+             FROM messages WHERE id=?1 AND kind='file'", [id], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?.unwrap_or_default();
+        if conv.is_empty() {
+            return Ok(Value::Null);
+        }
+        if !once {
             return Err(Error::Invalid("Это сообщение не одноразовое".into()));
         }
-        let first = !was.is_viewed();
-        Self::set_seen(&self.db().conn, &id, shot)?;
-        self.erase_media(&id);
-        if first {
-            self.enqueue_receipt(&conv, "viewed", vec![id.to_string()])?;
-            if shot {
-                self.enqueue_receipt(&conv, "screenshot", vec![id.to_string()])?;
+        let kind = if p["screenshot"] == true { "screenshot" } else { "viewed" };
+        self.consume_media(id, &conv, false, Some(kind))?;
+        Ok(Value::Null)
+    }
+
+    fn consume_media(&self, id: &str, conv: &str, timed: bool, kind: Option<&str>) -> Result<bool> {
+        let receipt = kind.map(|kind| -> Result<Payload> {
+            let mut receipt = self.new_payload(conv, "receipt")?;
+            receipt.receipt = Some(Receipt { kind: kind.into(), ids: vec![id.to_string()] });
+            Ok(receipt)
+        }).transpose()?;
+        {
+            let mut db = self.db();
+            let tx = db.conn.transaction()?;
+            if !Self::remove_ephemeral(&tx, id, conv, timed)? {
+                return Ok(false);
             }
+            if let (Some(receipt), Some(kind)) = (receipt, kind) {
+                tx.execute(
+                    "INSERT INTO outbox(id, conversation_id, payload, visible, created_at) VALUES (?1, ?2, ?3, 0, ?4)",
+                    params![receipt.mid, conv, serde_json::to_vec(&receipt)?, now_ms()],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO receipts(message_id, user_id, kind, at) VALUES (?1, ?2, ?3, ?4)",
+                    params![id, receipt.sender, kind, now_ms()],
+                )?;
+            }
+            tx.commit()?;
+        }
+        self.cleanup_consumed_media(id);
+        if kind.is_some() {
             self.wake();
-            self.burn_if_all_seen(&id)?;
         }
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
-        Ok(Value::Null)
+        self.emit(json!({"type": "conversations_changed"}));
+        Ok(true)
     }
 
     /// Called when the user leaves a chat: view-once files opened there lose their encrypted copy
     /// as well, so nothing of them stays on this device, and every spoiler of the chat closes again.
     pub fn burn_viewed(&self, p: &Value) -> Result<Value> {
         let conv = s(p, "conversation_id")?;
-        let ids: Vec<String> = {
-            let db = self.db();
-            let mut st = db.conn.prepare(
-                "SELECT id FROM messages WHERE conversation_id=?1 AND kind='file' AND json_extract(file,'$.once')=1 AND json_extract(file,'$.viewed')=1",
-            )?;
-            let rows = st.query_map([conv], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
-            rows
-        };
-        for id in &ids {
-            self.erase_media(id);
-        }
+        let burned = self.sweep_viewed_media();
         // A spoiler is opened for as long as the reader stays in the chat.
         let closed = {
             let db = self.db();
@@ -1050,69 +1106,63 @@ impl Inner {
                 [conv],
             )?
         };
-        Ok(json!({"burned": ids.len(), "closed": closed}))
+        Ok(json!({"burned": burned, "closed": closed}))
     }
 
-    /// A device switched off after a view-once file had been opened destroys its encrypted
-    /// copies with the next start, before anything can be read from them again.
-    pub fn sweep_viewed_media(&self) {
-        let ids: Vec<String> = {
+    /// Removes expired timers and the viewed rows left behind by older clients.
+    pub fn sweep_viewed_media(&self) -> usize {
+        let pending: Vec<String> = {
             let db = self.db();
-            let Ok(mut st) = db.conn.prepare("SELECT id FROM messages WHERE kind='file' AND json_extract(file,'$.once')=1 AND json_extract(file,'$.viewed')=1") else {
-                return;
-            };
-            let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) else { return };
+            let Ok(mut st) = db.conn.prepare("SELECT message_id FROM consumed_media WHERE cleanup_pending=1") else { return 0 };
+            let Ok(rows) = st.query_map([], |r| r.get(0)) else { return 0 };
             rows.filter_map(|r| r.ok()).collect()
         };
-        for id in ids {
-            self.erase_media(&id);
+        for id in pending {
+            self.cleanup_consumed_media(&id);
         }
-        if self.logged_in() {
-            let due: Vec<String> = {
-                let db = self.db();
-                let Ok(mut st) = db.conn.prepare(
-                    "SELECT id FROM messages WHERE kind='file'
-                     AND json_extract(file,'$.once')=1
-                     AND json_extract(file,'$.viewed') IS NOT 1
-                     AND CAST(json_extract(file,'$.expires_at') AS INTEGER) <= ?1"
-                ) else { return };
-                let Ok(rows) = st.query_map([now_ms()], |r| r.get::<_, String>(0)) else { return };
-                rows.filter_map(|r| r.ok()).collect()
-            };
-            for id in due {
-                let _ = self.media_viewed(&json!({"message_id": id}));
-            }
-        }
+        let due: Vec<(String, String, bool)> = {
+            let db = self.db();
+            let Ok(mut st) = db.conn.prepare(
+                "SELECT id, conversation_id, json_extract(file,'$.ttl_ms') IS NOT NULL
+                 FROM messages WHERE kind='file' AND
+                 ((json_extract(file,'$.once')=1 AND json_extract(file,'$.viewed')=1) OR
+                  (json_extract(file,'$.ttl_ms') IS NOT NULL AND json_extract(file,'$.expires_at') <= ?1))",
+            ) else { return 0 };
+            let Ok(rows) = st.query_map([now_ms()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))) else { return 0 };
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        due.into_iter().filter(|(id, conv, timed)| {
+            self.consume_media(id, conv, *timed, timed.then_some("expired")).unwrap_or(false)
+        }).count()
     }
 
     /// Asks the server to drop the object once every member except the author has seen the file.
-    /// Any answer is final: the media is already gone for the people who saw it, and otherwise the
-    /// server keeps it for the 24 hours of a normal attachment.
+    /// Without a successful burn, the object follows the server's normal attachment retention.
     pub(crate) fn burn_if_all_seen(&self, id: &str) -> Result<()> {
         let (att, need, seen): (String, i64, i64) = {
             let db = self.db();
             let row: Option<(String, String, String)> = db
                 .conn
                 .query_row(
-                    "SELECT m.file, m.sender_user_id, COALESCE(c.members,'[]') FROM messages m
-                     LEFT JOIN conversations c ON c.id=m.conversation_id WHERE m.id=?1 AND m.kind='file'",
+                    "SELECT m.attachment_id, m.sender_user_id, COALESCE(c.members,'[]') FROM consumed_media m
+                     LEFT JOIN conversations c ON c.id=m.conversation_id WHERE m.message_id=?1",
                     [id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            let Some((raw, sender, members)) = row else { return Ok(()) };
-            let meta: FileMeta = serde_json::from_str(&raw)?;
-            if meta.once != Some(true) || meta.id.is_empty() {
+            let Some((att, sender, members)) = row else { return Ok(()) };
+            if att.is_empty() {
                 return Ok(());
             }
             let listed: Vec<String> = serde_json::from_str(&members).unwrap_or_default();
             let need = listed.iter().filter(|u| **u != sender).count() as i64;
             let seen: i64 = db.conn.query_row(
-                "SELECT count(DISTINCT user_id) FROM receipts WHERE message_id=?1 AND kind IN ('viewed','screenshot') AND user_id<>?2",
-                params![id, sender],
+                "SELECT count(DISTINCT user_id) FROM receipts WHERE message_id=?1 AND kind IN ('viewed','screenshot','expired') AND user_id<>?2
+                 AND user_id IN (SELECT value FROM json_each(?3))",
+                params![id, sender, members],
                 |r| r.get(0),
             )?;
-            (meta.id, need, seen)
+            (att, need, seen)
         };
         if need == 0 || seen < need {
             return Ok(());
@@ -1184,8 +1234,7 @@ fn parse_bundle(b: &Value) -> Result<PreKeyBundle> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileMeta, Inner};
-    use rusqlite::{Connection, params};
+    use super::FileMeta;
 
     fn meta(mime: &str, kind: Option<&str>) -> FileMeta {
         FileMeta { mime: mime.into(), name: "a.jpg".into(), thumb: Some("AAAA".into()), kind: kind.map(str::to_string), ..Default::default() }
@@ -1234,7 +1283,9 @@ mod tests {
         photo.viewed = Some(true);
         let wire = photo.sanitized();
         assert_eq!(wire.ttl_ms, Some(10_000));
-        assert_eq!(wire.once, Some(true));
+        assert!(!wire.is_once());
+        assert_eq!(wire.once, None);
+        assert!(wire.is_photo());
         assert!(wire.thumb.is_none());
         assert_eq!((wire.opened_at, wire.expires_at, wire.viewed), (None, None, None));
         assert_eq!(wire.preview(), "🖼 Фото · 10 с");
@@ -1252,50 +1303,4 @@ mod tests {
         assert!(sanitized.once.is_none() && sanitized.ttl_ms.is_none());
     }
 
-    #[test]
-    fn timed_media_deadline_is_stable_and_read_mark_keeps_it() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE messages(id TEXT PRIMARY KEY, file TEXT);").unwrap();
-        let mut photo = meta("image/jpeg", None);
-        photo.once = Some(true);
-        photo.ttl_ms = Some(3_000);
-        photo.opened_at = Some(1_000);
-        photo.expires_at = Some(4_000);
-        c.execute("INSERT INTO messages VALUES('timer',?1)",
-            [serde_json::to_string(&photo).unwrap()]).unwrap();
-        let expires: Option<i64> = c.query_row(
-            "SELECT min(CAST(json_extract(file,'$.expires_at') AS INTEGER))
-             FROM messages WHERE json_extract(file,'$.once')=1
-             AND json_extract(file,'$.viewed') IS NOT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(expires, Some(4_000));
-        assert!(Inner::set_seen(&c, "timer", false).unwrap());
-        let updated: String = c.query_row("SELECT file FROM messages WHERE id='timer'", [], |r| r.get(0)).unwrap();
-        let stored: FileMeta = serde_json::from_str(&updated).unwrap();
-        assert_eq!(stored.expires_at, Some(4_000));
-        assert!(stored.is_viewed());
-    }
-
-    #[test]
-    fn viewed_marks_a_view_once_file_once_and_a_capture_adds_to_it() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE messages(id TEXT PRIMARY KEY, file TEXT);").unwrap();
-        let mut once = meta("image/jpeg", None);
-        once.once = Some(true);
-        c.execute("INSERT INTO messages VALUES('m1',?1),('m2',?2)", params![serde_json::to_string(&once).unwrap(), serde_json::to_string(&meta("image/jpeg", None)).unwrap()]).unwrap();
-
-        assert!(!Inner::set_seen(&c, "absent", false).unwrap());
-        // An ordinary photo never carries the mark, whatever a peer sends.
-        assert!(!Inner::set_seen(&c, "m2", false).unwrap());
-        assert!(Inner::set_seen(&c, "m1", false).unwrap());
-        assert!(!Inner::set_seen(&c, "m1", false).unwrap(), "the second report changes nothing");
-        let stored: String = c.query_row("SELECT file FROM messages WHERE id='m1'", [], |r| r.get(0)).unwrap();
-        let m: FileMeta = serde_json::from_str(&stored).unwrap();
-        assert_eq!((m.viewed, m.shot), (Some(true), None));
-        // A screen capture on top of the view is a new fact.
-        assert!(Inner::set_seen(&c, "m1", true).unwrap());
-        let stored: String = c.query_row("SELECT file FROM messages WHERE id='m1'", [], |r| r.get(0)).unwrap();
-        let m: FileMeta = serde_json::from_str(&stored).unwrap();
-        assert_eq!((m.viewed, m.shot), (Some(true), Some(true)));
-        assert!(m.is_viewed());
-    }
 }

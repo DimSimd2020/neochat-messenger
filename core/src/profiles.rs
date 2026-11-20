@@ -80,8 +80,8 @@ impl Inner {
         let filter = match p["kind"].as_str().unwrap_or("media") {
             // A view-once file is not part of the shared history of the two people: it is gone
             // after it has been seen, so it never appears in these lists.
-            "media" => "m.file IS NOT NULL AND json_extract(m.file,'$.mime') LIKE 'image/%' AND COALESCE(json_extract(m.file,'$.once'), 0)<>1",
-            "files" => "m.file IS NOT NULL AND json_extract(m.file,'$.mime') NOT LIKE 'image/%' AND COALESCE(json_extract(m.file,'$.once'), 0)<>1",
+            "media" => "m.file IS NOT NULL AND json_extract(m.file,'$.mime') LIKE 'image/%' AND COALESCE(json_extract(m.file,'$.once'), 0)<>1 AND json_extract(m.file,'$.ttl_ms') IS NULL",
+            "files" => "m.file IS NOT NULL AND json_extract(m.file,'$.mime') NOT LIKE 'image/%' AND COALESCE(json_extract(m.file,'$.once'), 0)<>1 AND json_extract(m.file,'$.ttl_ms') IS NULL",
             "links" => "(m.body LIKE '%https://%' OR m.body LIKE '%http://%')",
             _ => return Err(Error::Invalid("Неизвестный раздел профиля".into())),
         };

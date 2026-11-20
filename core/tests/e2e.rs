@@ -1589,6 +1589,7 @@ fn spoilers_and_one_time_media() {
     bob.sync();
 
     let find = |c: &Client, name: &str| c.messages(&cid).into_iter().find(|m| m["file"]["name"] == name).unwrap_or_else(|| panic!("{name} missing"));
+    let has = |c: &Client, name: &str| c.messages(&cid).iter().any(|m| m["file"]["name"] == name);
     let (hm, om) = (find(&bob, "hidden.jpg"), find(&bob, "once.jpg"));
     assert_eq!(hm["file"]["spoiler"], true);
     assert_eq!(hm["file"]["thumb"].as_str(), Some("AAAA"));
@@ -1617,10 +1618,8 @@ fn spoilers_and_one_time_media() {
     let dl = bob.call("download_file", json!({"message_id": om["id"]}));
     assert_eq!(std::fs::read(dl["path"].as_str().unwrap()).unwrap(), data);
     bob.call("media_viewed", json!({"message_id": om["id"]}));
-    let om = find(&bob, "once.jpg");
-    assert_eq!(om["file"]["viewed"], true);
-    assert_eq!(om["file"]["downloaded"], false);
-    assert!(om["file"]["thumb"].is_null());
+    assert!(!has(&bob, "once.jpg"), "the row must disappear after viewing");
+    assert!(!std::path::Path::new(dl["path"].as_str().unwrap()).exists());
     assert!(bob.try_call("download_file", json!({"message_id": om["id"]})).is_err(), "seen once already");
     assert!(bob.try_call("export_file", json!({"message_id": om["id"], "dest": src.to_string_lossy()})).is_err(), "cannot be saved");
     assert!(bob.try_call("forward_message", json!({"message_id": om["id"], "conversation_id": cid})).is_err(), "cannot be forwarded");
@@ -1633,12 +1632,10 @@ fn spoilers_and_one_time_media() {
     // receipt leaves this device through its outbox, so bob syncs first.
     bob.sync();
     alice.sync();
-    let am = find(&alice, "once.jpg");
-    assert_eq!(am["file"]["viewed"], true);
-    assert_eq!(am["file"]["downloaded"], false);
-    assert!(alice.try_call("download_file", json!({"message_id": am["id"]})).is_err());
+    assert!(!has(&alice, "once.jpg"), "the author's row must disappear too");
+    assert!(alice.try_call("download_file", json!({"message_id": om["id"]})).is_err());
 
-    // A capture reported by the system counts as a view and is marked for both sides.
+    // A reported screenshot also consumes a one-time file.
     let shot = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "image/jpeg", "name": "shot.jpg", "once": true}));
     assert_eq!(shot["file"]["once"], true);
     alice.sync();
@@ -1648,9 +1645,35 @@ fn spoilers_and_one_time_media() {
     bob.sync();
     alice.sync();
     bob.sync();
-    assert_eq!(find(&bob, "shot.jpg")["file"]["shot"], true);
-    assert_eq!(find(&alice, "shot.jpg")["file"]["shot"], true);
-    assert_eq!(find(&alice, "shot.jpg")["file"]["viewed"], true);
+    assert!(!has(&bob, "shot.jpg"));
+    assert!(!has(&alice, "shot.jpg"));
+
+    let timed = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(),
+        "mime": "image/jpeg", "name": "timer.jpg", "thumb": "AAAA", "ttl_ms": 3000}));
+    assert_eq!(timed["file"]["once"], false);
+    assert_eq!(timed["file"]["ttl_ms"], 3000);
+    assert_eq!(timed["file"]["image"], true);
+    alice.sync();
+    bob.sync();
+    let timed = find(&bob, "timer.jpg");
+    assert_eq!(timed["file"]["once"], false);
+    assert_eq!(timed["file"]["ttl_ms"], 3000);
+    let args = json!({"message_id": timed["id"]});
+    let opened = bob.call("download_file", args.clone());
+    let deadline = bob.call("media_timer_start", args.clone())["expires_at"].as_i64().unwrap();
+    assert!(bob.try_call("media_viewed", args.clone()).is_err());
+    bob.call("burn_viewed", json!({"conversation_id": cid}));
+    bob.call("download_file", args.clone());
+    assert_eq!(bob.call("media_timer_start", args.clone())["expires_at"], deadline);
+    assert!(has(&bob, "timer.jpg"));
+    let wait = (deadline - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64).max(0);
+    std::thread::sleep(std::time::Duration::from_millis(wait as u64 + 50));
+    bob.sync();
+    assert!(!has(&bob, "timer.jpg"), "the row must disappear at its deadline");
+    assert!(!std::path::Path::new(opened["path"].as_str().unwrap()).exists());
+    assert!(bob.try_call("download_file", args).is_err());
+    alice.sync();
+    assert!(!has(&alice, "timer.jpg"), "the expiry receipt removes the author’s row");
 
     let _ = std::fs::remove_file(&src);
 }

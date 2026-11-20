@@ -82,7 +82,7 @@ impl Inner {
     fn run_cycle(self: &Arc<Self>) -> Result<usize> {
         let _g = self.cycle_lock.lock().unwrap_or_else(|e| e.into_inner());
         let res = (|| {
-            // Expired media must be erased and its viewed receipts queued before outgoing sync.
+            // Expire local media even when there are no incoming events.
             self.sweep_viewed_media();
             // Outgoing first: a just-typed message should not wait for the incoming feed.
             self.sweep_stories()?;
@@ -352,7 +352,7 @@ impl Inner {
         let mut control: Option<(String, Value)> = None;
         let mut deleted = None;
         // View-once files somebody else has just opened: their local copies go after the commit.
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen: Vec<(String, bool)> = Vec::new();
         let mut service: Option<(Payload, String)> = None;
         let payload = payload.map(|p| {
             if crate::groups::may_post(&tx, &conv, &sender, &p.kind) { Some(p) } else { None }
@@ -474,17 +474,25 @@ impl Inner {
                                 tx.execute("UPDATE conversations SET unread=0 WHERE id=?1", [&conv])?;
                                 changed_conv = true;
                             }
-                        } else if r.kind == "viewed" || r.kind == "screenshot" {
-                            // A view-once file has been opened, and on iOS the system may also have
-                            // reported a capture. Every device of every member drops its copies, the
-                            // author's included; the marks are kept only on rows that are such files.
+                        } else if matches!(r.kind.as_str(), "viewed" | "screenshot" | "expired") {
+                            let timed = r.kind == "expired";
+                            // Keep receipts for the server burn even after the message was removed.
                             for id in r.ids.iter().take(500) {
-                                tx.execute(
-                                    "INSERT OR IGNORE INTO receipts(message_id, user_id, kind, at) SELECT ?1, ?2, ?3, ?4 WHERE EXISTS(SELECT 1 FROM messages WHERE id=?1 AND conversation_id=?5 AND json_extract(file,'$.once')=1)",
-                                    params![id, sender, r.kind, now, conv],
+                                let recorded = tx.execute(
+                                    "INSERT OR IGNORE INTO receipts(message_id, user_id, kind, at) SELECT ?1, ?2, ?3, ?4
+                                     WHERE EXISTS(SELECT 1 FROM messages WHERE id=?1 AND conversation_id=?5
+                                         AND (json_extract(file,'$.ttl_ms') IS NOT NULL)=?6 AND (?6 OR json_extract(file,'$.once')=1))
+                                     OR EXISTS(SELECT 1 FROM consumed_media WHERE message_id=?1 AND conversation_id=?5 AND timed=?6)",
+                                    params![id, sender, r.kind, now, conv, timed],
                                 )?;
-                                if Self::set_seen(&tx, id, r.kind == "screenshot")? {
-                                    seen.push(id.to_string());
+                                if recorded > 0 {
+                                    let remove_here = sender == me || tx.query_row(
+                                        "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND conversation_id=?2 AND outgoing=1)",
+                                        params![id, conv], |row| row.get::<_, bool>(0),
+                                    )?;
+                                    let removed = remove_here && Self::remove_ephemeral(&tx, id, &conv, timed)?;
+                                    seen.push((id.to_string(), removed));
+                                    changed_conv |= removed;
                                 }
                             }
                         }
@@ -526,8 +534,10 @@ impl Inner {
         if let Some(id) = deleted {
             self.erase_media(&id);
         }
-        for id in seen {
-            self.erase_media(&id);
+        for (id, removed) in seen {
+            if removed {
+                self.cleanup_consumed_media(&id);
+            }
             let _ = self.burn_if_all_seen(&id);
         }
         if let Some((kind, g)) = control {

@@ -112,6 +112,11 @@ CREATE TABLE IF NOT EXISTS outbox (
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS processed (event_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS consumed_media (
+    message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+    sender_user_id TEXT NOT NULL, attachment_id TEXT NOT NULL, timed INTEGER NOT NULL,
+    cleanup_pending INTEGER NOT NULL DEFAULT 1
+);
 CREATE TABLE IF NOT EXISTS deleted_messages (
     message_id TEXT NOT NULL, conversation_id TEXT NOT NULL, sender_user_id TEXT NOT NULL,
     PRIMARY KEY (message_id, conversation_id, sender_user_id)

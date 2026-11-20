@@ -89,6 +89,11 @@ class PosterView(ctx: Context) : ImageView(ctx) {
             restart()
             invalidate()
         }
+    var timed = false
+        set(v) {
+            field = v
+            invalidate()
+        }
     /** A view-once file already opened: its cover stops drifting, the card says what became of it. */
     var onceSeen = false
         set(v) {
@@ -302,7 +307,7 @@ class PosterView(ctx: Context) : ImageView(ctx) {
         val cy = height / 2f
         fill.color = 0x33FFFFFF
         c.drawCircle(cx, cy - 16 * d, 20 * d, fill)
-        val one = "1"
+        val one = if (timed) "◷" else "1"
         label.textSize = 17 * d
         label.color = Color.WHITE
         c.drawText(one, cx - label.measureText(one) / 2, cy - 16 * d - (label.descent() + label.ascent()) / 2, label)
