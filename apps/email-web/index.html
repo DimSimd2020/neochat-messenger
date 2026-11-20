@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; base-uri 'none'; connect-src 'self' __NEOCHAT_API_ORIGIN__; form-action 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'; object-src 'none'; upgrade-insecure-requests"
+    />
+    <title>Подтверждение почты — NeoChat</title>
+  </head>
+  <body>
+    <main class="page">
+      <section class="card" aria-labelledby="page-title">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M4.75 6.5h14.5v11h-14.5z" />
+              <path d="m5.25 7 6.75 5.5L18.75 7" />
+            </svg>
+          </span>
+          <span>NeoChat</span>
+        </div>
+
+        <div class="mail-icon" aria-hidden="true">
+          <svg viewBox="0 0 32 32" focusable="false">
+            <rect x="4.5" y="7.5" width="23" height="17" rx="3.5" />
+            <path d="m5.5 9 9 7a2.5 2.5 0 0 0 3 0l9-7" />
+          </svg>
+        </div>
+
+        <h1 id="page-title">Подтвердите почту</h1>
+        <p class="description">Firebase проверил ссылку. Завершите подтверждение для аккаунта NeoChat.</p>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+        <button id="confirm" class="confirm" type="button">Подтвердить почту</button>
+        <p class="hint">После подтверждения вернитесь в приложение NeoChat и нажмите «Я подтвердил почту».</p>
+      </section>
+      <footer>Если вы не запрашивали это письмо, просто закройте страницу.</footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

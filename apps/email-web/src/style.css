@@ -1,0 +1,250 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+  background: #e5e9f1;
+  color: #1c2638;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button {
+  font: inherit;
+}
+
+.page {
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 24px;
+  padding: 32px 20px;
+}
+
+.card {
+  width: min(100%, 440px);
+  padding: 32px;
+  border: 1px solid #cfd7e5;
+  border-radius: 20px;
+  background: #fff;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1c2638;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.brand-mark {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: #e1e9fa;
+  color: #2456b8;
+}
+
+.brand-mark svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.mail-icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  margin-top: 24px;
+  border-radius: 12px;
+  background: #e1e9fa;
+  color: #2456b8;
+}
+
+.mail-icon svg {
+  width: 30px;
+  height: 30px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+h1 {
+  margin: 24px 0 12px;
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.description,
+.hint,
+.status {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.description {
+  color: #53617a;
+  font-size: 16px;
+}
+
+.status {
+  min-height: 24px;
+  margin-top: 16px;
+  font-size: 14px;
+}
+
+.status[data-kind="error"] {
+  color: #8e302a;
+}
+
+.status[data-kind="success"] {
+  color: #216a45;
+}
+
+.status[data-kind="info"] {
+  color: #53617a;
+}
+
+.confirm {
+  width: 100%;
+  min-height: 52px;
+  margin-top: 12px;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 12px;
+  background: #315dcf;
+  color: #fff;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 600;
+  transition: background-color 160ms ease, transform 140ms ease;
+}
+
+.confirm:hover:not(:disabled) {
+  background: #244eae;
+}
+
+.confirm:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.confirm:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.confirm:focus-visible {
+  outline: 3px solid #2456b8;
+  outline-offset: 3px;
+}
+
+.hint {
+  margin-top: 16px;
+  color: #53617a;
+  font-size: 14px;
+}
+
+footer {
+  max-width: 440px;
+  color: #53617a;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #111318;
+    color: #eef1f7;
+  }
+
+  .card {
+    border-color: #343c4b;
+    background: #21252e;
+  }
+
+  .brand {
+    color: #eef1f7;
+  }
+
+  .brand-mark,
+  .mail-icon {
+    background: #2c374d;
+    color: #98b9ff;
+  }
+
+  .description,
+  .hint,
+  .status[data-kind="info"],
+  footer {
+    color: #a3aebf;
+  }
+
+  .status[data-kind="error"] {
+    color: #ffaaa2;
+  }
+
+  .status[data-kind="success"] {
+    color: #91ddb0;
+  }
+
+  .confirm {
+    background: #4169cf;
+  }
+
+  .confirm:hover:not(:disabled) {
+    background: #557de0;
+  }
+
+  .confirm:focus-visible {
+    outline-color: #98b9ff;
+  }
+}
+
+@media (max-width: 480px) {
+  .page {
+    padding: 20px 16px;
+  }
+
+  .card {
+    padding: 24px;
+  }
+
+  h1 {
+    font-size: 26px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

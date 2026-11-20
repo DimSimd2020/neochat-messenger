@@ -1,0 +1,13 @@
+{
+  "projects": {},
+  "targets": {
+    "neochat-messenger": {
+      "hosting": {
+        "email-verification": [
+          "neochat-messenger"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
