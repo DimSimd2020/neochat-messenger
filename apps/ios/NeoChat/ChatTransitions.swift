@@ -53,7 +53,7 @@ final class ChatTransitionAnimator: NSObject, UIViewControllerAnimatedTransition
         case "hinge":
             var perspective = CATransform3DIdentity
             perspective.m34 = -1 / 950
-            moving.layer.transform = forward ? CATransform3DRotate(perspective, -.48, 0, 1, 0) : CATransform3DIdentity
+            moving.layer.transform = forward ? CATransform3DRotate(perspective, -0.48, 0, 1, 0) : CATransform3DIdentity
             moving.alpha = forward ? 0.65 : 1
         case "reveal":
             moving.transform = forward ? CGAffineTransform(scaleX: 0.6, y: 0.6) : .identity
@@ -86,7 +86,7 @@ final class ChatTransitionAnimator: NSObject, UIViewControllerAnimatedTransition
                 case "hinge":
                     var perspective = CATransform3DIdentity
                     perspective.m34 = -1 / 950
-                    moving.layer.transform = CATransform3DRotate(perspective, -.48, 0, 1, 0)
+                    moving.layer.transform = CATransform3DRotate(perspective, -0.48, 0, 1, 0)
                 case "reveal":
                     moving.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
                     moving.layer.cornerRadius = 46
@@ -174,7 +174,7 @@ final class CustomizationViewController: SheetViewController, UINavigationContro
         slider.accessibilityLabel = "Длительность перехода"
         slider.addAction(UIAction { [weak self] _ in
             UserDefaults.standard.set(Int(slider.value), forKey: "chat_transition_duration")
-            self?.durationLabel.text = "Длительность: \(ChatTransitions.milliseconds) мс"
+            self?.durationLabel?.text = "Длительность: \(ChatTransitions.milliseconds) мс"
         }, for: .valueChanged)
         durationLabel = stack.arrangedSubviews.last as? UILabel
         stack.addArrangedSubview(slider)
