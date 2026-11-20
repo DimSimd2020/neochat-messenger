@@ -3074,7 +3074,7 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
             DispatchQueue.global(qos: .userInitiated).async {
                 let img = Photos.decode(URL(fileURLWithPath: path), maxSide: 2732)
                 DispatchQueue.main.async {
-                    guard let self, let img, self.view.window != nil else { return }
+                    guard let self, let img else { return }
                     self.imageView.image = img
                     OnceMedia.startTimer(self.message) { [weak self] in
                         self?.imageView.image = nil
