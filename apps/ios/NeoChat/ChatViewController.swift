@@ -3063,7 +3063,7 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate {
         let params: JSON = profile ? ["user_id":message.str("profile_user_id"),"photo_id":message.str("id")] : ["message_id":message.str("id")]
         Core.shared.call(method, params) { [weak self] r in
             guard case .success(let v) = r, let path = (v as? JSON)?.str("path") else { return }
-            OnceMedia.startTimer(self.message)
+            if let message = self?.message { OnceMedia.startTimer(message) }
             DispatchQueue.global(qos: .userInitiated).async {
                 let img = Photos.decode(URL(fileURLWithPath: path), maxSide: 2732)
                 DispatchQueue.main.async { if let img { self?.imageView.image = img } }
