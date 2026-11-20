@@ -1087,7 +1087,33 @@ impl Inner {
                 } else if (roster.revision as i64) < *old_rev {
                     return Err(Error::Crypto("Сервер вернул устаревший список устройств".into()));
                 } else {
-                    tx.execute("UPDATE contacts SET roster_revision=?2 WHERE user_id=?1", params![user_id, roster.revision as i64])?;
+                    // Recovery retains the pinned account identity but replaces every
+                    // device. A fully disjoint signed roster must require explicit
+                    // acknowledgement, just like an account identity change.
+                    let known: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM known_devices WHERE user_id=?1",
+                        [&user_id], |r| r.get(0),
+                    )?;
+                    let mut retained_device = false;
+                    for device in &roster.devices {
+                        let present: i64 = tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM known_devices WHERE user_id=?1 AND device_id=?2)",
+                            params![user_id, device.device_id], |r| r.get(0),
+                        )?;
+                        if present != 0 {
+                            retained_device = true;
+                            break;
+                        }
+                    }
+                    if known > 0 && !retained_device && (roster.revision as i64) > *old_rev {
+                        key_changed = true;
+                        tx.execute(
+                            "UPDATE contacts SET key_changed=1, verified=0, pending_account_key=?2, roster_revision=?3 WHERE user_id=?1",
+                            params![user_id, account_key, roster.revision as i64],
+                        )?;
+                    } else {
+                        tx.execute("UPDATE contacts SET roster_revision=?2 WHERE user_id=?1", params![user_id, roster.revision as i64])?;
+                    }
                 }
             }
         }
