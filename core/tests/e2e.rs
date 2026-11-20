@@ -515,7 +515,16 @@ fn linked_device_and_recovery() {
         "recover",
         json!({"server": e.server, "username": bname, "recovery_code": bob_code, "new_password": "new long password", "device_name": "new", "platform": "windows"}),
     );
-    alice.sync();
+    // The roster event is delivered asynchronously. Wait for the changed identity to
+    // be visible before checking the send guard; do not enqueue an unsafe probe message.
+    for _ in 0..30 {
+        alice.sync();
+        let conv = alice.call("get_conversation", json!({"conversation_id": cid}));
+        if conv["key_changed_users"].as_array().is_some_and(|users| !users.is_empty()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     let err = alice.try_call("send_text", json!({"conversation_id": cid, "text": "кто ты?"})).unwrap_err();
     assert_eq!(err.code(), "key_changed");
     alice.call("accept_key_change", json!({"user_id": uid(&bob2)}));
