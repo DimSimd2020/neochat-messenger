@@ -135,7 +135,7 @@ class GlassDrawable(
             Kind.NONE -> 0
         }
         rect.set(bounds)
-        rect.inset(stroke.strokeWidth / 2, stroke.strokeWidth / 2)
+        if (rim || radius != 0f || corners != null) rect.inset(stroke.strokeWidth / 2, stroke.strokeWidth / 2)
         path.reset()
         val cr = corners
         if (cr == null) path.addRoundRect(rect, radius, radius, Path.Direction.CW)
@@ -453,6 +453,7 @@ fun blendColor(a: Int, b: Int, t: Float): Int {
 
 /** Edit field whose text and hint follow the palette. */
 class ThemedEdit(ctx: Context) : EditText(ctx), Themed {
+    var protectSelection = false
     /** Pictures pasted into the field (Paste menu, keyboard); text still pastes as usual. */
     var onImages: ((List<android.net.Uri>) -> Unit)? = null
 
@@ -470,6 +471,7 @@ class ThemedEdit(ctx: Context) : EditText(ctx), Themed {
     private fun isImage(uri: android.net.Uri) = context.contentResolver.getType(uri)?.startsWith("image/") == true
 
     override fun onTextContextMenuItem(id: Int): Boolean {
+        if (protectSelection && id in listOf(android.R.id.cut, android.R.id.copy, android.R.id.shareText)) return true
         if (id == android.R.id.paste || id == android.R.id.pasteAsPlainText) {
             val clip = context.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip
             val uris = (0 until (clip?.itemCount ?: 0)).mapNotNull { clip!!.getItemAt(it).uri }.filter { isImage(it) }
@@ -683,9 +685,25 @@ class AvatarView(ctx: Context, private val sizeDp: Int) : View(ctx), Themed {
     }
 }
 
-/** Static background: linear gradient with soft radial spots (no motion). */
+/** Static background with soft radial spots and a tint behind the top bars. */
 class BackgroundView(ctx: Context) : View(ctx), Themed {
-    override fun onDraw(c: Canvas) = Backdrop.draw(c, width.toFloat(), height.toFloat(), Theme.p)
+    private val shade = Paint()
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val palette = Theme.p
+        Backdrop.draw(c, w, h, palette)
+        val tint = palette.bg1 and 0x00FFFFFF
+        val shadeHeight = minOf(h, context.dpf(140))
+        shade.shader = LinearGradient(
+            0f, 0f, 0f, shadeHeight,
+            intArrayOf(tint or 0xEB000000.toInt(), tint or 0x78000000, tint),
+            floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP,
+        )
+        c.drawRect(0f, 0f, w, shadeHeight, shade)
+    }
 
     override fun applyTheme() = invalidate()
 }
@@ -886,12 +904,14 @@ class ToggleRow(ctx: Context, text: String) : LinearLayout(ctx), Themed {
             c.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), height / 2f, height / 2f, paint)
             // On a light sheet an unchecked track is nearly the sheet's own colour: a blue rim
             // keeps the switch readable as a control instead of a blank pill.
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dpf(1.4f)
-            paint.color = if (k > 0.5f) on else 0x96367FF4.toInt()
-            val inset = paint.strokeWidth / 2
-            c.drawRoundRect(inset, inset, width - inset, height - inset, (height - 2 * inset) / 2f, (height - 2 * inset) / 2f, paint)
-            paint.style = Paint.Style.FILL
+            if (!Theme.p.dark) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = dpf(1.4f)
+                paint.color = 0xFF2456B8.toInt()
+                val inset = paint.strokeWidth / 2
+                c.drawRoundRect(inset, inset, width - inset, height - inset, (height - 2 * inset) / 2f, (height - 2 * inset) / 2f, paint)
+                paint.style = Paint.Style.FILL
+            }
             paint.color = android.graphics.Color.WHITE
             val r = height / 2f - dpf(3)
             val cx = height / 2f + t * (width - height)
@@ -1000,14 +1020,18 @@ class SwipeToReplyLayout(
     private var dragging = false
     private var armed = false
     private var anim: ValueAnimator? = null
+    private var crossed = false
+    private var haloX = 0f
+    private val halo = GestureProgress { postInvalidateOnAnimation() }
 
     init {
+        setWillNotDraw(false)
         clipChildren = false
         clipToPadding = false
         isMotionEventSplittingEnabled = false
         addView(icon, LayoutParams(dp(24), dp(24), Gravity.CENTER_VERTICAL or Gravity.START).apply {
-            marginStart = dp(10)
-            marginEnd = dp(10)
+            marginStart = dp(16)
+            marginEnd = dp(16)
         })
         applyTheme()
     }
@@ -1029,6 +1053,8 @@ class SwipeToReplyLayout(
         dragging = false
         tracking = false
         armed = false
+        halo.reset()
+        invalidate()
         pointerId = MotionEvent.INVALID_POINTER_ID
         parent?.requestDisallowInterceptTouchEvent(false)
     }
@@ -1044,6 +1070,9 @@ class SwipeToReplyLayout(
                 downX = e.rawX
                 downY = e.rawY
                 dragging = false
+                crossed = false
+                halo.reset()
+                invalidate()
                 tracking = canReply()
                 if (tracking) {
                     val running = anim
@@ -1102,7 +1131,7 @@ class SwipeToReplyLayout(
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 if (e.actionMasked == MotionEvent.ACTION_POINTER_UP && e.getPointerId(e.actionIndex) != pointerId) return true
-                val trigger = dragging && abs(content?.translationX ?: 0f) >= threshold
+                val trigger = dragging && armed
                 parent.requestDisallowInterceptTouchEvent(false)
                 settle(trigger)
             }
@@ -1151,13 +1180,21 @@ class SwipeToReplyLayout(
     private fun applyShift(tx: Float) {
         content?.translationX = tx
         val nowArmed = abs(tx) >= threshold
-        if (nowArmed && !armed) {
-            armed = true
+        if (nowArmed && !crossed) {
+            crossed = true
             replyHaptic()
-        } else if (!nowArmed) {
-            armed = false
+            halo.complete()
         }
+        armed = nowArmed
         applyIcon(tx)
+        halo.value = (abs(tx) / threshold).coerceAtMost(1f)
+        haloX = icon.x + icon.width / 2f
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        halo.draw(canvas, haloX, height / 2f, dpf(17), dpf(1.6f), Theme.p.accent)
     }
 
     private fun applyIcon(tx: Float) {
@@ -1169,7 +1206,7 @@ class SwipeToReplyLayout(
         // draw its previous positions on top of the new ones for one frame.
         icon.scaleX = if (tx >= 0f) -mag else mag
         icon.scaleY = mag
-        val travel = (width - dp(20) - icon.width).toFloat().coerceAtLeast(0f)
+        val travel = (width - dp(32) - icon.width).toFloat().coerceAtLeast(0f)
         icon.translationX = if (tx < 0f) travel else 0f
         icon.visibility = if (p == 0f) INVISIBLE else VISIBLE
     }
@@ -1179,6 +1216,8 @@ class SwipeToReplyLayout(
         dragging = false
         tracking = false
         armed = false
+        halo.value = 0f
+        invalidate()
         pointerId = MotionEvent.INVALID_POINTER_ID
         if (child == null) return
         val start = child.translationX

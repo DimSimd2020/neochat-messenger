@@ -48,6 +48,8 @@ private:
     void openConversation(const QString &id);
     void refreshHeader();
     void applyConversation(const QJsonObject &c);
+    void openCopyProtection();
+    void updateCaptureProtection();
     void updateNotice();
     void setSidebarHidden(bool hidden, bool animated = true);
     void setTab(int tab);

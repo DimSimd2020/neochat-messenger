@@ -14,6 +14,8 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
@@ -27,6 +29,7 @@ import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.Switch
 import app.neochat.R
 import java.io.File
 import kotlin.math.abs
@@ -54,6 +57,7 @@ class CircleCamera(private val act: MainActivity, private val onCircle: (File, L
     private var size = Size(640, 480)
     private var sensorOrientation = 270
     private var front = true
+    private var mirrored = false
     private var recording = false
     private var startedAt = 0L
     private var closed = false
@@ -96,6 +100,16 @@ class CircleCamera(private val act: MainActivity, private val onCircle: (File, L
         val close = IconButton(ctx, R.drawable.ic_close, "Закрыть камеру", glass = true).apply { setOnClickListener { dismiss() } }
         root.addView(close, FrameLayout.LayoutParams(ctx.dp(48), ctx.dp(48), Gravity.TOP or Gravity.START).apply {
             setMargins(ctx.dp(16), act.topInset + ctx.dp(12), 0, 0)
+        })
+        val mirror = Switch(ctx).apply {
+            text = "Отзеркаливание"
+            setTextColor(Color.WHITE)
+            minHeight = ctx.dp(48)
+            switchPadding = ctx.dp(8)
+            setOnCheckedChangeListener { _, on -> mirrored = on; fitPreview() }
+        }
+        root.addView(mirror, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply {
+            setMargins(0, act.topInset + ctx.dp(12), ctx.dp(16), 0)
         })
         val flip = IconButton(ctx, R.drawable.ic_camera_switch, "Переключить камеру", glass = true).apply { setOnClickListener { switchCamera() } }
         root.addView(flip, FrameLayout.LayoutParams(ctx.dp(48), ctx.dp(48), Gravity.BOTTOM or Gravity.END).apply {
@@ -174,7 +188,8 @@ class CircleCamera(private val act: MainActivity, private val onCircle: (File, L
                 override fun onOpened(d: CameraDevice) {
                     if (closed) return d.close()
                     camera = d
-                    startSession(d, Surface(st), r.surface)
+                    try { startSession(d, Surface(st), r.surface) }
+                    catch (_: Exception) { fail("Не удалось открыть камеру") }
                 }
                 override fun onDisconnected(d: CameraDevice) = d.close()
                 override fun onError(d: CameraDevice, error: Int) {
@@ -223,7 +238,7 @@ class CircleCamera(private val act: MainActivity, private val onCircle: (File, L
 
     @Suppress("DEPRECATION")
     private fun startSession(d: CameraDevice, view: Surface, film: Surface) {
-        d.createCaptureSession(listOf(view, film), object : CameraCaptureSession.StateCallback() {
+        val callback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
                 if (closed) return s.close()
                 session = s
@@ -235,7 +250,14 @@ class CircleCamera(private val act: MainActivity, private val onCircle: (File, L
                 try { s.setRepeatingRequest(req.build(), null, main) } catch (_: Exception) { fail("Не удалось открыть камеру") }
             }
             override fun onConfigureFailed(s: CameraCaptureSession) = fail("Не удалось открыть камеру")
-        }, main)
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            val viewOutput = OutputConfiguration(view).apply { mirrorMode = OutputConfiguration.MIRROR_MODE_NONE }
+            d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR,
+                listOf(viewOutput, OutputConfiguration(film)), act.mainExecutor, callback))
+        } else {
+            d.createCaptureSession(listOf(view, film), callback, main)
+        }
     }
 
     private fun switchCamera() {
@@ -303,7 +325,7 @@ class CircleCamera(private val act: MainActivity, private val onCircle: (File, L
         }.start()
     }
 
-    // The camera buffer is landscape; cover the round viewfinder however the phone is held, mirrored for the front camera.
+    // The camera buffer is landscape; cover the round viewfinder however the phone is held.
     private fun fitPreview() {
         val w = preview.width.toFloat()
         val h = preview.height.toFloat()
@@ -320,7 +342,9 @@ class CircleCamera(private val act: MainActivity, private val onCircle: (File, L
             sx = (h * content) / w
             sy = 1f
         }
-        m.setScale(if (front) -sx else sx, sy, w / 2, h / 2)
+        // Before Android 13 the front camera's TextureView transform keeps its default mirroring.
+        val cameraMirrors = Build.VERSION.SDK_INT < 33 && front
+        m.setScale(if (mirrored xor cameraMirrors) -sx else sx, sy, w / 2, h / 2)
         preview.setTransform(m)
     }
 

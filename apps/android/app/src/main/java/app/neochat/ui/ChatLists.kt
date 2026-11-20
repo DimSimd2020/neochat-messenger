@@ -6,6 +6,9 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
+import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.style.ImageSpan
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
@@ -68,6 +71,28 @@ object Typing {
     }
 }
 
+/** A vector inline with the last-message description, instead of a platform emoji glyph. */
+private fun chatPreviewArt(act: MainActivity, preview: String): CharSequence {
+    val raw = preview.replace('\n', ' ')
+    val resource = when {
+        raw.startsWith("🖼 ") -> R.drawable.ic_chat_preview_photo
+        raw.startsWith("🎤 ") -> R.drawable.ic_chat_preview_voice
+        raw.startsWith("📹 ") -> R.drawable.ic_chat_preview_circle
+        raw.startsWith("🎬 ") -> R.drawable.ic_video
+        raw.startsWith("📎 ") -> R.drawable.ic_file
+        else -> return raw
+    }
+    val word = raw.substringAfter(' ')
+    val drawable = act.getDrawable(resource)?.mutate() ?: return word
+    drawable.setTint(Theme.p.muted)
+    val pixels = act.dp(17)
+    drawable.setBounds(0, 0, pixels, pixels)
+    val result = SpannableStringBuilder("\uFFFC  $word")
+    result.setSpan(ImageSpan(drawable, ImageSpan.ALIGN_CENTER), 0, 1,
+        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+    return result
+}
+
 /** Fills a chat list row: title, preview or typing, pin, online dot, unread. */
 fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
     val title = c.str("title")
@@ -76,6 +101,9 @@ fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
     row.title.text = title
     row.title.personColor(c.str("title_color"), Theme.Role.TEXT)
     row.groupIcon.visibility = if (c.str("kind") == "group") View.VISIBLE else View.GONE
+    val streak = c.optInt("streak")
+    row.streak.text = if (streak > 0) "🔥 $streak" else ""
+    row.streak.visibility = if (streak > 0) View.VISIBLE else View.GONE
     row.time.text = formatListTime(c.optLong("last_activity"))
     row.pin.visibility = if (c.optBoolean("pinned")) View.VISIBLE else View.GONE
     val unread = c.optInt("unread")
@@ -99,12 +127,13 @@ fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
             role = Theme.Role.ACCENT
         }
     }
-    row.subtitle.text = preview.replace('\n', ' ')
+    row.subtitle.text = chatPreviewArt(act, preview)
     row.subtitle.role(role)
     row.contentDescription = buildString {
         append(title)
         if (c.optBoolean("pinned")) append(", закреплён")
         if (row.avatar.online) append(", в сети")
+        if (streak > 0) append(", серия: ").append(streak)
         if (unread > 0) append(", непрочитанных: $unread")
         if (preview.isNotEmpty()) append(", ").append(preview)
         if (row.time.text.isNotEmpty()) append(", ").append(row.time.text)
@@ -258,6 +287,7 @@ class ArchiveScreen(private val act: MainActivity) : Screen {
     private val ctx: Context = act
     private val root = FrameLayout(ctx)
     override val view: View = root
+    override val pageBackground = BackgroundView(ctx)
     private val column = LinearLayout(ctx)
     private val list = RecyclerView(ctx)
     private val empty = ctx.label("В архиве пусто. Смахните чат влево, чтобы убрать его сюда.", 14.5f, 400, Theme.Role.MUTED)
@@ -270,7 +300,7 @@ class ArchiveScreen(private val act: MainActivity) : Screen {
 
     init {
         column.orientation = LinearLayout.VERTICAL
-        root.addView(BackgroundView(ctx), FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(pageBackground, FrameLayout.LayoutParams(MATCH, MATCH))
         root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
         val h = LinearLayout(ctx)
         h.gravity = Gravity.CENTER_VERTICAL

@@ -27,6 +27,11 @@ public:
         m_frame = f;
         update();
     }
+    void setMirrored(bool mirrored)
+    {
+        m_mirrored = mirrored;
+        update();
+    }
     void setProgress(qreal p)
     {
         m_progress = p;
@@ -51,8 +56,13 @@ protected:
         p.save();
         p.setClipPath(clip);
         p.fillRect(r, c.selected);
-        if (!m_frame.isNull())
+        if (!m_frame.isNull()) {
+            if (m_mirrored) {
+                p.translate(2 * r.center().x(), 0);
+                p.scale(-1, 1);
+            }
             p.drawImage(r, m_frame);
+        }
         p.restore();
         if (m_frame.isNull() && !m_status.isEmpty()) {
             p.setPen(c.muted);
@@ -72,6 +82,7 @@ private:
     QImage m_frame;
     QString m_status = QStringLiteral("Включаем камеру…");
     qreal m_progress = 0;
+    bool m_mirrored = false;
 };
 
 QString clock(qint64 ms)
@@ -99,6 +110,9 @@ void open(QWidget *host, std::function<void(const QString &, qint64, const QImag
     row->addWidget(record, 1);
     sheet->body()->addWidget(preview, 0, Qt::AlignHCenter);
     sheet->body()->addWidget(time);
+    auto *mirror = new ui::Toggle(QStringLiteral("Отзеркаливание"));
+    sheet->body()->addWidget(mirror);
+    QObject::connect(mirror, &QAbstractButton::toggled, preview, &Preview::setMirrored);
     sheet->body()->addLayout(row);
 
     QString why;

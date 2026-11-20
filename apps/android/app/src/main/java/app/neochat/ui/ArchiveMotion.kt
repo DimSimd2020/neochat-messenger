@@ -1,34 +1,64 @@
 package app.neochat.ui
 
-import android.content.Context
 import android.graphics.Canvas
 import android.graphics.ColorFilter
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
-import android.os.Build
-import android.view.HapticFeedbackConstants
+import android.os.SystemClock
 import android.view.View
 import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.sin
 
-/** The same short tick for a reply, an archive action and the pull threshold. */
-fun View.replyHaptic() {
-    val vibrator = if (Build.VERSION.SDK_INT >= 31) context.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
-    else @Suppress("DEPRECATION") context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
-    if (vibrator == null || !vibrator.hasVibrator()) {
-        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-        return
+fun View.replyHaptic() = Haptics.threshold(this)
+
+class GestureProgress(private val redraw: () -> Unit) {
+    var value = 0f
+    private var burstAt = -1L
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
     }
-    vibrator.vibrate(
-        if (Build.VERSION.SDK_INT >= 29) android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_TICK)
-        else android.os.VibrationEffect.createOneShot(12, 90)
-    )
+
+    fun complete() {
+        if (Theme.reducedMotion) return
+        burstAt = SystemClock.uptimeMillis()
+        redraw()
+    }
+
+    fun reset() { value = 0f; burstAt = -1L }
+
+    fun draw(c: Canvas, x: Float, y: Float, radius: Float, stroke: Float, color: Int) {
+        val t = if (burstAt < 0L || Theme.reducedMotion) 1f else ((SystemClock.uptimeMillis() - burstAt) / 320f).coerceIn(0f, 1f)
+        if (value <= 0.02f && t >= 1f) return
+        paint.color = color
+        paint.strokeWidth = stroke
+        if (value > 0.02f) {
+            paint.alpha = 54
+            c.drawCircle(x, y, radius, paint)
+            paint.alpha = 255
+            c.drawArc(x - radius, y - radius, x + radius, y + radius, -90f, 360f * value.coerceAtMost(1f), false, paint)
+        }
+        if (t < 1f) {
+            paint.alpha = ((1f - t) * 220).toInt()
+            val inner = radius + stroke * (1.6f + 3.8f * t)
+            val outer = inner + stroke * (2.8f - 1.2f * t)
+            repeat(8) { i ->
+                val angle = (i + 0.5) * PI / 4
+                val dx = cos(angle).toFloat()
+                val dy = sin(angle).toFloat()
+                c.drawLine(x + dx * inner, y + dy * inner, x + dx * outer, y + dy * outer, paint)
+            }
+            redraw()
+        }
+    }
 }
 
 /** A native vector: the lid opens and the arrow drops into the box as the row is pulled out. */
-class ArchiveIcon(private val ring: Boolean = false) : Drawable() {
+class ArchiveIcon(redraw: () -> Unit) : Drawable() {
     var progress = 0f
+    val halo = GestureProgress(redraw)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
         style = Paint.Style.STROKE
@@ -40,15 +70,7 @@ class ArchiveIcon(private val ring: Boolean = false) : Drawable() {
     override fun draw(canvas: Canvas) {
         val p = if (Theme.reducedMotion) 0f else progress.coerceIn(0f, 1f)
         val lift = sin(p * PI).toFloat()
-        if (ring && p > 0.02f && p < 1f) {
-            val savedWidth = paint.strokeWidth
-            paint.strokeWidth = bounds.width() / 26f * 1.3f
-            val radius = bounds.width() * 0.9f
-            canvas.drawArc(bounds.exactCenterX() - radius, bounds.exactCenterY() - radius,
-                bounds.exactCenterX() + radius, bounds.exactCenterY() + radius,
-                -90f, p * 360f, false, paint)
-            paint.strokeWidth = savedWidth
-        }
+        halo.draw(canvas, bounds.exactCenterX(), bounds.exactCenterY(), bounds.width() * 0.72f, bounds.width() * 0.063f, paint.color)
         canvas.save()
         canvas.translate(bounds.left.toFloat(), bounds.top.toFloat())
         canvas.scale(bounds.width() / 26f, bounds.height() / 26f)

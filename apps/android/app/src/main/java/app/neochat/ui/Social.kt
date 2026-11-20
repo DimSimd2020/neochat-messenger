@@ -109,7 +109,7 @@ object Prefs {
     }
 
     fun applySecure(act: MainActivity) {
-        if (of(act).getBoolean("secure_screen", false)) act.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (act.chatCaptureProtected || of(act).getBoolean("secure_screen", false)) act.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         else act.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 }
@@ -218,29 +218,74 @@ object Qr {
         val ctx = s.ctx
         val card = QrCard(ctx)
         s.add(card, 4)
-        s.add(ctx.label("Покажите код собеседнику: он отсканирует его в NeoChat и сразу добавит вас в контакты. Совпадение кода с ключом заодно сверяет шифрование.", 13.5f, 400, Theme.Role.MUTED), 12)
         val style = PillButton(ctx, "Оформить", primary = false)
         val share = PillButton(ctx, "Поделиться", primary = false)
         val scan = PillButton(ctx, "Сканировать")
-        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        for ((i, b) in listOf(style, share, scan).withIndex()) {
-            row.addView(b, lp(0, WRAP, 1f).apply { if (i > 0) marginStart = ctx.dp(5) })
+        val buttons = listOf(style, share, scan)
+        val gap = ctx.dp(5)
+        val inset = ctx.dp(5)
+        val row = object : LinearLayout(ctx) {
+            private val text = android.text.TextPaint(scan.label.paint)
+
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val metrics = resources.displayMetrics
+                val maxTextSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 13f, metrics)
+                val minTextSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 10f, metrics)
+                text.textSize = maxTextSize
+                val longest = buttons.maxOf { text.measureText(it.label.text.toString()) }
+                val width = ((MeasureSpec.getSize(widthMeasureSpec) - gap * (buttons.size - 1)) / buttons.size)
+                    .coerceAtLeast(0)
+                val available = width - 2 * inset - 1
+                val size = (maxTextSize * available / longest).coerceIn(minTextSize, maxTextSize)
+                buttons.forEach {
+                    it.layoutParams.width = width
+                    it.label.setTextSize(TypedValue.COMPLEX_UNIT_PX, size)
+                }
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+            }
+        }.apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        for ((i, b) in buttons.withIndex()) {
+            b.setPadding(inset, 0, inset, 0)
+            b.label.maxLines = 1
+            b.label.ellipsize = android.text.TextUtils.TruncateAt.END
+            row.addView(b, lp(0, ctx.dp(48)).apply { if (i > 0) marginStart = gap })
         }
         s.add(row, 14)
         var link = ""
         var rows: List<String> = emptyList()
         var username = ""
-        var me = JSONObject()
+        var me: JSONObject? = null
+        var current: QrStyle? = null
+        var styleRequest = 0
+        var closed = false
         style.isEnabled = false
-        /** Shows the code as soon as both the code and the account behind it are known. */
         fun paint() {
-            if (rows.isEmpty()) return
+            val owner = me ?: return
+            val qrStyle = current ?: return
+            if (rows.isEmpty() || closed) return
             style.isEnabled = true
-            card.show(rows, username, me.str("display_name"), me.str("user_id"), me.str("avatar_path"))
+            card.show(rows, username, owner.str("display_name"), owner.str("user_id"), owner.str("avatar_path"), qrStyle)
+        }
+        fun loadStyle() {
+            val request = ++styleRequest
+            CoreClient.call("get_settings") { v, _ ->
+                if (closed || request != styleRequest) return@call
+                val style = (v as? JSONObject)?.optJSONObject("qr_style")?.let(QrStyle::fromJson)
+                    ?: QrStyle.legacy(ctx, CoreClient.accountId)
+                val first = current == null
+                current = style
+                if (first) paint() else card.setStyle(style)
+            }
         }
         style.setOnClickListener {
-            QrStyles.show(act, rows, username, me.str("display_name"), me.str("user_id"), me.str("avatar_path")) {
-                card.readStyle().play()
+            val owner = me ?: return@setOnClickListener
+            val qrStyle = current ?: return@setOnClickListener
+            QrStyles.show(act, rows, username, owner.str("display_name"), owner.str("user_id"), owner.str("avatar_path"), qrStyle) {
+                current = it
+                if (!closed) card.setStyle(it).play()
             }
         }
         share.setOnClickListener {
@@ -248,6 +293,18 @@ object Qr {
             act.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, link), "Поделиться"))
         }
         scan.setOnClickListener { s.dismiss(); scanContact(act) }
+        val settingsChanged: (JSONObject) -> Unit = { if (it.str("type") == "settings_changed") loadStyle() }
+        card.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                CoreClient.addListener(settingsChanged)
+            }
+            override fun onViewDetachedFromWindow(v: View) {
+                closed = true
+                CoreClient.removeListener(settingsChanged)
+            }
+        })
+        s.onDismiss = { closed = true }
+        loadStyle()
         CoreClient.call("status") { v, _ -> me = (v as? JSONObject) ?: JSONObject(); paint() }
         CoreClient.call("my_qr") { v, e ->
             if (e != null) return@call act.toast(e.message)

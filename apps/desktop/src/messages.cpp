@@ -32,6 +32,7 @@
 #include <QPainter>
 #include <QPropertyAnimation>
 #include <QScrollBar>
+#include <QScreen>
 #include <QSettings>
 #include <QToolButton>
 #include <QWidgetAction>
@@ -484,8 +485,9 @@ QImage viewerImage(const QString &path)
 
 // The right-click menu of an open picture, shared by the chat and the album. Actions that need
 // the window back close the viewer first; "Копировать" and "Сохранить как…" leave it open.
-void viewerMenu(PopupMenu *menu, const QJsonObject &m, const QImage &img, QWidget *ctx,
-                std::function<void()> jump, std::function<void()> forward, std::function<void()> save, std::function<void()> showAlbum)
+void viewerMenu(PopupMenu *menu, const QJsonObject &m, QWidget *ctx,
+                std::function<void()> jump, std::function<void()> copy, std::function<void()> forward,
+                std::function<void()> save, std::function<void()> showAlbum)
 {
     const QString id = m.value("id").toString();
     auto *viewer = qobject_cast<PhotoViewer *>(menu->parent());
@@ -497,11 +499,13 @@ void viewerMenu(PopupMenu *menu, const QJsonObject &m, const QImage &img, QWidge
         closeViewer();
         jump();
     });
-    menu->addAction(QStringLiteral("Копировать"), ctx, [img] { QApplication::clipboard()->setImage(img); });
-    menu->addAction(QStringLiteral("Переслать"), ctx, [closeViewer, forward] {
-        closeViewer();
-        forward();
-    });
+    if (copy)
+        menu->addAction(QStringLiteral("Копировать"), ctx, copy);
+    if (forward)
+        menu->addAction(QStringLiteral("Переслать"), ctx, [closeViewer, forward] {
+            closeViewer();
+            forward();
+        });
     menu->addAction(QStringLiteral("Удалить"), ctx, [ctx, id, closeViewer] {
         closeViewer();
         Core::instance()->call("delete_local_message", {{"message_id", id}}, ctx, [ctx](const QJsonValue &, const CoreError &e) {
@@ -510,7 +514,8 @@ void viewerMenu(PopupMenu *menu, const QJsonObject &m, const QImage &img, QWidge
                 view->toast(e.message);
         });
     });
-    menu->addAction(QStringLiteral("Сохранить как…"), ctx, [save] { save(); });
+    if (save)
+        menu->addAction(QStringLiteral("Сохранить как…"), ctx, save);
     menu->addAction(QStringLiteral("Все фотографии"), ctx, [closeViewer, showAlbum] {
         closeViewer();
         showAlbum();
@@ -533,8 +538,14 @@ public:
         setAttribute(Qt::WA_DeleteOnClose);
         setFocusPolicy(Qt::StrongFocus);
         setAccessibleName(QStringLiteral("Просмотр одноразового вложения. Esc — закрыть"));
-        const QRect box = parentWidget() ? parentWidget()->rect() : window()->geometry();
-        setGeometry(box.adjusted(box.width() / 7, box.height() / 8, -box.width() / 7, -box.height() / 8));
+        QWidget *owner = parentWidget();
+        const QRect box = owner ? QRect(owner->mapToGlobal(QPoint(0, 0)), owner->size()) : screen()->availableGeometry();
+        QRect bounds = box.adjusted(box.width() / 7, box.height() / 8, -box.width() / 7, -box.height() / 8);
+        const QRect available = (owner ? owner->screen() : screen())->availableGeometry();
+        bounds.setSize(bounds.size().boundedTo(available.size()));
+        bounds.moveLeft(qBound(available.left(), bounds.left(), available.right() - bounds.width() + 1));
+        bounds.moveTop(qBound(available.top(), bounds.top(), available.bottom() - bounds.height() + 1));
+        setGeometry(bounds);
         show();
         blockCapture();
         raise();
@@ -625,6 +636,15 @@ SecureViewer *secureViewer(QWidget *host, const QJsonObject &m, MessageView *rep
 }
 
 } // namespace
+
+QWidget *showViewOncePhoto(QWidget *host, const QImage &image, const QString &messageId, MessageView *report)
+{
+    auto *viewer = new SecureViewer(host, messageId);
+    if (report)
+        QObject::connect(viewer, &SecureViewer::note, report, &MessageView::toast);
+    viewer->setPhoto(image);
+    return viewer;
+}
 
 QString messageQuote(const QJsonObject &m)
 {
@@ -1411,36 +1431,40 @@ void MessageDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const 
         clip.addRoundedRect(L.image, 14, 14);
         p->setClipPath(clip);
         p->fillRect(L.image, once ? QColor(16, 23, 34) : c.selected);
-        auto cover = [&](const QPixmap &src, const QRectF &dst) {
+        auto cover = [&](QPainter &pp, const QPixmap &src, const QRectF &dst) {
             if (src.isNull())
                 return;
             // Cover the frame, cropping the overflow evenly.
-            p->setRenderHint(QPainter::SmoothPixmapTransform);
+            pp.setRenderHint(QPainter::SmoothPixmapTransform);
             const qreal k = qMax(dst.width() / src.width(), dst.height() / src.height());
             const QSizeF part = dst.size() / k;
-            p->drawPixmap(dst, src, QRectF(QPointF((src.width() - part.width()) / 2, (src.height() - part.height()) / 2), part));
+            pp.drawPixmap(dst, src, QRectF(QPointF((src.width() - part.width()) / 2, (src.height() - part.height()) / 2), part));
         };
-        cover(px, L.image);
-        if (hidden && !once) {
-            // Three steps of defocus lie over the sharp frame and melt away one after another.
-            // Their alpha multiplies the row's own: a leaving or arriving row fades as a whole.
-            const qreal base = p->opacity();
-            const qreal depth = (1 - reveal) * 3;
-            const qreal zoom = 1 + 0.05 * (1 - reveal);
-            const QSizeF big = L.image.size() * zoom;
-            const QRectF dst(L.image.center() - QPointF(big.width() / 2, big.height() / 2), big);
-            for (int i = 2; i >= 0; --i) {
-                const qreal a = qBound(0.0, depth - (2 - i), 1.0);
-                if (a <= 0.004)
-                    continue;
-                p->save();
-                p->setOpacity(base * a);
-                cover(ImageCache::instance()->blur(m, i), dst);
-                p->restore();
+        cover(*p, px, L.image);
+        if (hidden && !once && reveal < 1) {
+            auto drawCover = [&](QPainter &q, const QRectF &r) {
+                const QSizeF big = r.size() * 1.05;
+                cover(q, ImageCache::instance()->blur(m, 0),
+                      QRectF(r.center() - QPointF(big.width() / 2, big.height() / 2), big));
+                q.fillRect(r, QColor(5, 7, 12, 52));
+                spoiler::dust(q, r, quint32(qHash(id)), 1, 0);
+            };
+            if (reveal > 0) {
+                // Mask only the opaque cover. The original below it is never erased.
+                const QRectF local(QPointF(0, 0), L.image.size());
+                const qreal dpr = p->device()->devicePixelRatioF();
+                QImage buf(QSize(qCeil(local.width() * dpr), qCeil(local.height() * dpr)), QImage::Format_ARGB32_Premultiplied);
+                buf.setDevicePixelRatio(dpr);
+                buf.fill(Qt::transparent);
+                QPainter q(&buf);
+                drawCover(q, local);
+                spoiler::maskCover(q, local, view ? view->revealOrigin(id) : QPointF(0.5, 0.5),
+                                   reveal, !view || view->revealOpening(id));
+                q.end();
+                p->drawImage(L.image, buf);
+            } else {
+                drawCover(*p, L.image);
             }
-            p->fillRect(L.image, QColor(5, 7, 12, int(52 * (1 - reveal))));
-            spoiler::dust(*p, L.image, quint32(qHash(id)), 1 - reveal, reveal);
-            spoiler::sweep(*p, L.image, reveal);
         }
         if (once) {
             const QPointF mid = L.image.center();            p->setRenderHint(QPainter::Antialiasing);
@@ -1789,6 +1813,9 @@ void MessageView::setConversation(const QString &id, bool group)
         Core::instance()->call("burn_viewed", {{"conversation_id", m_conv}}, this, [](const QJsonValue &, const CoreError &) {});
     m_reveal.clear();
     m_textReveal.clear();
+    m_origin.clear();
+    m_openingWave.clear();
+    m_revealRequests.clear();
     m_openText.clear();
     m_conv = id;
     m_hasMore = true;
@@ -1804,6 +1831,25 @@ void MessageView::setConversation(const QString &id, bool group)
     m_model->flat = false;
     if (!id.isEmpty())
         load(false);
+}
+
+void MessageView::setCopyProtection(bool copy, bool forward)
+{
+    if (copy == m_copyBlocked && forward == m_forwardBlocked)
+        return;
+    m_copyBlocked = copy;
+    m_forwardBlocked = forward;
+    exitCheckMode();
+    if (copy)
+        clearSelection();
+}
+
+void MessageView::closeMediaViewers()
+{
+    for (auto *viewer : window()->findChildren<PhotoViewer *>(QString(), Qt::FindDirectChildrenOnly))
+        viewer->close();
+    for (auto *viewer : window()->findChildren<VideoViewer *>(QString(), Qt::FindDirectChildrenOnly))
+        viewer->close();
 }
 
 void MessageView::refresh()
@@ -1894,20 +1940,54 @@ qreal MessageView::textRevealOf(const QString &id) const
     return it->value(Theme::ms(int(kRevealMs)));
 }
 
-void MessageView::toggleHidden(const QJsonObject &m)
+QPointF MessageView::revealOrigin(const QString &id) const
 {
+    return m_origin.value(id, QPointF(0.5, 0.5));
+}
+
+bool MessageView::revealOpening(const QString &id) const
+{
+    return m_openingWave.value(id, true);
+}
+
+void MessageView::setRevealOrigin(const QString &id, const QPointF &origin)
+{
+    const auto it = m_reveal.constFind(id);
+    if (it != m_reveal.constEnd() && it->moving(Theme::ms(int(kRevealMs))))
+        return; // Reverse the current mask without a spatial jump.
+    m_origin.insert(id, QPointF(qBound(0.0, origin.x(), 1.0), qBound(0.0, origin.y(), 1.0)));
+}
+
+bool MessageView::isMediaRevealed(const QJsonObject &m) const
+{
+    const auto it = m_reveal.constFind(m.value("id").toString());
+    return it == m_reveal.constEnd() ? !isSpoiler(m) : it->to > 0.5;
+}
+
+void MessageView::revealHidden(const QJsonObject &m)
+{
+    if (isOnce(m) || isMediaRevealed(m))
+        return;
     const QString id = m.value("id").toString();
-    const bool closed = isSpoiler(m);
     const int ms = Theme::ms(int(kRevealMs));
-    // The cover moves at once; the core writes the mark and the refresh carries the motion on.
-    m_reveal[id].start(closed ? 1 : 0, ms);
+    m_openingWave[id] = true;
+    m_reveal[id].start(1, ms);
+    const int request = ++m_revealRequests[id];
+    const int generation = m_generation;
+    const QString conversation = m_conv;
     m_anim.start();
     viewport()->update();
-    Core::instance()->call("media_shown", {{"message_id", id}, {"on", closed}}, this, [this, id, closed, ms](const QJsonValue &, const CoreError &e) {
-        if (e.ok())
+    Core::instance()->call("media_shown", {{"message_id", id}, {"on", true}}, this, [this, id, ms, request, generation, conversation](const QJsonValue &, const CoreError &e) {
+        // A reveal write completing after the chat was left must not undo burn_viewed.
+        if (generation != m_generation) {
+            if (e.ok() && !conversation.isEmpty())
+                Core::instance()->call("burn_viewed", {{"conversation_id", conversation}});
+            return;
+        }
+        if (e.ok() || m_revealRequests.value(id) != request)
             return;
         emit toast(e.message);
-        m_reveal[id].start(closed ? 0 : 1, ms);
+        m_reveal[id].start(0, ms);
         m_anim.start();
         viewport()->update();
     });
@@ -2111,6 +2191,8 @@ void MessageView::enterCheckMode(const QString &id)
         l->addWidget(m_checkCount);
         auto *fwd = new ui::Button(QStringLiteral("Переслать"), ui::Button::Flat, bar);
         auto *copy = new ui::Button(QStringLiteral("Копировать"), ui::Button::Flat, bar);
+        fwd->setVisible(!m_forwardBlocked);
+        copy->setVisible(!m_copyBlocked);
         auto *del = new ui::Button(QStringLiteral("Удалить…"), ui::Button::Danger, bar);
         auto *x = new ui::IconButton("close", QStringLiteral("Отмена"), bar, 32);
         l->addWidget(fwd);
@@ -2118,6 +2200,8 @@ void MessageView::enterCheckMode(const QString &id)
         l->addWidget(del);
         l->addWidget(x);
         connect(fwd, &QAbstractButton::clicked, bar, [this] {
+            if (m_forwardBlocked)
+                return;
             const QList<QJsonObject> sel = checkedMessages(m_model, m_checked);
             QJsonArray arr;
             for (const auto &m : sel)
@@ -2128,6 +2212,8 @@ void MessageView::enterCheckMode(const QString &id)
                 emit forwardRequested(arr);
         });
         connect(copy, &QAbstractButton::clicked, bar, [this] {
+            if (m_copyBlocked)
+                return;
             QStringList text;
             for (const auto &m : checkedMessages(m_model, m_checked)) {
                 const QString t = messageText(m);
@@ -2341,12 +2427,15 @@ void MessageView::mouseReleaseEvent(QMouseEvent *e)
         else if (L.retry.contains(e->pos()))
             retry(m);
         else if (L.image.contains(e->pos())) {
-            // A hidden picture opens and closes right here; anything else goes to the viewer.
+            // Reveal only on the first tap; an already revealed picture opens in the viewer.
             if (isViewed(m))
                 emit toast(m.value("file").toObject().value("shot").toBool() ? QStringLiteral("Скриншот сделан · Просмотрено") : QStringLiteral("Просмотрено"));
-            else if (isHiddenMedia(m))
-                toggleHidden(m);
-            else if (isVideo(m))
+            else if (isHiddenMedia(m) && !isOnce(m) && !isMediaRevealed(m)) {
+                setRevealOrigin(m.value("id").toString(),
+                                QPointF((e->pos().x() - L.image.left()) / qMax(1.0, L.image.width()),
+                                        (e->pos().y() - L.image.top()) / qMax(1.0, L.image.height())));
+                revealHidden(m);
+            } else if (isVideo(m))
                 openFile(m);
             else
                 openImage(m);
@@ -2479,10 +2568,13 @@ void MessageView::openImage(const QJsonObject &m)
     if (isViewed(m))
         return emit toast(QStringLiteral("Просмотрено"));
     // The menu's way in: a hidden picture is opened here first and then shown full window.
-    if (isHiddenMedia(m) && isSpoiler(m))
-        toggleHidden(m);
+    if (!isOnce(m) && isHiddenMedia(m) && !isMediaRevealed(m))
+        revealHidden(m);
     const QString id = m.value("id").toString();
-    Core::instance()->call("download_file", {{"message_id", id}}, this, [this, m, id](const QJsonValue &v, const CoreError &e) {
+    const int generation = m_generation;
+    Core::instance()->call("download_file", {{"message_id", id}}, this, [this, m, id, generation](const QJsonValue &v, const CoreError &e) {
+        if (generation != m_generation || !isVisible())
+            return;
         if (!e.ok())
             return emit toast(e.message);
         const QImage img = viewerImage(v.toObject().value("path").toString());
@@ -2490,7 +2582,7 @@ void MessageView::openImage(const QJsonObject &m)
             return emit toast(QStringLiteral("Не удалось открыть фото"));
         // A view-once picture is shown outside the chat, in a window Windows keeps out of capture.
         if (isOnce(m)) {
-            secureViewer(this, m, this)->setPhoto(img);
+            showViewOncePhoto(this, img, id, this);
             return;
         }
         new PhotoViewer(window(), img, [this, m, img](PopupMenu *menu) { viewerActions(menu, m, img); });
@@ -2501,8 +2593,14 @@ void MessageView::openImage(const QJsonObject &m)
 // back to it. The viewer stays open — a right click is not a way out.
 void MessageView::viewerActions(PopupMenu *menu, const QJsonObject &m, const QImage &img)
 {
-    viewerMenu(menu, m, img, this, [this, m] { jumpToMessage(m.value("id").toString()); },
-               [this, m] { emit forwardRequested(QJsonArray{m}); }, [this, m] { saveFile(m); },
+    std::function<void()> copy, forward, save;
+    if (!m_copyBlocked) {
+        copy = [this, img] { if (!m_copyBlocked) QApplication::clipboard()->setImage(img); };
+        save = [this, m] { saveFile(m); };
+    }
+    if (!m_forwardBlocked)
+        forward = [this, m] { if (!m_forwardBlocked) emit forwardRequested(QJsonArray{m}); };
+    viewerMenu(menu, m, this, [this, m] { jumpToMessage(m.value("id").toString()); }, copy, forward, save,
                [this, m] { emit photosRequested(m, conversationPhotos()); });
 }
 
@@ -2513,7 +2611,7 @@ QJsonArray MessageView::conversationPhotos() const
     QJsonArray photos;
     for (int i = 0; i < m_model->rowCount(); ++i) {
         const MessageItem &it = m_model->item(i);
-        if (!it.isDate && isImage(it.msg) && !isOnce(it.msg) && !(isHiddenMedia(it.msg) && isSpoiler(it.msg)))
+        if (!it.isDate && isImage(it.msg) && !isOnce(it.msg) && !(isHiddenMedia(it.msg) && !isMediaRevealed(it.msg)))
             photos.append(it.msg);
     }
     return photos;
@@ -2521,6 +2619,10 @@ QJsonArray MessageView::conversationPhotos() const
 
 void MessageView::keyPressEvent(QKeyEvent *e)
 {
+    if (m_copyBlocked && e->matches(QKeySequence::Copy)) {
+        e->accept();
+        return;
+    }
     if (m_checkMode) {
         if (e->key() == Qt::Key_Escape) {
             exitCheckMode();
@@ -2551,7 +2653,12 @@ void MessageView::keyPressEvent(QKeyEvent *e)
             return;
         }
         if ((e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) && m.value("kind").toString() == "file") {
-            isImage(m) ? openImage(m) : openFile(m);
+            if (isHiddenMedia(m) && !isOnce(m) && !isMediaRevealed(m)) {
+                setRevealOrigin(m.value("id").toString(), QPointF(0.5, 0.5));
+                revealHidden(m);
+            } else {
+                isImage(m) ? openImage(m) : openFile(m);
+            }
             return;
         }
     }
@@ -2637,8 +2744,11 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
     if (m.value("outgoing").toBool() && (kind == "text" || kind == "file") && !m_searching &&
         QStringList{"sent", "delivered", "read"}.contains(m.value("status").toString()))
         menu->addAction(QStringLiteral("Изменить"), this, [this, m] { emit editRequested(m); });
-    if (!messageText(m).isEmpty())
-        menu->addAction(QStringLiteral("Копировать текст"), this, [m] { QApplication::clipboard()->setText(messageText(m)); });
+    if (!m_copyBlocked && !messageText(m).isEmpty())
+        menu->addAction(QStringLiteral("Копировать текст"), this, [this, m] {
+            if (!m_copyBlocked)
+                QApplication::clipboard()->setText(messageText(m));
+        });
     if (isImage(m))
         menu->addAction(QStringLiteral("Открыть фото"), this, [this, m] { openImage(m); });
     if (isVideo(m))
@@ -2659,7 +2769,7 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
             });
         });
     }
-    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed" && !isOnce(m))
+    if (!m_copyBlocked && !m_forwardBlocked && (kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed" && !isOnce(m))
         menu->addAction(QStringLiteral("В избранное"), this, [this, m] {
             Core::instance()->call("save_message", {{"message_id", m.value("id")}}, this, [this](const QJsonValue &, const CoreError &e) {
                 emit toast(e.ok() ? QStringLiteral("Добавлено в избранное") : e.message);
@@ -2674,14 +2784,17 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
             menu->addAction(QStringLiteral("Расшифровать"), this, [this, m] { Transcriber::instance()->request(m, this); });
     }
     // A view-once file is never handed to another app and never kept; the core refuses it too.
-    if (kind == "file" && !isOnce(m)) {
+    if (!m_copyBlocked && kind == "file" && !isOnce(m)) {
         menu->addAction(QStringLiteral("Открыть файл"), this, [this, m] { openFile(m); });
         menu->addAction(QStringLiteral("Сохранить как…"), this, [this, m] { saveFile(m); });
     }
     if (m.value("status").toString() == "failed")
         menu->addAction(QStringLiteral("Повторить отправку"), this, [this, m] { retry(m); });
-    if ((kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed" && !isOnce(m))
-        menu->addAction(QStringLiteral("Переслать"), this, [this, m] { emit forwardRequested(QJsonArray{m}); });
+    if (!m_forwardBlocked && (kind == "text" || kind == "file" || kind == "poll") && m.value("status").toString() != "failed" && !isOnce(m))
+        menu->addAction(QStringLiteral("Переслать"), this, [this, m] {
+            if (!m_forwardBlocked)
+                emit forwardRequested(QJsonArray{m});
+        });
     menu->addAction(QStringLiteral("Выбрать"), this, [this, m] { enterCheckMode(m.value("id").toString()); });
     menu->addSeparator();
     // A call entry is a local log line: there is nothing to delete at the peer.
@@ -2713,10 +2826,15 @@ void MessageView::showMenu(const QJsonObject &m, const QPoint &globalPos)
 void MessageView::openFile(const QJsonObject &m)
 {
     const bool video = isVideo(m);
+    if (!video && m_copyBlocked)
+        return;
     if (video && isViewed(m))
         return emit toast(QStringLiteral("Просмотрено"));
     emit toast(video ? QStringLiteral("Расшифровываем видео…") : QStringLiteral("Расшифровываем файл…"));
-    Core::instance()->call("download_file", {{"message_id", m.value("id")}}, this, [this, m, video](const QJsonValue &v, const CoreError &e) {
+    const int generation = m_generation;
+    Core::instance()->call("download_file", {{"message_id", m.value("id")}, {"external", !video}}, this, [this, m, video, generation](const QJsonValue &v, const CoreError &e) {
+        if (generation != m_generation || !isVisible())
+            return;
         if (!e.ok())
             return emit toast(e.message);
         const QString path = v.toObject().value("path").toString();
@@ -2734,12 +2852,15 @@ void MessageView::openFile(const QJsonObject &m)
             showVideoFile(this, path, name);
             return;
         }
-        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        if (!m_copyBlocked)
+            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
     });
 }
 
 void MessageView::saveFile(const QJsonObject &m)
 {
+    if (m_copyBlocked)
+        return;
     const QString name = m.value("file").toObject().value("name").toString();
     const QString id = m.value("id").toString();
     filepicker::save(this, QStringLiteral("Сохранить файл"), name, [this, id](const QString &dest) {

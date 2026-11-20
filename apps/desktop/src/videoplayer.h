@@ -27,8 +27,8 @@ class Label;
 //
 // The viewer is a translucent scrim over the whole messenger window with a smaller panel in the
 // middle: the chat stays visible around the picture, and the panel can be unfolded to the window.
-// MFPlay paints into a native child window of the panel; that window takes the keyboard and the
-// clicks, so its window procedure is hooked to keep Esc, space, arrows and the mouse working.
+// MFPlay paints into a dedicated native Qt surface; controls are siblings outside its bounds.
+// Qt owns input and DPI conversion; the Windows window procedure is not replaced.
 class VideoViewer : public QWidget {
     Q_OBJECT
 public:
@@ -42,14 +42,12 @@ public:
     QString errorString() const { return m_error; }
     // The line that explains an error in the middle of the picture.
     ui::Label *note() const { return m_note; }
-    // The window procedure the MFPlay picture window had before it was hooked.
-    void *originalWindowProc() const { return m_originalProc; }
+    bool muted() const;
+    float playbackRate() const;
 
 public slots:
     void toggle();
     void seek(qint64 ms);
-    // Called from the hooked window procedure of the MFPlay video window.
-    bool nativeInput(unsigned message, unsigned key, const QPoint &global);
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -78,15 +76,12 @@ private:
     void toggleMute();
     void toggleExpanded();
     void pictureMenu(const QPoint &global);
-    void hookVideoWindow();
-    void unhookVideoWindow();
+    void setRate(int index);
 
     QString m_path, m_name;
     std::unique_ptr<VideoPlayback> m_backend;
     QPointer<QWidget> m_previousFocus;
-    void *m_videoWindow = nullptr; // the video window MFPlay creates inside the panel (HWND)
-    void *m_overlay = nullptr;     // the panel's own HWND (HWND)
-    void *m_originalProc = nullptr;
+    QWidget *m_surface = nullptr; // Dedicated native video target; controls are siblings.
     QWidget *m_panel = nullptr;
     QWidget *m_bar = nullptr;
     QTimer *m_clock = nullptr;

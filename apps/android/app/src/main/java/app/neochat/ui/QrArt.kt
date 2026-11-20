@@ -10,18 +10,23 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import androidx.core.graphics.ColorUtils
+import app.neochat.core.CoreClient
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
  * QR codes drawn the way Telegram draws them: the modules take the shape of a pattern, the three
  * finder eyes are one rounded frame each, the ink is a gradient, and the whole code arrives on a
- * wave running along its diagonal. What a person picks is saved once and used for their own code
- * and for the codes of the people they open.
+ * wave running along its diagonal. The owner's card gets its style from account settings.
  */
 
 /** The shape of a dark module. */
@@ -57,35 +62,80 @@ class QrInk(val id: String, val title: String, val from: Int, val to: Int) {
         val ALL = listOf(OCEAN, SUNSET, FOREST, LILAC, GRAPHITE, THEME)
 
         fun of(id: String?): QrInk = ALL.firstOrNull { it.id == id } ?: OCEAN
+        fun custom(from: Int, to: Int) = QrInk("custom", "Своя палитра", from, to)
+
+        private fun readable(color: Int): Int {
+            var shade = color
+            while (ColorUtils.calculateContrast(shade, Color.WHITE) < 4.5) {
+                shade = blendColor(shade, Color.BLACK, 0.15f)
+            }
+            return shade
+        }
     }
 
     /**
      * Colors to draw with. A code is read from white paper, so the theme ink keeps its hues but
      * goes dark enough to hold the contrast a camera needs.
      */
-    fun colors(p: Palette): IntArray = when (id) {
-        THEME.id -> intArrayOf(
+    private val codeFrom = if (id == "custom") readable(from) else from
+    private val codeTo = if (id == "custom") readable(to) else to
+
+    fun cardColors(p: Palette): IntArray =
+        if (this === THEME) intArrayOf(
             blendColor(p.accent, 0xFF0E1A2E.toInt(), 0.42f),
             blendColor(p.action, 0xFF0B1424.toInt(), 0.18f),
-        )
-        else -> intArrayOf(from, to)
+        ) else intArrayOf(from, to)
+
+    fun colors(p: Palette): IntArray =
+        if (this === THEME) cardColors(p) else intArrayOf(codeFrom, codeTo)
+
+    fun fixed(p: Palette): QrInk {
+        if (this !== THEME) return this
+        val (a, b) = cardColors(p)
+        return QrInk(id, title, a, b)
     }
 }
 
-/** The saved choice of pattern, ink and photo. */
-object QrStyle {
-    fun pattern(ctx: Context): QrPattern = QrPattern.of(Prefs.of(ctx).getString("qr_pattern", QrPattern.DOTS.id))
+data class QrStyle(
+    val pattern: QrPattern = QrPattern.DOTS,
+    val ink: QrInk = QrInk.OCEAN,
+    val avatar: Boolean = false,
+    val emoji: List<String> = emptyList(),
+) {
+    fun toJson(): JSONObject {
+        val fixed = ink.fixed(Theme.p)
+        return JSONObject().put("pattern", pattern.id).put("ink", fixed.id)
+            .put("avatar", avatar).put("emoji", JSONArray(emoji)).apply {
+                if (fixed.id == "custom" || fixed.id == "theme") {
+                    put("colors", JSONArray(listOf(fixed.from and 0xffffff, fixed.to and 0xffffff)))
+                }
+            }
+    }
 
-    fun ink(ctx: Context): QrInk = QrInk.of(Prefs.of(ctx).getString("qr_ink", QrInk.OCEAN.id))
+    companion object {
+        fun fromJson(json: JSONObject): QrStyle {
+            val id = json.optString("ink")
+            val colors = json.optJSONArray("colors")
+            val ink = if (colors != null && (id == "custom" || id == "theme")) {
+                val from = colors.optInt(0) or 0xFF000000.toInt()
+                val to = colors.optInt(1) or 0xFF000000.toInt()
+                if (id == "custom") QrInk.custom(from, to) else QrInk(id, QrInk.THEME.title, from, to)
+            } else QrInk.of(id)
+            val emoji = json.optJSONArray("emoji")?.let { a -> List(a.length().coerceAtMost(3)) { a.optString(it) } }
+            return QrStyle(QrPattern.of(json.optString("pattern")), ink, json.optBoolean("avatar"),
+                emoji.orEmpty())
+        }
 
-    fun photo(ctx: Context): Boolean = Prefs.of(ctx).getBoolean("qr_photo", false)
-
-    fun save(ctx: Context, pattern: QrPattern? = null, ink: QrInk? = null, photo: Boolean? = null) {
-        val e = Prefs.of(ctx).edit()
-        pattern?.let { e.putString("qr_pattern", it.id) }
-        ink?.let { e.putString("qr_ink", it.id) }
-        photo?.let { e.putBoolean("qr_photo", it) }
-        e.apply()
+        /** Old Android releases stored this on the device. Offer it to one account until saved. */
+        fun legacy(ctx: Context, account: String): QrStyle {
+            val prefs = Prefs.of(ctx)
+            if (account.isEmpty() || listOf("qr_pattern", "qr_ink", "qr_photo").none(prefs::contains)) return QrStyle()
+            val owner = prefs.getString("qr_legacy_owner", null)
+            if (owner != null && owner != account) return QrStyle()
+            if (owner == null) prefs.edit().putString("qr_legacy_owner", account).apply()
+            return QrStyle(QrPattern.of(prefs.getString("qr_pattern", null)),
+                QrInk.of(prefs.getString("qr_ink", null)).fixed(Theme.p), prefs.getBoolean("qr_photo", false))
+        }
     }
 }
 
@@ -291,6 +341,12 @@ class PrettyQrView(ctx: Context, private val still: Boolean = false) : View(ctx)
  */
 class QrCard(ctx: Context) : FrameLayout(ctx), Themed {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val emojiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        alpha = 57
+        textAlign = Paint.Align.CENTER
+        textSize = ctx.dpf(19)
+    }
     private val box = RectF()
     private val outline = Path()
     private val tile = FrameLayout(ctx)
@@ -300,6 +356,7 @@ class QrCard(ctx: Context) : FrameLayout(ctx), Themed {
     val qr = PrettyQrView(ctx)
     val handle = ctx.label("", 18f, 700)
     private var ink = QrInk.OCEAN
+    private var backgroundEmoji: List<String> = emptyList()
     private var sweep: ValueAnimator? = null
     private var sweepAt = -1f
 
@@ -326,19 +383,21 @@ class QrCard(ctx: Context) : FrameLayout(ctx), Themed {
     }
 
     /** The code, the handle under it and the photo in its middle. */
-    fun show(rows: List<String>, username: String, name: String, seed: String, avatarPath: String) {
+    fun show(rows: List<String>, username: String, name: String, seed: String, avatarPath: String, style: QrStyle = QrStyle()) {
         handle.text = if (username.isEmpty()) "" else "@$username"
         photo.set(name, seed, avatarPath)
-        readStyle()
+        setStyle(style)
         qr.setRows(rows)
         shine()
     }
 
-    /** Puts the saved style on the card without running the animation again. */
-    fun readStyle(): QrCard {
-        ink = QrStyle.ink(context)
-        qr.setStyle(QrStyle.pattern(context), ink)
-        photoMat.visibility = if (QrStyle.photo(context)) View.VISIBLE else View.GONE
+    /** Updates the live card without replaying the module animation. */
+    fun setStyle(style: QrStyle): QrCard {
+        ink = style.ink
+        backgroundEmoji = style.emoji
+        qr.setStyle(style.pattern, ink)
+        photoMat.visibility = if (style.avatar) View.VISIBLE else View.GONE
+        applyTheme()
         invalidate()
         return this
     }
@@ -397,13 +456,32 @@ class QrCard(ctx: Context) : FrameLayout(ctx), Themed {
     }
 
     override fun onDraw(c: Canvas) {
+        if (width == 0 || height == 0) return
         val w = width.toFloat()
         val h = height.toFloat()
         outline.reset()
         outline.addRoundRect(0f, 0f, w, h, dpf(32), dpf(32), Path.Direction.CW)
-        val colors = ink.colors(Theme.p)
+        val colors = ink.cardColors(Theme.p)
         paint.shader = LinearGradient(0f, 0f, w, h, colors[0], colors[1], Shader.TileMode.CLAMP)
         c.drawPath(outline, paint)
+        if (backgroundEmoji.isEmpty()) return
+        c.save()
+        c.clipPath(outline)
+        val step = dpf(42)
+        var row = 0
+        var y = step / 2
+        while (y < h + step / 2) {
+            var x = if (row % 2 == 0) dpf(11) else step * 0.75f
+            var index = row
+            while (x < w + step / 2) {
+                c.drawText(backgroundEmoji[index % backgroundEmoji.size], x, y, emojiPaint)
+                x += step
+                index++
+            }
+            y += step
+            row++
+        }
+        c.restore()
     }
 
     override fun dispatchDraw(c: Canvas) {
@@ -424,7 +502,11 @@ class QrCard(ctx: Context) : FrameLayout(ctx), Themed {
         c.restore()
     }
 
-    override fun applyTheme() = invalidate()
+    override fun applyTheme() {
+        val (from, to) = ink.cardColors(Theme.p)
+        handle.setTextColor(if (Theme.darkBase(blendColor(from, to, 0.75f))) Color.WHITE else 0xFF12213B.toInt())
+        invalidate()
+    }
 
     private companion object {
         /** Side of the photo, as a fraction of the paper. */
@@ -485,7 +567,13 @@ private class QrPatternTile(ctx: Context, val pattern: QrPattern) : LinearLayout
         foreground = ring
         code.setRows(demoRows())
         addView(code, lp(MATCH, WRAP))
-        addView(ctx.label(pattern.title, 11.5f, 600, Theme.Role.MUTED), lp().apply { topMargin = ctx.dp(4) })
+        val caption = ctx.label(pattern.title, 11f, 600, Theme.Role.MUTED).apply {
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setAutoSizeTextTypeUniformWithConfiguration(9, 11, 1, TypedValue.COMPLEX_UNIT_SP)
+        }
+        addView(caption, lp(MATCH, WRAP).apply { topMargin = ctx.dp(4) })
         pressFeedback()
         applyTheme()
     }
@@ -537,42 +625,48 @@ private class QrInkSwatch(ctx: Context, val ink: QrInk) : View(ctx), Themed {
     override fun applyTheme() = invalidate()
 }
 
-/** The sheet where the pattern, the ink and the photo of a code are chosen. */
+/** Edits the account's QR style as one draft. */
 object QrStyles {
-    /**
-     * Opens it over [host]. [rows] and the account behind them are shown live on the preview, and
-     * [onChange] lets the sheet that opened this one redraw the code it shows.
-     */
     fun show(
-        host: Sheet.Host,
+        act: MainActivity,
         rows: List<String>,
         username: String,
         name: String,
         seed: String,
         avatarPath: String,
-        onChange: () -> Unit = {},
+        initial: QrStyle,
+        onSaved: (QrStyle) -> Unit,
     ) {
-        val s = Sheet(host, "Оформление QR-кода")
+        val s = Sheet(act, "Оформление QR-кода")
         val ctx = s.ctx
+        var draft = initial
         val preview = QrCard(ctx)
         s.add(preview, 4)
         val tiles = QrPattern.values().map { QrPatternTile(ctx, it) }
         val swatches = QrInk.ALL.map { QrInkSwatch(ctx, it) }
-        val photoRow = ToggleRow(ctx, "Фото в центре")
+        val avatar = ToggleRow(ctx, "Аватар в центре")
+        val palette = PillButton(ctx, "Своя палитра", primary = false)
+        val emojiChips = FlowRow(ctx)
+        val addEmoji = PillButton(ctx, "Добавить эмодзи", primary = false)
 
-        /** Marks what is chosen now. */
         fun sync() {
-            val p = QrStyle.pattern(ctx)
-            val ink = QrStyle.ink(ctx)
-            tiles.forEach { it.checked = it.pattern == p; it.ink(ink) }
-            swatches.forEach { it.checked = it.ink == ink }
-            photoRow.setChecked(QrStyle.photo(ctx), false)
-        }
-
-        /** Marks the choice and runs it over the preview. */
-        fun refresh() {
-            sync()
-            preview.readStyle().play()
+            tiles.forEach { it.checked = it.pattern == draft.pattern; it.ink(draft.ink) }
+            swatches.forEach { it.checked = it.ink.id == draft.ink.id }
+            palette.describeState(if (draft.ink.id == "custom") "Выбрано" else null)
+            avatar.setChecked(draft.avatar, false)
+            addEmoji.isEnabled = draft.emoji.size < 3
+            emojiChips.removeAllViews()
+            emojiChips.visibility = if (draft.emoji.isEmpty()) View.GONE else View.VISIBLE
+            for (emoji in draft.emoji) {
+                emojiChips.addView(PillButton(ctx, "$emoji ×", primary = false).apply {
+                    contentDescription = "Убрать эмодзи $emoji"
+                    setOnClickListener {
+                        draft = draft.copy(emoji = draft.emoji - emoji)
+                        sync()
+                        preview.setStyle(draft)
+                    }
+                })
+            }
         }
 
         val patterns = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
@@ -580,8 +674,9 @@ object QrStyles {
             patterns.addView(t, lp(0, WRAP, 1f).apply { if (i < tiles.size - 1) marginEnd = ctx.dp(8) })
             t.setOnClickListener {
                 Haptics.select(t)
-                QrStyle.save(ctx, pattern = t.pattern)
-                refresh()
+                draft = draft.copy(pattern = t.pattern)
+                sync()
+                preview.setStyle(draft).play()
             }
         }
         val inks = LinearLayout(ctx).apply {
@@ -592,30 +687,84 @@ object QrStyles {
             inks.addView(sw, lp(0, WRAP, 1f).apply { if (i < swatches.size - 1) marginEnd = ctx.dp(4) })
             sw.setOnClickListener {
                 Haptics.select(sw)
-                QrStyle.save(ctx, ink = sw.ink)
-                refresh()
+                draft = draft.copy(ink = sw.ink.fixed(Theme.p))
+                sync()
+                preview.setStyle(draft).play()
             }
         }
-        photoRow.onToggle = { on ->
-            QrStyle.save(ctx, photo = on)
-            refresh()
+        palette.setOnClickListener {
+            pickPalette(act, draft.ink) {
+                draft = draft.copy(ink = it)
+                sync()
+                preview.setStyle(draft).play()
+            }
+        }
+        addEmoji.setOnClickListener {
+            Emoji.sheet(act, "Эмодзи для фона") { emoji ->
+                if (emoji !in draft.emoji && draft.emoji.size < 3) {
+                    draft = draft.copy(emoji = draft.emoji + emoji)
+                    sync()
+                    preview.setStyle(draft)
+                }
+            }
+        }
+        avatar.onToggle = { on ->
+            draft = draft.copy(avatar = on)
+            preview.setStyle(draft).play()
         }
 
         s.add(ctx.label("Узор", 13.5f, 600, Theme.Role.MUTED).apply { heading() }, 16)
         s.add(patterns, 6)
         s.add(ctx.label("Цвет", 13.5f, 600, Theme.Role.MUTED).apply { heading() }, 14)
         s.add(inks, 6)
-        s.add(photoRow, 12)
-        s.add(
-            ctx.label(
-                "Фото закрывает середину кода. Отсканировать его по-прежнему можно, но с длинного расстояния — хуже.",
-                13f, 400, Theme.Role.MUTED
-            ), 6
-        )
-        s.add(PillButton(ctx, "Готово").apply { setOnClickListener { s.dismiss() } }, 16)
-        preview.show(rows, username, name, seed, avatarPath)
+        s.add(palette, 6)
+        s.add(ctx.label("Фоновые эмодзи", 13.5f, 600, Theme.Role.MUTED).apply { heading() }, 14)
+        s.add(emojiChips, 6)
+        s.add(addEmoji, 6)
+        s.add(avatar, 12)
+        val done = PillButton(ctx, "Готово")
+        done.setOnClickListener {
+            val saved = draft
+            done.isEnabled = false
+            CoreClient.call("set_settings", JSONObject().put("qr_style", saved.toJson())) { _, error ->
+                if (error != null) {
+                    done.isEnabled = true
+                    act.toast(error.message)
+                } else {
+                    onSaved(saved)
+                    s.dismiss()
+                }
+            }
+        }
+        s.add(done, 16)
+        preview.show(rows, username, name, seed, avatarPath, draft)
         sync()
-        s.onDismiss = onChange
+        s.show()
+    }
+
+    private fun pickPalette(act: MainActivity, ink: QrInk, done: (QrInk) -> Unit) {
+        val s = Sheet(act, "Палитра QR-кода")
+        val ctx = s.ctx
+        val colors = ink.cardColors(Theme.p)
+        val picker = ColorPickerView(ctx)
+        val buttons = listOf(PillButton(ctx, "Первый цвет"), PillButton(ctx, "Второй цвет", primary = false))
+        val row = LinearLayout(ctx)
+        var selected = 0
+        for ((i, button) in buttons.withIndex()) {
+            row.addView(button, lp(0, WRAP, 1f).apply { if (i == 1) marginStart = ctx.dp(8) })
+            button.setOnClickListener {
+                selected = i
+                buttons.forEachIndexed { j, b -> b.setPrimary(j == selected) }
+                picker.setColor(colors[selected])
+            }
+        }
+        picker.setColor(colors[0])
+        picker.onChange = { colors[selected] = it }
+        s.add(row, 6)
+        s.add(picker, 10)
+        s.add(PillButton(ctx, "Применить").apply {
+            setOnClickListener { done(QrInk.custom(colors[0], colors[1])); s.dismiss() }
+        }, 14)
         s.show()
     }
 }

@@ -21,9 +21,7 @@ class FilesProvider : ContentProvider() {
     private fun resolve(uri: Uri): File {
         val ctx = context ?: throw FileNotFoundException()
         val rel = uri.path?.removePrefix("/") ?: throw FileNotFoundException()
-        val f = File(core(ctx), rel).canonicalFile
-        if (ROOTS.none { f.path.startsWith(File(core(ctx), it).canonicalPath + File.separator) } || !f.isFile) throw FileNotFoundException()
-        return f
+        return sharedFile(ctx, File(core(ctx), rel))
     }
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
@@ -39,7 +37,8 @@ class FilesProvider : ContentProvider() {
         }
     }
 
-    override fun getType(uri: Uri): String? = null
+    override fun getType(uri: Uri): String? =
+        if (uri.lastPathSegment?.endsWith(".apk", ignoreCase = true) == true) "application/vnd.android.package-archive" else null
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, args: Array<out String>?) = 0
     override fun update(uri: Uri, values: ContentValues?, selection: String?, args: Array<out String>?) = 0
@@ -48,8 +47,17 @@ class FilesProvider : ContentProvider() {
         private val ROOTS = listOf("tmp", "updates")
         private fun core(ctx: Context) = File(ctx.filesDir, "core").canonicalFile
 
+        private fun sharedFile(ctx: Context, file: File): File {
+            val f = file.canonicalFile
+            val parts = f.relativeToOrNull(core(ctx))?.invariantSeparatorsPath?.split('/') ?: throw FileNotFoundException()
+            val index = if (parts.firstOrNull() == "accounts" && parts.size >= 4 &&
+                runCatching { java.util.UUID.fromString(parts[1]).toString() == parts[1] }.getOrDefault(false)) 2 else 0
+            if (parts.size <= index + 1 || parts[index] !in ROOTS || !f.isFile) throw FileNotFoundException()
+            return f
+        }
+
         fun uriFor(ctx: Context, f: File): Uri {
-            val rel = f.canonicalFile.relativeTo(core(ctx)).invariantSeparatorsPath
+            val rel = sharedFile(ctx, f).relativeTo(core(ctx)).invariantSeparatorsPath
             return Uri.Builder().scheme("content").authority("app.neochat.files").path(rel).build()
         }
     }

@@ -205,24 +205,46 @@ fun iconEffect(icon: Int): IconEffect? = when (icon) {
 }
 
 /**
- * Haptics for moments that change something; plain taps stay silent. All of them follow the
- * system touch-feedback setting.
+ * Prefer device-tuned vibration with USAGE_TOUCH on Android 13+. Unlike
+ * View.performHapticFeedback, the vibrator does not require an attached View: some events fire
+ * before a banner is added to the window. Android still applies touch-vibration settings.
  */
 object Haptics {
-    /** A choice among several: tab, filter, detent. */
-    fun select(v: View) = v.performHapticFeedback(if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.SEGMENT_TICK else HapticFeedbackConstants.CLOCK_TICK)
+    private fun play(view: View, feedback: Int, preset: Int): Boolean {
+        // Custom gesture Views may disable View haptics; VibrationAttributes still honors system touch settings.
+        if (Build.VERSION.SDK_INT >= 33) {
+            val vibrator = view.context.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
+            if (vibrator?.hasVibrator() == true) {
+                try {
+                    vibrator.vibrate(
+                        android.os.VibrationEffect.createPredefined(preset),
+                        android.os.VibrationAttributes.createForUsage(android.os.VibrationAttributes.USAGE_TOUCH),
+                    )
+                    return true
+                } catch (_: SecurityException) { /* Try the View API below. */ }
+            }
+        }
+        return view.isAttachedToWindow && view.performHapticFeedback(feedback)
+    }
 
-    fun toggle(v: View, on: Boolean) = v.performHapticFeedback(
-        if (Build.VERSION.SDK_INT >= 34) (if (on) HapticFeedbackConstants.TOGGLE_ON else HapticFeedbackConstants.TOGGLE_OFF)
-        else HapticFeedbackConstants.CLOCK_TICK
+    /** A choice among several: tab, filter, detent. */
+    fun select(v: View) = play(v, if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.SEGMENT_TICK else HapticFeedbackConstants.CLOCK_TICK, android.os.VibrationEffect.EFFECT_CLICK)
+
+    fun toggle(v: View, on: Boolean) = play(
+        v,
+        if (Build.VERSION.SDK_INT >= 34) (if (on) HapticFeedbackConstants.TOGGLE_ON else HapticFeedbackConstants.TOGGLE_OFF) else HapticFeedbackConstants.CLOCK_TICK,
+        if (on) android.os.VibrationEffect.EFFECT_CLICK else android.os.VibrationEffect.EFFECT_TICK,
     )
 
     /** Something went out: a message, a reaction. */
-    fun confirm(v: View) = v.performHapticFeedback(if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY)
+    fun confirm(v: View) = play(v, if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY, android.os.VibrationEffect.EFFECT_CLICK)
 
     /** A drag crossed the point where releasing acts. */
-    fun threshold(v: View) = v.performHapticFeedback(if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE else HapticFeedbackConstants.CLOCK_TICK)
+    fun threshold(v: View) = play(v, if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE else HapticFeedbackConstants.CLOCK_TICK, android.os.VibrationEffect.EFFECT_HEAVY_CLICK)
 
     /** A light tick for small taps that dismiss or reveal. */
-    fun tick(v: View) = v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+    fun tick(v: View) = play(v, HapticFeedbackConstants.CLOCK_TICK, android.os.VibrationEffect.EFFECT_TICK)
+
+    /** Diagnostic: a deliberately noticeable pulse, still subject to Android touch settings. */
+    fun test(v: View) = play(v, HapticFeedbackConstants.CONFIRM, android.os.VibrationEffect.EFFECT_HEAVY_CLICK)
 }

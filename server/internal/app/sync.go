@@ -107,7 +107,8 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, a *authCtx) 
 		return
 	}
 	var after int64
-	if c := r.URL.Query().Get("cursor"); c != "" {
+	cursor := r.URL.Query().Get("cursor")
+	if c := cursor; c != "" {
 		ci, cs, ok := strings.Cut(c, ".")
 		if !ok {
 			s.fail(w, r, errf(400, "bad_cursor", "Некорректный курсор"))
@@ -134,8 +135,14 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, a *authCtx) 
 		return
 	}
 	if after < head && (minSeq == nil || *minSeq > after+1) {
-		s.fail(w, r, errf(410, "cursor_expired", "История на сервере истекла"))
-		return
+		if cursor != "" {
+			s.fail(w, r, errf(410, "cursor_expired", "История на сервере истекла"))
+			return
+		}
+		after = head
+		if minSeq != nil {
+			after = *minSeq - 1
+		}
 	}
 
 	rows, err := s.db.Query(r.Context(), `SELECT e.event_id, e.seq, e.kind, e.created_at, e.payload,
@@ -189,11 +196,32 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, a *authCtx) 
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"events":      events,
 		"next_cursor": inc + "." + strconv.FormatInt(last, 10),
 		"has_more":    hasMore,
-	})
+	}
+	rows.Close()
+	if cursor == "" && r.URL.Query().Get("copy_protection") == "1" {
+		policies, err := s.db.Query(r.Context(), `SELECT c.id, c.copy_protection FROM conversations c
+			JOIN memberships m ON m.conversation_id=c.id WHERE m.user_id=$1 AND c.copy_protection<>'{}'`, a.UserID)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		snapshot, err := pgx.CollectRows(policies, func(row pgx.CollectableRow) (map[string]any, error) {
+			var id string
+			var policy copyProtection
+			err := row.Scan(&id, &policy)
+			return map[string]any{"conversation_id": id, "copy_protection": policy}, err
+		})
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		out["copy_protection"] = snapshot
+	}
+	writeJSON(w, 200, out)
 }
 
 // ---- WebSocket hints ----

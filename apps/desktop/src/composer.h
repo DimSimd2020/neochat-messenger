@@ -19,6 +19,7 @@ class ComposerEdit : public QPlainTextEdit {
 public:
     using QPlainTextEdit::QPlainTextEdit;
     bool enterSends = true;
+    bool protectSelection = false;
 
 signals:
     void submit();
@@ -50,6 +51,7 @@ public:
     void setConversation(const QString &id);
     QString text() const;
     void setBlocked(bool blocked);
+    void setCopyBlocked(bool blocked);
     void setReply(const QJsonObject &msg);
     void clearReply();
     // Edit mode: the field holds the message text; send changes the message instead of sending a new one.
@@ -109,6 +111,7 @@ private:
     QVariantAnimation m_replyAnim;
     QJsonObject m_reply;
     bool m_editing = false;
+    bool m_copyBlocked = false;
     QString m_savedDraft;
     bool m_hasText = false;
     bool m_blocked = false;

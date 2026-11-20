@@ -31,8 +31,8 @@ import kotlin.math.sin
  * cover only keeps them out of sight until the reader asks for them.
  */
 object SpoilerFx {
-    private val core = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
-    private val halo = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+    private val core = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val halo = Paint(Paint.ANTI_ALIAS_FLAG)
     private val fields = HashMap<Long, Field>()
 
     private var epoch = 0L
@@ -89,7 +89,7 @@ object SpoilerFx {
      * Draws the dust over [r]. [closed] is how hidden the content still is (1 closed, 0 open)
      * and [spread] how far the grains have flown from the middle on their way out.
      */
-    fun dust(c: Canvas, r: RectF, seed: Int, closed: Float, spread: Float, d: Float, density: Float = 1f, gain: Float = 1f) {
+    fun dust(c: Canvas, r: RectF, seed: Int, closed: Float, spread: Float, d: Float, density: Float = 1f, gain: Float = 1f, ox: Float = 0.5f, oy: Float = 0.5f) {
         if (closed <= 0.002f || r.width() <= 0f || r.height() <= 0f) return
         val count = ((r.width() * r.height()) / (d * d * 260f) * density).toInt().coerceIn(12, 150)
         val f = field(seed, count)
@@ -103,10 +103,10 @@ object SpoilerFx {
             var ux = f.x[i] + 0.018f * sin(t * (0.5f + f.speed[i]) + f.phase[i])
             var uy = (f.y[i] - flow) % 1f
             if (uy < 0f) uy += 1f
-            // On the way out every grain leaves the middle, the bright ones faster.
+            // On the way out every grain leaves the tap point, the bright ones faster.
             val push = spread * (0.5f + 1.3f * f.bright[i])
-            ux += (ux - 0.5f) * push
-            uy += (uy - 0.5f) * push
+            ux += (ux - ox) * push
+            uy += (uy - oy) * push
             val px = r.left + ux * r.width()
             val py = r.top + uy * r.height()
             val twinkle = 0.55f + 0.45f * sin(t * 1.6f * f.speed[i] + f.phase[i] * 2f)

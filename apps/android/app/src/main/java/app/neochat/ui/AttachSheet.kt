@@ -50,14 +50,36 @@ class AttachSheet(
     initial: List<Pick>,
     private val asPhotos: Boolean,
     private val more: ((List<Pick>) -> Unit) -> Unit,
-    private val send: (List<Pick>, Boolean, String, Boolean, Boolean) -> Unit,
+    private val send: (List<Pick>, Boolean, String, Boolean, Long) -> Unit,
 ) {
     private val picks = initial.toMutableList()
     private val sheet = Sheet(act, "")
     private val previewBox = FrameLayout(act)
     private val asFile = ToggleRow(act, "Отправить как файл")
     private val spoiler = ToggleRow(act, "Скрыто")
-    private val once = ToggleRow(act, "Просмотреть один раз")
+    private var timerMs = 0L  // 0: never, -1: one view, positive: countdown after opening.
+    private val timerLabel = act.label("Удаление по таймеру: Никогда", 15f, 500)
+    private val timerRow = LinearLayout(act).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(act.dp(16), act.dp(4), act.dp(14), act.dp(4))
+        background = act.storyPanel()
+        minimumHeight = act.dp(52)
+        isClickable = true
+        isFocusable = true
+        pressFeedback()
+        contentDescription = "Удаление по таймеру"
+        val icon = ImageView(act).apply {
+            setImageResource(app.neochat.R.drawable.ic_clock)
+            imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.accent)
+        }
+        addView(icon, lp(act.dp(24), act.dp(24)))
+        addView(timerLabel, lp(0, WRAP, 1f).apply { marginStart = act.dp(12) })
+        addView(ImageView(act).apply {
+            setImageResource(app.neochat.R.drawable.ic_more)
+            imageTintList = android.content.res.ColorStateList.valueOf(Theme.p.accent)
+        }, lp(act.dp(20), act.dp(20)))
+        setOnClickListener { openTimerMenu() }
+    }
     private val caption = FloatingField(act, "Подпись")
     private var token = 0
 
@@ -73,7 +95,7 @@ class AttachSheet(
         sheet.add(previewBox)
         sheet.add(asFile)
         sheet.add(spoiler)
-        sheet.add(once)
+        sheet.add(timerRow)
         sheet.add(caption)
         sheet.add(row, 14)
         asFile.setChecked(!asPhotos, false)
@@ -89,12 +111,67 @@ class AttachSheet(
             val photos = photosNow()
             val text = caption.text.trim()
             val hidden = photos && spoiler.checked
-            val oneTime = photos && once.checked
+            val ttl = if (photos) timerMs else 0L
             sheet.dismiss()
-            send(chosen, photos, text, hidden, oneTime)
+            send(chosen, photos, text, hidden, ttl)
         }
         refresh()
         sheet.show()
+    }
+
+    private fun refreshTimerLabel() {
+        val selected = when (timerMs) {
+            0L -> "Никогда"
+            -1L -> "Один просмотр"
+            3_000L -> "3 секунды"
+            10_000L -> "10 секунд"
+            30_000L -> "30 секунд"
+            else -> if (timerMs < 60_000) "${timerMs / 1000} секунд"
+                else if (timerMs % 3_600_000 == 0L) "${timerMs / 3_600_000} ч"
+                else "${timerMs / 60_000} мин"
+        }
+        timerLabel.text = "Удаление по таймеру: $selected"
+        timerRow.contentDescription = timerLabel.text
+    }
+
+    private fun openTimerMenu() {
+        val menu = PopupMenu(act, timerRow)
+        for ((label, millis) in listOf(
+            "Один просмотр" to -1L,
+            "3 секунды" to 3_000L,
+            "10 секунд" to 10_000L,
+            "30 секунд" to 30_000L,
+            "Никогда" to 0L
+        )) {
+            menu.add(label, checked = timerMs == millis) {
+                timerMs = millis
+                refreshTimerLabel()
+            }
+        }
+        menu.add("Другой срок…") { customTimer() }
+        menu.show()
+    }
+
+    private fun customTimer() {
+        val dialog = Sheet(act, "Другой срок")
+        val field = FloatingField(act, "Секунды (от 1 до 86400)")
+        field.edit.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        field.edit.filters = arrayOf(InputFilter.LengthFilter(5))
+        if (timerMs > 0) field.setText((timerMs / 1000).toString())
+        dialog.add(field)
+        dialog.add(PillButton(act, "Применить").apply {
+            setOnClickListener {
+                val seconds = field.text.trim().toLongOrNull()
+                if (seconds == null || seconds !in 1L..86_400L) {
+                    act.toast("Введите срок от 1 секунды до 24 часов")
+                    return@setOnClickListener
+                }
+                timerMs = seconds * 1_000L
+                refreshTimerLabel()
+                dialog.dismiss()
+            }
+        })
+        dialog.show()
     }
 
     private fun allMedia() = picks.all { it.media }
@@ -107,10 +184,12 @@ class AttachSheet(
         asFile.visibility = if (media) View.VISIBLE else View.GONE
         val photos = photosNow() && media
         // A spoiler and a view-once mark belong to a picture or a video, never to a document.
-        for (w in listOf(spoiler, once)) w.visibility = if (photos) View.VISIBLE else View.GONE
+        spoiler.visibility = if (photos) View.VISIBLE else View.GONE
+        timerRow.visibility = if (photos) View.VISIBLE else View.GONE
         if (!photos) {
             spoiler.setChecked(false, false)
-            once.setChecked(false, false)
+            timerMs = 0
+            refreshTimerLabel()
         }
         val videos = picks.all { it.video }
         sheet.setTitle(

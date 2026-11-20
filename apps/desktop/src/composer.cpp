@@ -72,6 +72,10 @@ protected:
 
 void ComposerEdit::keyPressEvent(QKeyEvent *e)
 {
+    if (protectSelection && (e->matches(QKeySequence::Copy) || e->matches(QKeySequence::Cut))) {
+        e->accept();
+        return;
+    }
     const bool enter = e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter;
     if (enter) {
         const bool shift = e->modifiers() & Qt::ShiftModifier;
@@ -151,9 +155,9 @@ void ComposerEdit::contextMenuEvent(QContextMenuEvent *e)
         menu->addAction(QStringLiteral("Отменить"), this, [this] { undo(); });
     if (document()->isRedoAvailable())
         menu->addAction(QStringLiteral("Вернуть"), this, [this] { redo(); });
-    if (sel) {
-        menu->addAction(QStringLiteral("Вырезать"), this, [this] { cut(); });
-        menu->addAction(QStringLiteral("Копировать"), this, [this] { copy(); });
+    if (sel && !protectSelection) {
+        menu->addAction(QStringLiteral("Вырезать"), this, [this] { if (!protectSelection) cut(); });
+        menu->addAction(QStringLiteral("Копировать"), this, [this] { if (!protectSelection) copy(); });
     }
     if (canPaste())
         menu->addAction(QStringLiteral("Вставить"), this, [this] { paste(); });
@@ -518,6 +522,7 @@ void Composer::setEdit(const QJsonObject &msg)
     clearReply();
     m_savedDraft = saved;
     m_editing = true;
+    m_edit->protectSelection = m_copyBlocked;
     m_reply = msg;
     m_cancelReply->show();
     setDraft(msg.value("text").toString());
@@ -530,6 +535,7 @@ void Composer::clearReply()
     if (m_editing) {
         // Leaving edit mode puts back what was typed before.
         m_editing = false;
+        m_edit->protectSelection = false;
         setDraft(m_savedDraft);
         m_savedDraft.clear();
     }
@@ -538,6 +544,12 @@ void Composer::clearReply()
     m_reply = {};
     m_cancelReply->hide();
     ui::animate(m_replyAnim, 0, Theme::ms(180));
+}
+
+void Composer::setCopyBlocked(bool blocked)
+{
+    m_copyBlocked = blocked;
+    m_edit->protectSelection = m_editing && blocked;
 }
 
 void Composer::openEmoji()

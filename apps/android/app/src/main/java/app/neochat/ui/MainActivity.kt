@@ -1,6 +1,7 @@
 package app.neochat.ui
 
 import android.Manifest
+import android.annotation.TargetApi
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.app.Activity
@@ -18,6 +19,10 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.window.BackEvent
+import android.window.OnBackAnimationCallback
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import app.neochat.FilesProvider
 import app.neochat.Notifier
 import app.neochat.RealtimeService
@@ -28,6 +33,7 @@ import java.io.File
 /** Screens get the system bar and keyboard insets and may react to back. */
 interface Screen {
     val view: View
+    val pageBackground: BackgroundView? get() = null
     fun applyInsets(top: Int, bottom: Int, ime: Int) {}
     fun onBack(): Boolean = false
     fun onShown() {}
@@ -51,6 +57,13 @@ class MainActivity : Activity(), Sheet.Host {
     var scanner: QrScanner? = null
     var camera: PhotoCamera? = null
     var circleCamera: CircleCamera? = null
+    private val protectedChats = mutableSetOf<View>()
+    val chatCaptureProtected get() = protectedChats.isNotEmpty()
+
+    fun protectChat(owner: View, on: Boolean) {
+        val changed = if (on) protectedChats.add(owner) else protectedChats.remove(owner)
+        if (changed) Prefs.applySecure(this)
+    }
 
     private var home: HomeScreen? = null
     private var archive: ArchiveScreen? = null
@@ -61,11 +74,17 @@ class MainActivity : Activity(), Sheet.Host {
     private var openChatGeneration = 0
     private val listener: (JSONObject) -> Unit = { onEvent(it) }
     private var updateBanner: View? = null
+    private var updateBusy = false
+    private var updateProgress: android.widget.ProgressBar? = null
     private var dismissedUpdate = ""
     private var lastUpdateCheck = 0L
-    private var pendingInstallApk: File? = null
-    private var waitingForInstallPermission = false
+    private var exportingUpdateApk = false
     private var slideAnim: android.animation.ValueAnimator? = null
+    private class ChatBack(val list: Screen, val motion: ChatExitMotion) {
+        val previousAccessibility = list.view.importantForAccessibility
+    }
+    private var chatBack: ChatBack? = null
+    private var unregisterBack: (() -> Unit)? = null
     var readinessPrompted = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,6 +96,7 @@ class MainActivity : Activity(), Sheet.Host {
         overlay = FrameLayout(this)
         root.addView(overlay, FrameLayout.LayoutParams(MATCH, MATCH))
         setContentView(root)
+        if (Build.VERSION.SDK_INT >= 33) registerBack()
         edgeToEdge()
         Theme.onModeApplied = { dark -> barAppearance(dark) }
         Theme.init(this, root)
@@ -87,6 +107,9 @@ class MainActivity : Activity(), Sheet.Host {
     }
 
     override fun onDestroy() {
+        unregisterBack?.invoke()
+        slideAnim?.end()
+        clearChatBack()
         CoreClient.removeListener(listener)
         Theme.onModeApplied = null
         super.onDestroy()
@@ -178,7 +201,7 @@ class MainActivity : Activity(), Sheet.Host {
     }
 
     @Suppress("DEPRECATION")
-    private fun barAppearance(dark: Boolean) {
+    internal fun barAppearance(dark: Boolean) {
         if (Build.VERSION.SDK_INT >= 30) {
             val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
             window.insetsController?.setSystemBarsAppearance(if (dark) 0 else mask, mask)
@@ -239,10 +262,14 @@ class MainActivity : Activity(), Sheet.Host {
             if (e != null) return@call toast(e.message)
             pageHistory.clear()
             closeOverlays()
-            if ((v as JSONObject).optBoolean("in_archive")) {
+            val conversation = v as JSONObject
+            if (conversation.optBoolean("in_archive")) {
                 if (archive == null) archive = ArchiveScreen(this)
-            } else archive = null
-            val c = if(chat?.conversationId == conversationId) chat!! else ChatScreen(this,conversationId)
+            } else {
+                archive?.takeIf { it !== current }?.let { content.removeView(it.view) }
+                archive = null
+            }
+            val c = if (chat?.conversationId == conversationId) chat!! else ChatScreen(this, conversationId, conversation)
             chat = c
             show(c,dp(22).toFloat(),slide=true)
         }
@@ -251,16 +278,52 @@ class MainActivity : Activity(), Sheet.Host {
     fun closeChat() {
         val h = home ?: return
         val leaving = chat ?: return
-        val gen = ++openChatGeneration
-        CoreClient.call("get_conversation",JSONObject().put("conversation_id",leaving.conversationId)) { v,_ ->
-            if (gen != openChatGeneration || chat !== leaving) return@call
-            if (v is JSONObject) {
-                if (v.optBoolean("in_archive")) { if (archive == null) archive = ArchiveScreen(this) }
-                else archive = null
-            }
-            chat = null
-            show(archive ?: h,-dp(22).toFloat(),slide=true)
+        ++openChatGeneration
+        val next = chatBack?.list ?: chatReturnScreen(leaving, h)
+        chat = null
+        if (next === h) {
+            archive?.let { content.removeView(it.view) }
+            archive = null
         }
+        show(next, -dp(22).toFloat(), slide = true)
+    }
+
+    private fun chatReturnScreen(leaving: ChatScreen, h: HomeScreen): Screen =
+        if (leaving.inArchive) archive ?: ArchiveScreen(this).also { archive = it } else h
+
+    private fun startChatBack(direction: Float) {
+        val leaving = chat ?: return
+        val h = home ?: return
+        if (current !== leaving || leaving.hasBackAction || backHandlers.isNotEmpty() ||
+            ime > 0 || Theme.reducedMotion
+        ) return
+        slideAnim?.end()
+        clearChatBack()
+        val list = chatReturnScreen(leaving, h)
+        val back = ChatBack(list, ChatExitMotion(leaving.view, direction))
+        val v = list.view
+        if (v.parent == null) content.addView(v, 0, FrameLayout.LayoutParams(MATCH, MATCH))
+        v.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        list.applyInsets(top, bottom, ime)
+        v.visibility = View.VISIBLE
+        chatBack = back
+    }
+
+    private fun cancelChatBack() {
+        val back = chatBack ?: return
+        if (back.motion.progress == 0f || Theme.reducedMotion) return clearChatBack()
+        slideAnim = back.motion.settle(0f) {
+            clearChatBack()
+            slideAnim = null
+        }
+    }
+
+    private fun clearChatBack() {
+        val back = chatBack ?: return
+        chatBack = null
+        back.motion.reset()
+        back.list.view.importantForAccessibility = back.previousAccessibility
+        if (current !== back.list) back.list.view.visibility = View.INVISIBLE
     }
 
     fun openPage(page: Screen) {
@@ -288,13 +351,17 @@ class MainActivity : Activity(), Sheet.Host {
         show(h, -dp(22).toFloat(), slide = true)
     }
 
-    /**
-     * Cross-fade to [next] with a horizontal shift over 220 ms. Home stays alive under an
-     * open conversation so the selected tab, drafts and searches survive.
-     */
+    /** Switch screens while retaining the home list, drafts and searches. */
     private fun show(next: Screen, shift: Float, slide: Boolean = false) {
         slideAnim?.end()
         val prev = current
+        val chatOpening = slide && shift > 0f && next is ChatScreen && prev != null && prev !== next
+        val chatClosing = slide && prev is ChatScreen && (next is HomeScreen || next is ArchiveScreen)
+        val exit = chatBack?.takeIf { chatClosing && it.list === next && !Theme.reducedMotion }
+        if (exit == null) clearChatBack() else {
+            chatBack = null
+            next.view.importantForAccessibility = exit.previousAccessibility
+        }
         current = next
         prev?.onHidden()
         val v = next.view
@@ -305,22 +372,47 @@ class MainActivity : Activity(), Sheet.Host {
         pv?.alpha = 1f
         // Park the incoming screen off to the right before it is drawn. A translucent page
         // (settings, chat) otherwise sits on top of the previous one for a frame.
-        if (slide && pv != null && !Theme.reducedMotion && shift > 0f) {
+        if (slide && !chatOpening && pv != null && !Theme.reducedMotion && shift > 0f) {
             val w = content.width.toFloat().takeIf { it > 0f } ?: resources.displayMetrics.widthPixels.toFloat()
             v.translationX = w
         }
         v.bringToFront()
         next.applyInsets(top, bottom, ime)
-        Theme.apply()
+        if (chatOpening || chatClosing) Theme.apply(v) else Theme.apply()
         next.onShown()
         // Home and an open archive stay alive under a conversation.
-        val drop = { if (pv != null && pv !== v) { if (prev === home || (prev === archive && next is ChatScreen)) pv.visibility = View.GONE else content.removeView(pv) } }
+        val drop = {
+            if (pv != null && pv !== v) {
+                if (prev === home || (prev === archive && next is ChatScreen)) {
+                    pv.visibility = if (next is ChatScreen) View.INVISIBLE else View.GONE
+                } else content.removeView(pv)
+                protectChat(pv, false)
+            }
+        }
         v.animate().cancel()
         pv?.animate()?.cancel()
         if (Theme.reducedMotion || pv == null || shift == 0f) {
             v.alpha = 1f
             v.translationX = 0f
             drop()
+            return
+        }
+        if (chatOpening) {
+            val width = (content.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels).toFloat()
+            slideAnim = animateChatOpen(prev, next, width) {
+                drop()
+                slideAnim = null
+            }
+            return
+        }
+        if (chatClosing) {
+            pv.bringToFront()
+            val motion = exit?.motion ?: ChatExitMotion(pv, 0f)
+            slideAnim = motion.settle(1f) {
+                drop()
+                motion.reset()
+                slideAnim = null
+            }
             return
         }
         if (slide) return slideBetween(pv, v, shift > 0f, drop)
@@ -414,10 +506,16 @@ class MainActivity : Activity(), Sheet.Host {
         val type = ev.str("type")
         if (type == "account_notify") return
         if (type == "account_selected") {
+            updateBusy = false
+            hideUpdateProgress()
+            hideUpdateBanner()
             slideAnim?.end()
+            clearChatBack()
             current?.onHidden()
             current = null
             content.removeAllViews()
+            protectedChats.clear()
+            Prefs.applySecure(this)
             home = null
             archive = null
             chat = null
@@ -435,6 +533,12 @@ class MainActivity : Activity(), Sheet.Host {
             return
         }
         if (type == "warning") toast(ev.str("message"))
+        if (type == "story_delivery_failed") toast("История: ${ev.str("message")}")
+        if (type == "update_progress") updateProgress?.let { bar ->
+            val total = ev.optLong("total")
+            bar.isIndeterminate = total <= 0
+            if (total > 0) bar.setProgress((ev.optLong("done") * 100 / total).toInt().coerceIn(0, 100), !Theme.reducedMotion)
+        }
         if (type == "typing") Typing.onEvent(ev)
         if (type == "notify") Typing.clear(ev.str("conversation_id"))
         home?.onEvent(ev)
@@ -480,6 +584,8 @@ class MainActivity : Activity(), Sheet.Host {
     }
 
     override fun onPause() {
+        slideAnim?.end()
+        clearChatBack()
         // The camera must not stay open behind another app.
         scanner?.dismiss()
         camera?.dismiss()
@@ -500,15 +606,6 @@ class MainActivity : Activity(), Sheet.Host {
 
     override fun onResume() {
         super.onResume()
-        if (waitingForInstallPermission) {
-            waitingForInstallPermission = false
-            val apk = pendingInstallApk
-            pendingInstallApk = null
-            if (apk != null) {
-                if (packageManager.canRequestPackageInstalls()) installUpdate(apk)
-                else toast("Разрешите NeoChat установку приложений и нажмите «Установить»")
-            }
-        }
         chat?.onResumed()
         // At most once an hour; the download runs in the background.
         val now = System.currentTimeMillis()
@@ -520,15 +617,23 @@ class MainActivity : Activity(), Sheet.Host {
 
     /** Checks the signed manifest; [manual] reports "no update" and progress too. */
     fun checkUpdate(manual: Boolean = false) {
-        if (updateBanner != null) return
+        if (updateBanner != null || updateBusy) return
         val version = packageManager.getPackageInfo(packageName, 0).versionName ?: return
-        val p = JSONObject().put("platform", "android").put("version", version).put("channel", Prefs.updateChannel(this))
+        updateBusy = true
+        val p = JSONObject().put("platform", "android").put("version", version)
+            .put("channel", Prefs.updateChannel(this))
+            .put("disable_alpha", app.neochat.BuildConfig.NEOCHAT_DISABLE_ALPHA)
         CoreClient.call("check_update", p) { v, e ->
-            if (e != null) return@call run { if (manual) toast(e.message) }
+            if (e != null) return@call run { updateBusy = false; if (manual) toast(e.message) }
             val o = v as? JSONObject
-            if (o?.optBoolean("available") != true) return@call run { if (manual) toast("У вас последняя версия ($version)") }
-            if (manual) toast("Загружаем версию ${o.str("version")}…")
+            if (o?.optBoolean("available") != true) return@call run {
+                updateBusy = false
+                if (manual) toast("У вас последняя версия ($version)")
+            }
+            if (manual) showUpdateProgress(o.str("version"))
             CoreClient.call("download_update", p) { r, err ->
+                updateBusy = false
+                hideUpdateProgress()
                 val d = r as? JSONObject
                 if (err != null && manual) toast(err.message)
                 val next = d?.str("version").orEmpty()
@@ -536,6 +641,28 @@ class MainActivity : Activity(), Sheet.Host {
                 if (err == null && d != null && updateBanner == null && (manual || next != dismissedUpdate)) showUpdateBanner(next, File(d.str("path")))
             }
         }
+    }
+
+    private fun showUpdateProgress(version: String) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GlassDrawable(this@MainActivity, GlassDrawable.Kind.STRONG, dpf(20))
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+        }
+        card.addView(label("Загружаем обновление $version", 14.5f, 600), lp())
+        updateProgress = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            isIndeterminate = true
+            contentDescription = "Загрузка обновления"
+            progressTintList = android.content.res.ColorStateList.valueOf(Theme.p.accent)
+            card.addView(this, lp(MATCH, dp(12)).apply { topMargin = dp(4) })
+        }
+        overlay.addView(card, flp(MATCH, WRAP, Gravity.TOP).apply { setMargins(dp(12), top + dp(8), dp(12), 0) })
+    }
+
+    private fun hideUpdateProgress() {
+        (updateProgress?.parent as? View)?.let { overlay.removeView(it) }
+        updateProgress = null
     }
 
     /** Drops in from above on a spring; the cross sends it back up. */
@@ -547,8 +674,8 @@ class MainActivity : Activity(), Sheet.Host {
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         bar.addView(label("Обновление $version готово", 14.5f, 600), lp(0, WRAP, 1f))
-        val install = PillButton(this, "Установить")
-        install.setOnClickListener { installUpdate(apk) }
+        val install = PillButton(this, "Сохранить APK")
+        install.setOnClickListener { saveUpdateToFiles(apk) }
         bar.addView(install, lp(WRAP, WRAP))
         val close = IconButton(this, app.neochat.R.drawable.ic_close, "Скрыть обновление")
         close.setOnClickListener {
@@ -559,6 +686,7 @@ class MainActivity : Activity(), Sheet.Host {
         bar.addView(close, lp(dp(48), dp(48)).apply { marginStart = dp(2) })
         overlay.addView(bar, flp(MATCH, WRAP, Gravity.TOP).apply { setMargins(dp(12), top + dp(8), dp(12), 0) })
         updateBanner = bar
+        Haptics.confirm(bar)
         if (!Theme.reducedMotion) {
             bar.alpha = 0f
             bar.animate().alpha(1f).setDuration(160).start()
@@ -579,28 +707,40 @@ class MainActivity : Activity(), Sheet.Host {
         bar.animate().alpha(0f).setDuration(200).start()
     }
 
-    private fun installUpdate(apk: File) {
-        if (!packageManager.canRequestPackageInstalls()) {
-            pendingInstallApk = apk
-            waitingForInstallPermission = true
-            try {
-                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
-            } catch (_: android.content.ActivityNotFoundException) {
-                pendingInstallApk = null
-                waitingForInstallPermission = false
-                toast("Разрешите NeoChat устанавливать приложения в системных настройках")
-            }
+    /** The file manager, not NeoChat, requests installation after the user saves the update. */
+    private fun saveUpdateToFiles(apk: File) {
+        if (exportingUpdateApk) return
+        if (!apk.isFile || !apk.name.endsWith(".apk", ignoreCase = true)) {
+            toast("Скачанный APK недоступен. Повторите загрузку")
             return
         }
-        val i = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(FilesProvider.uriFor(this, apk), "application/vnd.android.package-archive")
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        try {
-            startActivity(i)
-        } catch (_: android.content.ActivityNotFoundException) {
-            toast("Не удалось открыть установщик")
-        } catch (_: SecurityException) {
-            toast("Android не разрешил открыть установщик. Проверьте разрешение установки приложений для NeoChat")
+        val picker = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("application/vnd.android.package-archive")
+            .putExtra(Intent.EXTRA_TITLE, apk.name)
+        startForResult(picker) { resultCode, data ->
+            val destination = data?.data
+            if (resultCode != RESULT_OK || destination == null) return@startForResult
+            exportingUpdateApk = true
+            // Documents providers may be remote; never copy a large installer on the UI thread.
+            Thread {
+                val error = runCatching {
+                    apk.inputStream().use { input ->
+                        val output = contentResolver.openOutputStream(destination, "w")
+                            ?: throw java.io.IOException("Нет доступа к выбранному файлу")
+                        output.use { input.copyTo(it, 64 * 1024) }
+                    }
+                }.exceptionOrNull()
+                runOnUiThread {
+                    exportingUpdateApk = false
+                    if (error == null) {
+                        hideUpdateBanner()
+                        toast("APK сохранён. Откройте его через приложение «Файлы» и установите")
+                    } else {
+                        toast("Не удалось сохранить APK: " + (error.message ?: "ошибка записи"))
+                    }
+                }
+            }.start()
         }
     }
 
@@ -617,10 +757,36 @@ class MainActivity : Activity(), Sheet.Host {
         backHandlers.clear()
     }
 
+    @TargetApi(33)
+    private fun registerBack() {
+        val callback = if (Build.VERSION.SDK_INT >= 34) predictiveBackCallback() else OnBackInvokedCallback { handleBack() }
+        val dispatcher = onBackInvokedDispatcher
+        dispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
+        unregisterBack = { dispatcher.unregisterOnBackInvokedCallback(callback) }
+    }
+
+    @TargetApi(34)
+    private fun predictiveBackCallback() = object : OnBackAnimationCallback {
+        override fun onBackStarted(event: BackEvent) {
+            when (event.swipeEdge) {
+                BackEvent.EDGE_LEFT -> startChatBack(1f)
+                BackEvent.EDGE_RIGHT -> startChatBack(-1f)
+            }
+        }
+
+        override fun onBackProgressed(event: BackEvent) {
+            chatBack?.motion?.followGesture(event.progress)
+        }
+
+        override fun onBackCancelled() = cancelChatBack()
+        override fun onBackInvoked() = handleBack()
+    }
+
     @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        backHandlers.lastOrNull()?.let { if (it()) return }
-        if (current?.onBack() == true) return
+    override fun onBackPressed() = handleBack()
+
+    private fun handleBack() {
+        if (backHandlers.lastOrNull()?.invoke() == true || current?.onBack() == true) return cancelChatBack()
         if (pageHistory.isNotEmpty()) return closePage()
         if (chat != null) return closeChat()
         @Suppress("DEPRECATION")

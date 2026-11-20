@@ -73,6 +73,7 @@ type conversationOut struct {
 	Recipients           []recipientOut   `json:"recipients"`
 	RecipientSetRevision string           `json:"recipient_set_revision"`
 	Settings             json.RawMessage  `json:"settings"`
+	CopyProtection       copyProtection   `json:"copy_protection"`
 }
 
 // recipientSet returns active devices of all members except the sending device,
@@ -112,9 +113,9 @@ func (s *Server) loadConversation(ctx context.Context, q querier, id, viewer, vi
 	var owner *string
 	var rev int64
 	var blob, sig, leaves []byte
-	err := q.QueryRow(ctx, `SELECT c.id, c.kind, c.owner_id, c.revision, c.state_blob, c.state_sig, c.leaves, c.archived, c.settings
+	err := q.QueryRow(ctx, `SELECT c.id, c.kind, c.owner_id, c.revision, c.state_blob, c.state_sig, c.leaves, c.archived, c.settings, c.copy_protection
 		FROM conversations c JOIN memberships m ON m.conversation_id=c.id AND m.user_id=$2 WHERE c.id=$1`, nullUUID(id), viewer).
-		Scan(&c.ID, &c.Kind, &owner, &rev, &blob, &sig, &leaves, &c.Archived, &c.Settings)
+		Scan(&c.ID, &c.Kind, &owner, &rev, &blob, &sig, &leaves, &c.Archived, &c.Settings, &c.CopyProtection)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}

@@ -235,7 +235,7 @@ bool CameraRecorder::open(QString *error)
 void CameraRecorder::onFrame(const QImage &square, bool wanted)
 {
     // Runs on the camera thread.
-    QMetaObject::invokeMethod(this, [this, mirrored = square.mirrored(true, false)] { emit frame(mirrored); }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(this, [this, square] { emit frame(square); }, Qt::QueuedConnection);
     if (!wanted)
         return;
     QMutexLocker lock(&d->lock);

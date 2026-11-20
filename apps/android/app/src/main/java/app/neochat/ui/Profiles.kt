@@ -40,11 +40,11 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     private var inset = 0
     private val name = act.label("", 27f, 700)
     private val sub = act.label("", 14f, 400, Theme.Role.MUTED)
-    private val tabs = BottomNav(act, listOf("Медиа", "Файлы", "Ссылки", "Группы", "Конфиденциальность").map { 0 to it }, textOnly = true, equalWidth = false)
-    private val tabKeys = listOf("media", "files", "links", "groups", "privacy")
+    private val tabs = BottomNav(act, listOf("Истории", "Медиа", "Файлы", "Ссылки", "Группы", "Конфиденциальность").map { 0 to it }, textOnly = true, equalWidth = false)
+    private val tabKeys = listOf("stories", "media", "files", "links", "groups", "privacy")
     private var tabIndex = 0
     private var profile = JSONObject()
-    private var category = "media"
+    private var category = "stories"
     private var before: Long? = null
     private var generation = 0
     private val items = ArrayList<JSONObject>()
@@ -95,7 +95,8 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
     }
     fun setBottomPadding(px:Int) = scroll.setPadding(0,0,0,px)
     override fun onShown() = load()
-    override fun onEvent(ev:JSONObject) { if (ev.str("type") in listOf("account_changed","contacts_changed","identity_changed")) load() }
+    override fun onEvent(ev:JSONObject) { if (ev.str("type") in listOf("account_changed","contacts_changed","identity_changed")) load()
+        else if (ev.str("type") == "stories_changed" && category == "stories") select("stories", false) }
 
     private fun action(text:String,icon:Int,go:()->Unit) = PillButton(act,text,primary=false,icon=icon).apply { setOnClickListener { go() } }
     private fun info(title:String,value:String,go:(()->Unit)?=null):LinearLayout {
@@ -130,7 +131,11 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             line.addView(info("Имя пользователя","@"+profile.str("username")) {
                 (act.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("Имя пользователя","@"+profile.str("username"))); act.toast("Имя пользователя скопировано")
             },lp(0,WRAP,1f))
-            line.addView(IconButton(act,R.drawable.ic_qr,"QR-код профиля").apply { setOnClickListener { profileQr(act,uid,profile.str("display_name"),profile.str("avatar_path")) } })
+            line.addView(IconButton(act,R.drawable.ic_qr,"QR-код профиля").apply {
+                setOnClickListener {
+                    if (own) Qr.showMine(act) else profileQr(act,uid,profile.str("display_name"),profile.str("avatar_path"))
+                }
+            })
             if (!own && !profile.optBoolean("is_contact")) line.addView(IconButton(act,R.drawable.ic_person_add,"Добавить в контакт").apply {
                 setOnClickListener { CoreClient.call("resolve_contact",JSONObject().put("username",profile.str("username"))) { _,err -> if(err!=null) act.toast(err.message) else { act.toast("Контакт добавлен"); load() } } }
             })
@@ -161,7 +166,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         val save=PillButton(act,"Сохранить");sheet.add(save);save.setOnClickListener { save.isEnabled=false;CoreClient.call("set_profile_note",JSONObject().put("user_id",profile.str("user_id")).put("note",field.text)) { _,e -> save.isEnabled=true;if(e!=null)act.toast(e.message) else {sheet.dismiss();load()} } };sheet.show()
     }
     private fun openSettings() {
-        val settings=SettingsPage(act);val column=LinearLayout(act).apply { orientation=LinearLayout.VERTICAL; background=GlassDrawable(act,GlassDrawable.Kind.STRONG,0f) }
+        val settings=SettingsPage(act);val column=LinearLayout(act).apply { orientation=LinearLayout.VERTICAL; background=GlassDrawable(act,GlassDrawable.Kind.STRONG,0f,rim=false) }
         val bar=LinearLayout(act).apply { gravity=Gravity.CENTER_VERTICAL };bar.addView(IconButton(act,R.drawable.ic_back,"Назад").apply {setOnClickListener {act.closePage()}});bar.addView(act.label("Настройки",20f,600));column.addView(bar,lp(MATCH,dp(56)));column.addView(settings.view,lp(MATCH,0,1f))
         act.openPage(object:Screen {override val view=column;override fun applyInsets(top:Int,bottom:Int,ime:Int) {column.setPadding(0,top,0,maxOf(bottom,ime))}})
     }
@@ -171,7 +176,9 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         tabIndex = next
         category=key;before=null;items.clear();generation++;content.animate().cancel();content.removeAllViews()
         tabs.select(next, animated && dir != 0)
-        if(key=="groups") {
+        if(key=="stories") {
+            loadStories(dir, animated)
+        } else if(key=="groups") {
             val groups=profile.optJSONArray("groups")?.objects().orEmpty()
             if(groups.isEmpty()) content.addView(act.label("Общих групп пока нет",15f,400,Theme.Role.MUTED))
             groups.forEach { g -> content.addView(action(g.str("title"),R.drawable.ic_people) {act.openChat(g.str("id"))}) }
@@ -202,6 +209,51 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         content.springTo(Prop.X, 0f, 0.42f, 0.86f)
         content.animate().alpha(1f).setDuration(Theme.ms(200)).setInterpolator(Theme.surfaceCurve).start()
     }
+    private fun loadStories(dir: Int, animated: Boolean) {
+        val uid = profile.str("user_id")
+        if (uid.isEmpty()) return
+        val gen = generation
+        content.addView(act.label("Загружаем истории…", 15f, 400, Theme.Role.MUTED))
+        CoreClient.call("list_stories", JSONObject().put("profile_user_id", uid)) { value, error ->
+            if (gen != generation || category != "stories") return@call
+            content.removeAllViews()
+            if (error != null) {
+                content.addView(act.label(error.message, 15f, 400, Theme.Role.MUTED))
+                return@call
+            }
+            val stories = (value as? JSONArray)?.objects().orEmpty()
+            if (stories.isEmpty()) {
+                content.addView(act.label("Здесь пока нет опубликованных историй", 15f, 400, Theme.Role.MUTED))
+                return@call
+            }
+            stories.forEachIndexed { index, story ->
+                val date = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                    .format(java.util.Date(story.optLong("sent_at")))
+                val row = LinearLayout(act).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = GlassDrawable(act, radius = act.dpf(18))
+                    setPadding(dp(12), dp(10), dp(12), dp(10))
+                    isFocusable = true
+                    isClickable = true
+                    pressFeedback()
+                }
+                row.addView(IconButton(act, if (story.str("mime").startsWith("video/"))
+                    R.drawable.ic_video else R.drawable.ic_file, "Просмотреть историю").apply { isClickable = false },
+                    lp(dp(48), dp(48)))
+                val words = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+                words.addView(act.label(story.str("caption").ifEmpty { "История от $date" }, 15f, 600).apply {
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+                words.addView(act.label(date, 12f, 400, Theme.Role.MUTED))
+                row.addView(words, lp(0, WRAP, 1f).apply { marginStart = dp(10) })
+                row.setOnClickListener { act.openPage(StoryViewer(act, stories, index)) }
+                content.addView(row, lp().apply { bottomMargin = dp(8) })
+            }
+            reveal(dir, animated)
+        }
+    }
+
     private fun loadItems(dir: Int = 0, animated: Boolean = false) {
         val fresh = before == null
         val gen=generation;val p=JSONObject().put("user_id",profile.str("user_id")).put("kind",category).put("limit",48);before?.let {p.put("before",it)}

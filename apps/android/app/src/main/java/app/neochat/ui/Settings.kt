@@ -110,23 +110,18 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
             addView(nav(R.drawable.ic_bell, "Звук и вибрация") {
                 act.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName))
             })
+            addView(nav(R.drawable.ic_bell, "Проверить виброотклик") {
+                val sent = Haptics.test(act.overlay)
+                act.toast(if (sent)
+                    "Сигнал отправлен. Если вибрации нет, проверьте тактильный отклик в настройках Android"
+                    else "Не удалось отправить сигнал виброотклика")
+            })
         }
 
-        section("Оформление").apply {
-            val slider = ThemeSlider(ctx)
-            slider.setValue(Theme.mode.ordinal, false)
-            slider.onChange = { Theme.setMode(ctx, Theme.Mode.entries[it]) }
-            addView(slider, lp().apply { setMargins(dp(10), dp(4), dp(10), 0) })
-            addView(nav(R.drawable.ic_palette, "Оформление интерфейса") { Appearance.show(act) })
-            val sizes = listOf("Мелкий", "Обычный", "Крупный", "Очень крупный")
-            val sizeValue = ctx.label(sizes[prefs.getInt("text_size", 1).coerceIn(0, 3)], 14f, 400, Theme.Role.MUTED)
-            addView(nav(R.drawable.ic_chat, "Размер текста в чатах", sizeValue) {
-                choose(sizeValue, sizes.mapIndexed { i, s -> i.toString() to s }, prefs.getInt("text_size", 1).toString()) {
-                    prefs.edit().putInt("text_size", it.toInt()).apply()
-                }
+        section("Кастомизация").apply {
+            addView(nav(R.drawable.ic_palette, "Тема и оформление") {
+                act.openPage(CustomizationPage(act))
             })
-            addView(toggle("Крупные эмодзи без текста", "big_emoji", true))
-            addView(toggle("Уменьшить анимацию", "reduce_motion", false) { Theme.forceReduced = prefs.getBoolean("reduce_motion", false) })
         }
 
         section("Чаты").apply {
@@ -152,6 +147,13 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
         }
 
         section("Данные").apply {
+            addView(nav(R.drawable.ic_download, "Восстановить переписку") {
+                act.toast("Проверяем зашифрованную копию переписки…")
+                CoreClient.call("restore_history") { v, e ->
+                    act.toast(e?.message ?: if ((v as? JSONObject)?.optBoolean("restored") == true)
+                        "Копия переписки загружена" else "Сохранённой копии пока нет")
+                }
+            })
             addView(nav(R.drawable.ic_trash, "Очистить кэш", cacheValue) {
                 Photos.full.evictAll()
                 Thread {

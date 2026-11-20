@@ -13,6 +13,11 @@ if (file("google-services.json").isFile) apply(plugin = "com.google.gms.google-s
 val signingProps = (System.getenv("NEOCHAT_SIGNING") ?: findProperty("NEOCHAT_SIGNING") as String?)
     ?.let { path -> Properties().apply { file(path).inputStream().use { load(it) } } }
 
+// Main release has no APK install permission; diagnostic builds can opt in explicitly.
+val testInstallerPermission = providers.gradleProperty("NEOCHAT_TEST_INSTALL_PERMISSION").orNull == "true"
+// Alpha checks are enabled by default and can be disabled in a separate test build.
+val disableAlphaUpdates = providers.gradleProperty("NEOCHAT_DISABLE_ALPHA").orNull == "true"
+
 android {
     namespace = "app.neochat"
     compileSdk = 35
@@ -22,8 +27,16 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 53
-        versionName = "0.7.3.2"
+        versionCode = 74
+        versionName = "0.7.6.4"
+        buildConfigField("boolean", "NEOCHAT_DISABLE_ALPHA", disableAlphaUpdates.toString())
+    }
+
+    buildFeatures { buildConfig = true }
+
+    // Diagnostics only: include a permission overlay without altering the main manifest.
+    if (testInstallerPermission) {
+        sourceSets.getByName("release").manifest.srcFile("src/installerPermission/AndroidManifest.xml")
     }
 
     signingConfigs {

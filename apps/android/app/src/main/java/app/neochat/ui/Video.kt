@@ -8,6 +8,7 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -117,14 +118,37 @@ class PosterView(ctx: Context) : ImageView(ctx) {
     var onReveal: ((Float) -> Unit)? = null
     var reveal = 0f
         private set
+    private var ox = 0.5f
+    private var oy = 0.5f
+    private var openingWave = true
+    private var messageId = ""
+
+    fun bindMessage(id: String) {
+        if (messageId == id) return
+        onReveal = null
+        spring.snap(0f)
+        messageId = id
+        ox = 0.5f
+        oy = 0.5f
+        openingWave = true
+    }
+
+    fun setOrigin(x: Float, y: Float) {
+        // Reversing a travelling wave keeps its mask continuous. The next settled tap gets
+        // its own origin, including when it starts covering an already open photo.
+        if (spring.running) return
+        ox = x.coerceIn(0f, 1f)
+        oy = y.coerceIn(0f, 1f)
+    }
 
     private val spring = Spring(0.5f, 0.86f, 0.0015f) {
-        reveal = it
+        reveal = it.coerceIn(0f, 1f)
         onReveal?.invoke(it)
         restart()
         invalidate()
     }
     private val cover = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
+    private val mask = Paint(Paint.ANTI_ALIAS_FLAG)
     private val box = RectF()
     private var ticking = false
     private val frames = object : Choreographer.FrameCallback {
@@ -141,12 +165,14 @@ class PosterView(ctx: Context) : ImageView(ctx) {
             restart()
             return
         }
+        if (!spring.running) openingWave = target > start
         spring.snap(start)
         if (start != target) spring.to(target)
         restart()
     }
 
     fun revealTo(target: Float) {
+        if (!spring.running) openingWave = target > reveal
         spring.to(target)
         restart()
     }
@@ -226,23 +252,35 @@ class PosterView(ctx: Context) : ImageView(ctx) {
         c.drawText(length, left + 8 * d, top + 22 * d / 2 + (label.descent() - label.ascent()) / 2 - label.descent(), label)
     }
 
-    /** The defocus ladder, the dust and the light that crosses while the picture opens. */
+    /** Mask the entire opaque cover, not the sharp image or a globally fading blur. */
     private fun drawHidden(c: Canvas, d: Float) {
+        val p = reveal.coerceIn(0f, 1f)
+        if (p >= 1f || width == 0 || height == 0) return
         box.set(0f, 0f, width.toFloat(), height.toFloat())
-        val p = reveal
-        val depth = (1f - p) * 3f
-        blur?.let { steps ->
-            for (i in 2 downTo 0) {
-                val a = (depth - (2 - i)).coerceIn(0f, 1f)
-                if (a <= 0.004f || i >= steps.size) continue
-                drawScaled(c, steps[i], 1f + 0.05f * (1f - p), (a * 255).toInt())
-            }
-        }
-        fill.color = 0xFF05070C.toInt()
-        fill.alpha = (52 * (1f - p)).toInt()
+        val moving = p > 0f
+        if (moving) c.saveLayer(box, null)
+        blur?.firstOrNull()?.let { drawScaled(c, it, 1.05f, 255) }
+        fill.color = 0x3405070C
         c.drawRect(box, fill)
-        SpoilerFx.dust(c, box, seed, 1f - p, p, d, density = 1.5f)
-        SpoilerFx.sweep(c, box, p)
+        SpoilerFx.dust(c, box, seed, 1f, 0f, d, density = 1.5f)
+        if (moving) {
+            val cx = ox * width
+            val cy = oy * height
+            val reach = kotlin.math.hypot(maxOf(cx, width - cx), maxOf(cy, height - cy))
+            val feather = minOf(width, height) * 0.18f
+            val radius = (reach + feather) * if (openingWave) p else 1f - p
+            val inner = ((radius - feather) / radius).coerceIn(0f, 0.999f)
+            mask.shader = android.graphics.RadialGradient(
+                cx, cy, radius, intArrayOf(Color.BLACK, Color.BLACK, Color.TRANSPARENT),
+                floatArrayOf(0f, inner, 1f), Shader.TileMode.CLAMP,
+            )
+            mask.xfermode = android.graphics.PorterDuffXfermode(
+                if (openingWave) android.graphics.PorterDuff.Mode.DST_OUT else android.graphics.PorterDuff.Mode.DST_IN,
+            )
+            c.drawRect(box, mask)
+            mask.xfermode = null
+            c.restore()
+        }
     }
 
     /** One step of the blur, cropped like the picture itself and slightly larger while closed. */

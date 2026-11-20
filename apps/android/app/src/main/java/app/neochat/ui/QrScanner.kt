@@ -188,7 +188,7 @@ class QrScanner(
                 done = true
                 main.post {
                     if (closed) return@post
-                    root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+                    Haptics.confirm(root)
                     dismiss()
                     onResult(text)
                 }

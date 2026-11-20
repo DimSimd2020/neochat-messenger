@@ -29,9 +29,12 @@ struct Reveal {
 };
 
 // Dust over `r`: `closed` is how hidden the content still is, `spread` how far the grains have
-// flown from the middle. `seed` keeps the same grains on the same place across repaints.
-// `gain` lifts the brightness of the grains where the cover lies on plain text.
-void dust(QPainter &p, const QRectF &r, quint32 seed, qreal closed, qreal spread, qreal density = 1.0, qreal gain = 1.0);
+// flown from the tap point (`ox`, `oy` in 0..1 of the rect). `seed` keeps the same grains on the
+// same place across repaints. `gain` lifts the brightness of the grains over plain text.
+void dust(QPainter &p, const QRectF &r, quint32 seed, qreal closed, qreal spread, qreal density = 1.0, qreal gain = 1.0, qreal ox = 0.5, qreal oy = 0.5);
+
+// Applied only to an isolated cover layer: both hiding and revealing grow out from the tap.
+void maskCover(QPainter &p, const QRectF &r, const QPointF &origin, qreal reveal, bool opening);
 
 // A soft band of light crossing the picture once while it opens.
 void sweep(QPainter &p, const QRectF &r, qreal t);

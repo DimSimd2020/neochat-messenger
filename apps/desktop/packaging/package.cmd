@@ -1,11 +1,12 @@
 @echo off
 rem Builds build\NeoChat-<version>-x64.msi from a release build (run build.cmd first).
 setlocal
+cd /d "%~dp0\.."
 if "%QT_DIR%"=="" set QT_DIR=E:\dev\Qt\6.8.3
 rem The version lives in CMakeLists.txt; a hardcoded one here went stale between releases.
 if "%VERSION%"=="" for /f "tokens=3" %%V in ('findstr /b /c:"project(NeoChat VERSION" CMakeLists.txt') do set VERSION=%%V
 set VS=C:\Program Files\Microsoft Visual Studio\2022\Community
-cd /d "%~dp0\.."
+if "%VERSION%"=="" exit /b 1
 set STAGE=build\stage
 if exist %STAGE% rmdir /s /q %STAGE%
 mkdir %STAGE% || exit /b 1

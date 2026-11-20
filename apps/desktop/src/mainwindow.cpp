@@ -47,7 +47,16 @@
 #include <QThreadPool>
 #include <QVBoxLayout>
 
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
+
 namespace {
+
+bool copyBlocked(const QJsonObject &conversation, const char *key)
+{
+    return conversation.value("copy_protection").toObject().value(key).toObject().value("blocked").toBool();
+}
 
 // Pictures pasted from the clipboard live in a temp folder of their own until they are sent or dismissed.
 void dropPasted(const QString &path)
@@ -725,6 +734,8 @@ MainWindow::MainWindow()
             return;
         auto *menu = new PopupMenu(this);
         menu->addAction(QStringLiteral("Сведения"), this, [this] { dialogs::conversationInfo(host(), m_current.value("id").toString()); });
+        if (m_current.value("can_set_copy_protection").toBool())
+            menu->addAction(QStringLiteral("Копирование"), this, [this] { openCopyProtection(); });
         menu->addAction(QStringLiteral("Поиск в переписке"), this, [this] { m_header->search->click(); });
         const QString cid = m_current.value("id").toString();
         menu->addAction(QStringLiteral("Очистить чат…"), this, [this, cid] {
@@ -758,7 +769,9 @@ MainWindow::MainWindow()
     });
     connect(m_search->edit(), &QLineEdit::textChanged, m_view, &MessageView::showSearch);
     connect(m_notice->action, &QAbstractButton::clicked, this, [this] {
-        if (!m_current.isEmpty())
+        if (m_current.value("copy_permission_requested").toBool() && m_current.value("key_changed_users").toArray().isEmpty())
+            openCopyProtection();
+        else if (!m_current.isEmpty())
             dialogs::conversationInfo(host(), m_current.value("id").toString());
     });
     connect(m_composer, &Composer::send, this, &MainWindow::sendText);
@@ -949,6 +962,7 @@ void MainWindow::showOnboarding(const QJsonObject &status)
     m_view->setConversation({}, false);
     m_onboarding->start(status);
     m_stack->setCurrentWidget(m_onboarding);
+    updateCaptureProtection();
 }
 
 void MainWindow::showMain()
@@ -1097,6 +1111,8 @@ void MainWindow::openConversation(const QString &id)
         const QJsonObject c = v.toObject();
         const bool switched = m_current.value("id").toString() != id;
         auto apply = [this, id, c, switched] {
+            if (switched && copyBlocked(m_current, "screenshot"))
+                m_view->closeMediaViewers();
             m_current = c;
             QSettings().setValue("window/lastConversation", id);
             if (switched) {
@@ -1121,7 +1137,9 @@ void MainWindow::openConversation(const QString &id)
                     refreshPresence();
             }
         };
-        if (m_tab != 0)
+        if (copyBlocked(c, "screenshot") || copyBlocked(m_current, "screenshot"))
+            apply();
+        else if (m_tab != 0)
             ui::transition(m_main, QRect(m_rail->width(), 0, m_main->width() - m_rail->width(), m_main->height()), ui::Motion::Fade, apply);
         else if (m_onePane && m_listMode)
             animateConversation(ui::Motion::PullLeft, apply);
@@ -1135,6 +1153,10 @@ void MainWindow::openConversation(const QString &id)
 // The conversation area (everything in one-pane mode) moves as `change` is applied.
 void MainWindow::animateConversation(ui::Motion motion, const std::function<void()> &change)
 {
+    if (copyBlocked(m_current, "screenshot")) {
+        change();
+        return;
+    }
     ui::transition(m_main, m_onePane ? m_main->rect() : m_conversationArea->geometry(), motion, change);
 }
 
@@ -1169,6 +1191,10 @@ void MainWindow::setTab(int tab)
     m_rail->setTab(m_tab); // the click toggled the button; it shows the real section until the switch
     if (tab == m_tab || (tab != 0 && !m_contacts))
         return;
+    if (copyBlocked(m_current, "screenshot")) {
+        selectTab(tab);
+        return;
+    }
     ui::transition(m_main, QRect(m_rail->width(), 0, m_main->width() - m_rail->width(), m_main->height()), ui::Motion::Fade, [this, tab] { selectTab(tab); });
 }
 
@@ -1178,7 +1204,8 @@ void MainWindow::refreshHeader()
         return;
     const QString id = m_current.value("id").toString();
     Core::instance()->call("get_conversation", {{"conversation_id", id}}, this, [this, id](const QJsonValue &v, const CoreError &e) {
-        if (!e.ok() || m_current.value("id").toString() != id)
+        if (!e.ok() || m_current.value("id").toString() != id ||
+            v.toObject().value("copy_protection_revision").toDouble() < m_current.value("copy_protection_revision").toDouble())
             return;
         m_current = v.toObject();
         applyConversation(m_current);
@@ -1256,6 +1283,9 @@ void MainWindow::applyConversation(const QJsonObject &c)
     m_composer->setBlocked(!c.value("key_changed_users").toArray().isEmpty());
     m_view->setCanReact(!gone && c.value("key_changed_users").toArray().isEmpty());
     m_view->setCanPin(c.value("can_pin").toBool());
+    m_view->setCopyProtection(copyBlocked(c, "copy"), copyBlocked(c, "forward"));
+    m_composer->setCopyBlocked(copyBlocked(c, "copy"));
+    updateCaptureProtection();
     // Pinned messages: the bar follows the conversation's pins.
     const QString convId = c.value("id").toString();
     const bool canPin = c.value("can_pin").toBool();
@@ -1270,6 +1300,104 @@ void MainWindow::applyConversation(const QJsonObject &c)
     updateNotice();
 }
 
+void MainWindow::openCopyProtection()
+{
+    if (!m_current.value("can_set_copy_protection").toBool())
+        return;
+    auto *sheet = new Sheet(host().host, QStringLiteral("Копирование"), 450);
+    struct RuleRow {
+        QString key;
+        ui::Label *status;
+        ui::Button *button;
+    };
+    QList<RuleRow> rows;
+    const QList<QPair<QString, QString>> titles{
+        {"copy", QStringLiteral("Копирование текста и файлов")},
+        {"forward", QStringLiteral("Пересылка")},
+        {"screenshot", QStringLiteral("Снимки и запись экрана")},
+    };
+    for (const auto &[key, title] : titles) {
+        sheet->body()->addWidget(new ui::Label(title, 15, 600));
+        auto *status = new ui::Label({}, 13, 400, ui::Label::Muted);
+        auto *button = new ui::Button({}, ui::Button::Secondary);
+        sheet->body()->addWidget(status);
+        sheet->body()->addWidget(button);
+        rows.append({key, status, button});
+    }
+    const QString cid = m_current.value("id").toString();
+    const auto state = std::make_shared<QJsonObject>(m_current);
+    const auto busy = std::make_shared<bool>(false);
+    const auto render = [rows, state, busy] {
+        const auto rules = state->value("copy_protection").toObject();
+        for (const auto &row : rows) {
+            const auto rule = rules.value(row.key).toObject();
+            const bool blocked = rule.value("blocked").toBool();
+            const bool mine = rule.value("mine").toBool();
+            const bool requested = rule.value("requested").toBool();
+            row.status->setText(!blocked ? QStringLiteral("Разрешено")
+                : mine && requested ? QStringLiteral("Запрещено · есть запрос на разрешение")
+                : mine ? QStringLiteral("Запрещено вами")
+                : requested ? QStringLiteral("Запрещено · запрос отправлен")
+                : QStringLiteral("Запрещено участником"));
+            row.button->setText(!blocked ? QStringLiteral("Запретить") : mine ? QStringLiteral("Разрешить") : QStringLiteral("Запросить разрешение"));
+            row.button->setEnabled(!*busy && state->value("can_set_copy_protection").toBool() && (!blocked || mine || !requested));
+        }
+    };
+    const auto refresh = [sheet, cid, state, render] {
+        Core::instance()->call("get_conversation", {{"conversation_id", cid}}, sheet, [state, render](const QJsonValue &v, const CoreError &e) {
+            if (e.ok() && v.toObject().value("copy_protection_revision").toDouble() >= state->value("copy_protection_revision").toDouble())
+                *state = v.toObject();
+            render();
+        });
+    };
+    for (const auto &row : rows) {
+        connect(row.button, &QAbstractButton::clicked, sheet, [this, sheet, cid, key = row.key, state, busy, render, refresh] {
+            const auto rule = state->value("copy_protection").toObject().value(key).toObject();
+            const QString action = !rule.value("blocked").toBool() ? "block" : rule.value("mine").toBool() ? "allow" : "request";
+            *busy = true;
+            render();
+            Core::instance()->call("set_copy_protection", {{"conversation_id", cid}, {"rule", key}, {"action", action},
+                {"revision", state->value("copy_protection_revision")}}, sheet, [this, state, busy, render, refresh](const QJsonValue &v, const CoreError &e) {
+                *busy = false;
+                if (!e.ok()) {
+                    toast(e.message);
+                    refresh();
+                    return;
+                }
+                if (v.toObject().value("copy_protection_revision").toDouble() >= state->value("copy_protection_revision").toDouble())
+                    *state = v.toObject();
+                render();
+            });
+        });
+    }
+    connect(Core::instance(), &Core::event, sheet, [refresh](const QJsonObject &ev) {
+        if (ev.value("type").toString() == "conversations_changed")
+            refresh();
+    });
+    render();
+    sheet->open();
+}
+
+void MainWindow::updateCaptureProtection()
+{
+#ifdef Q_OS_WIN
+    const bool showingChat = !m_current.isEmpty() && m_stack->currentWidget() == m_main && m_tab == 0 && (!m_onePane || !m_listMode);
+    const bool blocked = showingChat && copyBlocked(m_current, "screenshot");
+    if (blocked == property("chatCaptureProtected").toBool())
+        return;
+    setProperty("chatCaptureProtected", blocked);
+    const auto hwnd = reinterpret_cast<HWND>(winId());
+    if (blocked) {
+        if (!SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) && !SetWindowDisplayAffinity(hwnd, WDA_MONITOR))
+            toast(QStringLiteral("Windows не смогла скрыть окно от захвата экрана"));
+    } else {
+        if (!showingChat)
+            m_view->closeMediaViewers();
+        SetWindowDisplayAffinity(hwnd, WDA_NONE);
+    }
+#endif
+}
+
 void MainWindow::updateNotice()
 {
     QString text, action;
@@ -1277,6 +1405,8 @@ void MainWindow::updateNotice()
         text = m_current.value("notice").toString();
         if (!m_current.value("key_changed_users").toArray().isEmpty())
             action = QStringLiteral("Сверить код");
+        else if (m_current.value("copy_permission_requested").toBool() && m_current.value("can_set_copy_protection").toBool())
+            action = QStringLiteral("Копирование");
     } else if (!m_current.isEmpty() && m_current.value("kind").toString() == "group" && !m_current.value("can_post").toBool(true) &&
                !m_current.value("left").toBool()) {
         text = QStringLiteral("Писать здесь могут только владелец и админы");
@@ -1299,10 +1429,13 @@ void MainWindow::setSidebarHidden(bool hidden, bool animated)
 
 void MainWindow::updateLayoutMode()
 {
-    if (m_stack->currentWidget() != m_main)
+    if (m_stack->currentWidget() != m_main) {
+        updateCaptureProtection();
         return;
+    }
     const int w = width();
     m_onePane = w <= 760;
+    updateCaptureProtection();
     const int panelW = w <= 1050 ? 286 : 324;
     auto *area = static_cast<QStackedWidget *>(m_conversationArea->layout()->itemAt(0)->widget());
     area->setCurrentWidget(m_current.isEmpty() ? m_placeholder : m_conversation);

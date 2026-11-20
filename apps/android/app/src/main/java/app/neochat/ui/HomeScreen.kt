@@ -57,6 +57,7 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
     val title = ctx.label("", 16f, 600)
     val subtitle = ctx.label("", 14f, 400, Theme.Role.MUTED)
     val time = ctx.label("", 12.5f, 400, Theme.Role.MUTED)
+    val streak = ctx.label("", 13f, 600).apply { visibility = GONE }
     private val badge = TextView(ctx)
     val check = ImageView(ctx)
     val pin = ImageView(ctx)
@@ -85,6 +86,7 @@ class ListRow(ctx: Context, avatarDp: Int = 52) : LinearLayout(ctx), Themed {
         groupIcon.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         top.addView(groupIcon, lp(dp(17), dp(17)).apply { marginEnd = dp(6) })
         top.addView(title, lp(0, WRAP, 1f))
+        top.addView(streak, lp(WRAP, WRAP).apply { marginStart = dp(6) })
         pin.setImageResource(R.drawable.ic_pin)
         pin.visibility = GONE
         pin.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -157,6 +159,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private val ctx: Context = act
     private val root = FrameLayout(ctx)
     override val view: View = root
+    override val pageBackground = BackgroundView(ctx)
     /** What the glass of the header and of the bar looks through: the pages, down to the edge of the screen. */
     private val stage = BackdropSource(ctx)
     private val column = LinearLayout(ctx)
@@ -173,6 +176,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     // chats
     private val chatsPage = LinearLayout(ctx)
+    private val stories = StoryRail(act)
     private val chatSearch = SearchBox(ctx, "Поиск чатов")
     private val filterTabs = BottomNav(ctx, listOf("Все", "Личные", "Группы").map { 0 to it }, textOnly = true)
     private var filter = 0
@@ -182,7 +186,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private var archiveRow: JSONObject? = null
     private var archiveShown = false
     private val archiveEntry = ListRow(ctx)
-    private val archiveIcon = ArchiveIcon(ring = true)
+    private val archiveIcon = ArchiveIcon { archiveEntry.avatar.postInvalidateOnAnimation() }
     private val archiveHeight = dp(72)
     private val archiveWrap = FrameLayout(ctx)
     private var archiveAnim: ValueAnimator? = null
@@ -210,7 +214,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     init {
         column.orientation = LinearLayout.VERTICAL
-        root.addView(BackgroundView(ctx), FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(pageBackground, FrameLayout.LayoutParams(MATCH, MATCH))
         root.addView(stage, FrameLayout.LayoutParams(MATCH, MATCH))
         // The profile has no room kept for the header: its cover begins at the top of the screen and shows through the glass.
         stage.addView(profilePage, FrameLayout.LayoutParams(MATCH, MATCH))
@@ -297,6 +301,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
 
     private fun buildChats() {
         chatsPage.orientation = LinearLayout.VERTICAL
+        chatsPage.addView(stories, lp(MATCH, WRAP))
         chatsPage.addView(chatSearch, lp(MATCH, dp(48)).apply { setMargins(dp(16), dp(4), dp(16), 0) })
         watch(chatSearch) { reloadChats(true) }
         val chips = LinearLayout(ctx)
@@ -337,16 +342,23 @@ class HomeScreen(private val act: MainActivity) : Screen {
             private var fromTop = false
             private var dragging = false
             private var armed = false
+            private var crossed = false
             private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
 
             private fun pull(e: MotionEvent) {
                 val distance = ((e.rawY - y - slop).coerceAtLeast(0f) * 0.55f)
-                val height = if (distance <= archiveHeight) distance else archiveHeight + (distance - archiveHeight) * 0.18f
-                setArchiveHeight(height.toInt().coerceAtMost(archiveHeight + dp(24)))
-                if (!armed && height >= archiveHeight * 0.85f) {
+                val threshold = archiveHeight * 0.85f
+                val height = if (distance <= threshold) distance else threshold + (distance - threshold) * 0.12f
+                setArchiveHeight(height.toInt().coerceAtMost(archiveHeight - dp(4)))
+                archiveIcon.halo.value = (distance / threshold).coerceAtMost(1f)
+                if (!armed && distance >= threshold) {
                     armed = true
-                    archiveEntry.replyHaptic()
-                } else if (height < archiveHeight * 0.7f) armed = false
+                    if (!crossed) {
+                        crossed = true
+                        archiveEntry.replyHaptic()
+                        archiveIcon.halo.complete()
+                    }
+                } else if (distance < threshold) armed = false
             }
 
             override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
@@ -355,6 +367,8 @@ class HomeScreen(private val act: MainActivity) : Screen {
                     fromTop = !rv.canScrollVertically(-1) && !archiveShown && archiveRow != null && filter == 0 && chatSearch.edit.text.isEmpty()
                     dragging = false
                     armed = false
+                    crossed = false
+                    if (fromTop) archiveIcon.halo.reset()
                 }
                 if (e.actionMasked == MotionEvent.ACTION_MOVE && fromTop && !selection.active && e.rawY - y > slop && e.rawY - y > kotlin.math.abs(e.rawX - x) * 1.5f) {
                     dragging = true
@@ -456,19 +470,20 @@ class HomeScreen(private val act: MainActivity) : Screen {
         val target = if (visible) archiveHeight else 0
         if (archiveShown == visible && archiveWrap.layoutParams.height == target) return
         val opening = visible && !archiveShown
+        archiveIcon.halo.value = 0f
         archiveShown = visible
         archiveAnim?.cancel()
         if (visible) archiveWrap.visibility = View.VISIBLE
         val from = archiveWrap.layoutParams.height
         archiveAnim = ValueAnimator.ofInt(from, target).apply {
-            duration = if (Theme.reducedMotion) 0 else 220
+            duration = Theme.ms(if (opening) 420 else 260)
             interpolator = Theme.surfaceCurve
             addUpdateListener {
                 setArchiveHeight(it.animatedValue as Int)
             }
             start()
         }
-        if (opening) archiveEntry.pop(0.96f, 0.38f, 0.72f)
+        if (opening) archiveEntry.pop(0.97f, 0.48f, 0.86f)
     }
 
     private fun setArchiveHeight(height: Int) {
@@ -667,6 +682,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
     }
 
     override fun onShown() {
+        stories.reload()
         refreshEmail()
         showArchiveEntry(false)
         root.removeCallbacks(refresh)
@@ -682,6 +698,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
                 root.postDelayed(refresh, 120)
             }
             "account_changed", "settings_changed" -> settingsPage.load()
+            "stories_changed" -> stories.reload()
             "presence" -> {
                 root.removeCallbacks(refresh)
                 root.postDelayed(refresh, 120)

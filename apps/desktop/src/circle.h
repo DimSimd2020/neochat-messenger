@@ -33,7 +33,7 @@ public:
     qint64 elapsedMs() const { return m_recording ? m_clock.elapsed() : 0; }
 
 signals:
-    void frame(const QImage &square); // preview, mirrored like a mirror
+    void frame(const QImage &square);
     void level(qreal volume);
     void finished(const QString &path, qint64 durationMs, const QImage &poster);
     void failed(const QString &reason);

@@ -33,6 +33,9 @@ QStringList quickReactionChoices();
 // The text of a message as it may be quoted elsewhere (a pin, a preview): hidden words are blocks.
 QString messageQuote(const QJsonObject &m);
 
+// Protected top-level photo window; closing it marks the message viewed in the core.
+QWidget *showViewOncePhoto(QWidget *host, const QImage &image, const QString &messageId, class MessageView *report = nullptr);
+
 struct MessageItem {
     bool isDate = false;
     QDate date;
@@ -131,6 +134,8 @@ public:
     bool atBottom() const;
     void setCanReact(bool on) { m_canReact = on; }
     void setCanPin(bool on) { m_canPin = on; }
+    void setCopyProtection(bool copy, bool forward);
+    void closeMediaViewers();
     // Scrolls to a message (loading older pages until it is found) and flashes it.
     void jumpToMessage(const QString &id);
     // Opens a picture of this conversation full-window, with the menu of its message on right click.
@@ -142,8 +147,12 @@ public:
     // How far the cover of a hidden picture is open (0 closed, 1 open), and the same for hidden text.
     qreal revealOf(const QString &id, bool closed) const;
     qreal textRevealOf(const QString &id) const;
-    // A tap on a hidden picture or on hidden text: it opens here, and a second tap closes it.
-    void toggleHidden(const QJsonObject &m);
+    // Where the finger asked for the picture, in 0..1 of its rect: the blur melts from there.
+    QPointF revealOrigin(const QString &id) const;
+    bool revealOpening(const QString &id) const;
+    void setRevealOrigin(const QString &id, const QPointF &origin);
+    // A picture stays revealed until this chat is left; hidden text still toggles on each tap.
+    void revealHidden(const QJsonObject &m);
     void toggleText(const QJsonObject &m);
     // Something on screen still needs its dust drawn: a closed cover or a cover in motion.
     bool liveCover() const;
@@ -178,6 +187,7 @@ private:
     void load(bool older);
     void applyPage(const QList<QJsonObject> &page, bool older);
     void restoreBottomDistance(int distance);
+    bool isMediaRevealed(const QJsonObject &m) const;
     void openFile(const QJsonObject &m);
     void saveFile(const QJsonObject &m);
     void retry(const QJsonObject &m);
@@ -207,6 +217,8 @@ private:
     bool m_searching = false;
     bool m_canReact = true;
     bool m_canPin = false;
+    bool m_copyBlocked = false;
+    bool m_forwardBlocked = false;
     QString m_jumpId;  // a jump waiting for older pages
     QString m_flashId; // the message just jumped to
     qint64 m_flashAt = 0;
@@ -214,6 +226,9 @@ private:
     // only while the chat is on screen; leaving it closes everything again.
     mutable QHash<QString, spoiler::Reveal> m_reveal;
     mutable QHash<QString, spoiler::Reveal> m_textReveal;
+    mutable QHash<QString, QPointF> m_origin;
+    QHash<QString, bool> m_openingWave;
+    QHash<QString, int> m_revealRequests;
     QSet<QString> m_openText;
     int m_generation = 0;
     int m_newBelow = 0;

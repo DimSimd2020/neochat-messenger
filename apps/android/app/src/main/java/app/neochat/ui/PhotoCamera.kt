@@ -23,7 +23,6 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.view.GestureDetector
 import android.view.Gravity
-import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.Surface
@@ -325,7 +324,7 @@ class PhotoCamera(private val act: MainActivity, private val onPhoto: (File) -> 
         val s = session ?: return
         val r = jpeg ?: return
         shutter.isEnabled = false
-        shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        Haptics.confirm(shutter)
         try {
             val req = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(r.surface)

@@ -6,6 +6,7 @@
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
+#include <QRadialGradient>
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QtMath>
@@ -85,7 +86,7 @@ bool Reveal::moving(int ms) const
     return at >= 0 && ms > 0 && now() - at < ms;
 }
 
-void dust(QPainter &p, const QRectF &r, quint32 seed, qreal closed, qreal spread, qreal density, qreal gain)
+void dust(QPainter &p, const QRectF &r, quint32 seed, qreal closed, qreal spread, qreal density, qreal gain, qreal ox, qreal oy)
 {
     if (closed <= 0.002 || r.width() <= 0 || r.height() <= 0)
         return;
@@ -102,10 +103,10 @@ void dust(QPainter &p, const QRectF &r, quint32 seed, qreal closed, qreal spread
         qreal uy = std::fmod(f.y[i] - flow, 1.0);
         if (uy < 0)
             uy += 1;
-        // On the way out every grain leaves the middle, the bright ones faster.
+        // On the way out every grain leaves the tap point, the bright ones faster.
         const qreal push = spread * (0.5 + 1.3 * f.bright[i]);
-        ux += (ux - 0.5) * push;
-        uy += (uy - 0.5) * push;
+        ux += (ux - ox) * push;
+        uy += (uy - oy) * push;
         const QPointF at(r.left() + ux * r.width(), r.top() + uy * r.height());
         const qreal twinkle = 0.55 + 0.45 * qSin(t * 1.6 * f.speed[i] + f.phase[i] * 2);
         const qreal a = qBound(0.0, closed * f.bright[i] * twinkle * gain, 1.0);
@@ -116,6 +117,32 @@ void dust(QPainter &p, const QRectF &r, quint32 seed, qreal closed, qreal spread
         p.drawEllipse(at, rad * 2.1, rad * 2.1);
         p.setBrush(QColor(255, 255, 255, qBound(0, int(a * 210), 255)));
         p.drawEllipse(at, rad, rad);
+    }
+    p.restore();
+}
+
+void maskCover(QPainter &p, const QRectF &r, const QPointF &origin, qreal reveal, bool opening)
+{
+    const qreal v = qBound(0.0, reveal, 1.0);
+    if (v <= 0)
+        return;
+    p.save();
+    if (v >= 1) {
+        p.setCompositionMode(QPainter::CompositionMode_Clear);
+        p.fillRect(r, Qt::transparent);
+    } else {
+        const QPointF c(r.left() + qBound(0.0, origin.x(), 1.0) * r.width(),
+                        r.top() + qBound(0.0, origin.y(), 1.0) * r.height());
+        const qreal reach = std::hypot(qMax(c.x() - r.left(), r.right() - c.x()),
+                                      qMax(c.y() - r.top(), r.bottom() - c.y()));
+        const qreal feather = qMin(r.width(), r.height()) * 0.18;
+        const qreal radius = (reach + feather) * (opening ? v : 1 - v);
+        QRadialGradient mask(c, radius);
+        mask.setColorAt(0, Qt::black);
+        mask.setColorAt(qBound(0.0, (radius - feather) / radius, 0.999), Qt::black);
+        mask.setColorAt(1, Qt::transparent);
+        p.setCompositionMode(opening ? QPainter::CompositionMode_DestinationOut : QPainter::CompositionMode_DestinationIn);
+        p.fillRect(r, mask);
     }
     p.restore();
 }

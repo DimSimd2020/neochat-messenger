@@ -15,6 +15,7 @@
 #include <QContextMenuEvent>
 #include <QDir>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QLineEdit>
 #include <QPointer>
 #include <QScrollArea>
@@ -288,6 +289,22 @@ private slots:
         QTRY_VERIFY(dynamic_cast<PopupMenu *>(QApplication::activePopupWidget()));
         QTest::keyClick(QApplication::activePopupWidget(), Qt::Key_Escape);
         QTRY_VERIFY(QApplication::activePopupWidget() == nullptr);
+
+        view.setCopyProtection(true, true);
+        view.setCurrentIndex(idx);
+        QApplication::clipboard()->setText(QStringLiteral("Буфер до нажатия"));
+        QTest::keyClick(&view, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("Буфер до нажатия"));
+        QContextMenuEvent protectedMenu(QContextMenuEvent::Mouse, at, view.viewport()->mapToGlobal(at));
+        QApplication::sendEvent(view.viewport(), &protectedMenu);
+        QTRY_VERIFY(dynamic_cast<PopupMenu *>(QApplication::activePopupWidget()));
+        for (auto *action : QApplication::activePopupWidget()->actions()) {
+            QVERIFY(action->text() != QStringLiteral("Копировать текст"));
+            QVERIFY(action->text() != QStringLiteral("Переслать"));
+            QVERIFY(action->text() != QStringLiteral("В избранное"));
+        }
+        QTest::keyClick(QApplication::activePopupWidget(), Qt::Key_Escape);
+        QTRY_VERIFY(QApplication::activePopupWidget() == nullptr);
     }
 
     // A right click on an open picture is its menu, not a way out; Esc leaves the menu, not the picture.
@@ -337,6 +354,54 @@ private slots:
     }
 
     // The built-in player must not be silent about a file it cannot open, and Esc always gets out.
+    void openedSpoilerClickDoesNotRehide_data() {
+        QTest::addColumn<bool>("closed");
+        QTest::newRow("already shown") << false;
+        QTest::newRow("second click before core reply") << true;
+    }
+
+    void openedSpoilerClickDoesNotRehide() {
+        QFETCH(bool, closed);
+        MessageView view;
+        view.resize(660, 600);
+        auto *model = qobject_cast<MessageModel *>(view.model());
+        QVERIFY(model);
+        const QJsonObject file{{"name", "synthetic.jpg"}, {"mime", "image/jpeg"}, {"image", true},
+                               {"width", 160}, {"height", 120}, {"hidden", true}, {"spoiler", closed}};
+        const QJsonObject photo{{"id", "opened-spoiler"}, {"local_id", 1}, {"kind", "file"},
+                                {"sent_at", 1}, {"text", ""}, {"file", file}, {"status", "delivered"}};
+        model->merge({photo}, false);
+        view.show();
+        QTest::qWait(40);
+        int row = 0;
+        while (row < model->rowCount() && model->item(row).isDate) ++row;
+        QVERIFY(row < model->rowCount());
+        const QRect rect = view.visualRect(model->index(row, 0));
+        const MessageLayout layout = MessageDelegate::layout(model->item(row), rect.width(), false);
+        QVERIFY(!layout.image.isEmpty());
+        const QPoint point = layout.image.center().toPoint() + rect.topLeft();
+        QCOMPARE(view.revealOf("opened-spoiler", closed), closed ? 0.0 : 1.0);
+        // Dispatch synchronously: the download can fail without a core account, but no click
+        // on an already shown photo may start another cover animation, even before its reply.
+        auto click = [&] {
+            QMouseEvent press(QEvent::MouseButtonPress, point, view.viewport()->mapToGlobal(point), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(view.viewport(), &press);
+            QMouseEvent release(QEvent::MouseButtonRelease, point, view.viewport()->mapToGlobal(point), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(view.viewport(), &release);
+        };
+        if (closed) {
+            QCOMPARE(view.conversationPhotos().size(), 0);
+            click();
+            QCOMPARE(view.conversationPhotos().size(), 1);
+        }
+        click();
+        QCOMPARE(view.conversationPhotos().size(), 1);
+        if (!closed) QCOMPARE(view.revealOf("opened-spoiler", false), 1.0);
+        view.setConversation(QString(), false);
+        QCOMPARE(view.revealOf("opened-spoiler", true), 0.0);
+        QVERIFY(view.conversationPhotos().isEmpty());
+    }
+
     void videoViewerReportsErrorAndCloses() {
         QWidget window;
         window.resize(900, 640);

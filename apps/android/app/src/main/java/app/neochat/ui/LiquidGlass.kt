@@ -90,14 +90,11 @@ class BackdropBlur(private val source: BackdropSource, private val blurDp: Float
 }
 
 /**
- * The top of a conversation: no plate, just the history dissolving upward. The content behind is
- * blurred and the blur fades out down the strip, while a scrim of the backdrop colour closes it
- * into the window background at the very top. Older systems get the scrim alone.
+ * Blur the history beneath the conversation header and fade the blur out down the strip.
  */
 class TopFade(ctx: Context, source: BackdropSource) : View(ctx), Themed {
     private val blur = BackdropBlur(source, 18f)
     private val mask = Paint()
-    private val scrim = Paint()
     private val shape = Path()
     private val box = Rect()
 
@@ -123,14 +120,6 @@ class TopFade(ctx: Context, source: BackdropSource) : View(ctx), Themed {
         c.drawRect(0f, 0f, w, h, mask)
         mask.xfermode = null
         c.restore()
-        // …and the backdrop colour closing over it at the very top.
-        val top = Theme.p.bg1
-        scrim.shader = android.graphics.LinearGradient(
-            0f, 0f, 0f, h,
-            intArrayOf((top and 0x00FFFFFF) or 0xEB000000.toInt(), (top and 0x00FFFFFF) or 0x78000000, 0x00000000),
-            floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP,
-        )
-        c.drawRect(0f, 0f, w, h, scrim)
     }
 }
 

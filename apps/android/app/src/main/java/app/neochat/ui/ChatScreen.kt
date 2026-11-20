@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Outline
 import android.graphics.Paint
@@ -346,11 +347,16 @@ private fun hhmm(ms: Long) = SimpleDateFormat("HH:mm", RU).format(Date(ms))
 private fun dayKey(ms: Long) = Calendar.getInstance().run { timeInMillis = ms; get(Calendar.YEAR) * 400 + get(Calendar.DAY_OF_YEAR) }
 
 /** One conversation: header capsule, history, composer. */
-class ChatScreen(private val act: MainActivity, val conversationId: String) : Screen {
+class ChatScreen(
+    private val act: MainActivity,
+    val conversationId: String,
+    initialConversation: JSONObject? = null,
+) : Screen {
     private val accountId = CoreClient.accountId
     private val ctx: Context = act
     private val root = FrameLayout(ctx)
     override val view: View = root
+    override val pageBackground = BackgroundView(ctx)
     private val column = LinearLayout(ctx)
 
     // header
@@ -381,13 +387,25 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     /** What the plates of this screen look through, blurred: the history with the button over it. */
     private val listHolder = BackdropSource(ctx)
-    private val layout = LinearLayoutManager(ctx).apply { stackFromEnd = true }
+    private val layout = object : LinearLayoutManager(ctx) {
+        init { stackFromEnd = true }
+
+        override fun calculateExtraLayoutSpace(state: RecyclerView.State, extra: IntArray) {
+            super.calculateExtraLayoutSpace(state, extra)
+            // The glass must have actual rows to look through, including below the padded
+            // history viewport. Reserve only the visible islands, not the keyboard's height.
+            extra[0] = maxOf(extra[0], list.paddingTop)
+            extra[1] = maxOf(extra[1], composer.height + dp(16))
+        }
+    }
     private val adapter = MessageAdapter()
     private var messages: List<JSONObject> = emptyList()
     private val known = HashSet<String>()
     // Hidden media of this chat: how far each picture is open and the ink of each hidden text.
     // Both live only while the chat is on screen; leaving it closes everything again.
     private val reveals = RevealStore()
+    private val revealTargets = HashMap<String, Boolean>()
+    private val revealRequests = HashMap<String, Int>()
     private val inks = HashMap<String, SpoilerInk>()
     private val openText = HashSet<String>()
     private var loading = false
@@ -397,6 +415,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val jump = IconButton(ctx, R.drawable.ic_down, "В самый низ", glass = true, iconRole = Theme.Role.ACCENT)
     private var jumpShown = false
     private var conv = JSONObject()
+    val inArchive get() = conv.optBoolean("in_archive")
+    val hasBackAction get() = viewer != null || searchOpen || recorder != null
 
     // composer
     private val composer = LinearLayout(ctx)
@@ -439,7 +459,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private val replyName = ctx.label("", 13.5f, 600, Theme.Role.ACCENT)
     private val replyLine = View(ctx)
     private val composerBox = LinearLayout(ctx)
-    private val composerBg = GlassDrawable(ctx, radius = ctx.dpf(31))
+    private val composerBg = GlassDrawable(ctx, radius = ctx.dpf(30))
     private val textSp = Prefs.textSize(ctx)
     private val bigEmoji = Prefs.of(ctx).getBoolean("big_emoji", true)
     private val enterSends = Prefs.of(ctx).getBoolean("enter_send", false)
@@ -457,6 +477,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     init {
         column.orientation = LinearLayout.VERTICAL
+        root.addView(pageBackground, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(listHolder, FrameLayout.LayoutParams(MATCH, MATCH))
+        val topFade = TopFade(ctx, listHolder)
+        root.addView(topFade, FrameLayout.LayoutParams(MATCH, dp(140), Gravity.TOP))
         root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
         buildHeader()
         column.addView(header, lp().apply { setMargins(dp(12), dp(8), dp(12), 0) })
@@ -488,12 +512,27 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             }
         })
         listHolder.addView(list, FrameLayout.LayoutParams(MATCH, MATCH))
-        listHolder.addView(TopFade(ctx, listHolder), FrameLayout.LayoutParams(MATCH, dp(120), Gravity.TOP))
         jump.visibility = View.GONE
         jump.elevation = ctx.dpf(4)
         jump.setOnClickListener { scrollToBottom(true) }
-        listHolder.addView(jump, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, dp(16), dp(12)) })
-        column.addView(listHolder, lp(MATCH, 0, 1f))
+        root.addView(jump, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, dp(16), dp(12)) })
+        // This space reserves the interactive history area; the actual list is behind the islands.
+        val historySpace = View(ctx)
+        column.addView(historySpace, lp(MATCH, 0, 1f))
+        historySpace.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val top = historySpace.top + dp(8)
+            val bottom = (root.height - historySpace.bottom + dp(8)).coerceAtLeast(dp(8))
+            if (list.paddingTop != top || list.paddingBottom != bottom) {
+                val wasBottom = atBottom()
+                list.setPadding(dp(8), top, dp(8), bottom)
+                if (wasBottom) list.post { scrollToBottom(false) }
+            }
+            val fadeHeight = historySpace.top + dp(32)
+            if (topFade.layoutParams.height != fadeHeight) {
+                topFade.layoutParams = (topFade.layoutParams as FrameLayout.LayoutParams).apply { height = fadeHeight }
+            }
+            jump.layoutParams = (jump.layoutParams as FrameLayout.LayoutParams).apply { bottomMargin = bottom + dp(12) }
+        }
 
         buildComposer()
         column.addView(composer, lp().apply { setMargins(dp(10), 0, dp(10), dp(8)) })
@@ -501,7 +540,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         gone.visibility = View.GONE
         column.addView(gone, lp().apply { setMargins(dp(24), dp(8), dp(24), dp(16)) })
 
-        refreshConversation(true)
+        if (initialConversation == null) refreshConversation(true) else applyConversation(initialConversation, true)
         load(false)
     }
 
@@ -511,9 +550,10 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun buildHeader() {
         header.gravity = Gravity.CENTER_VERTICAL
-        // No plate: the controls float on the window backdrop, and the history below dissolves
-        // upward into it through TopFade instead of sliding under a glass capsule.
-        header.background = null
+        // Keep the island, not a rectangular backing behind it. Both frost layers are siblings
+        // of the source, so neither can capture itself while the history scrolls underneath.
+        header.background = GlassDrawable(ctx, radius = ctx.dpf(30))
+        header.frostGlass(listHolder)
         header.setPadding(dp(4), dp(6), dp(4), dp(6))
         val back = IconButton(ctx, R.drawable.ic_back, "Вернуться к чатам")
         back.setOnClickListener { act.closeChat() }
@@ -546,9 +586,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         header.addView(search)
         val more = IconButton(ctx, R.drawable.ic_more, "Меню диалога")
         more.setOnClickListener {
-            PopupMenu(act, more)
-                .add("Сведения") { Dialogs.conversationInfo(act, conversationId) }
-                .add("Поиск в переписке") { if (!searchOpen) toggleSearch() }
+            val menu = PopupMenu(act, more).add("Сведения") { Dialogs.conversationInfo(act, conversationId) }
+            if (conv.optBoolean("can_set_copy_protection")) {
+                menu.add("Копирование") { openCopyProtection() }
+            }
+            menu.add("Поиск в переписке") { if (!searchOpen) toggleSearch() }
                 .add("Очистить чат…") { confirmClearChat(act, conversationId) }
                 .show()
         }
@@ -558,6 +600,71 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
+    }
+
+    private fun copyBlocked(rule: String) = conv.optJSONObject("copy_protection")?.optJSONObject(rule)?.optBoolean("blocked") == true
+    private var copyProtectionUpdated: ((JSONObject) -> Unit)? = null
+
+    private fun openCopyProtection() {
+        if (!conv.optBoolean("can_set_copy_protection") || copyProtectionUpdated != null) return
+        val sheet = Sheet(act, "Копирование")
+        val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        sheet.add(rows)
+        var latest = conv
+        var busy = false
+        fun render(state: JSONObject) {
+            if (state.optLong("copy_protection_revision") < latest.optLong("copy_protection_revision")) return
+            latest = state
+            rows.removeAllViews()
+            val rules = state.optJSONObject("copy_protection") ?: return
+            val actions = mutableListOf<View>()
+            for ((key, title) in listOf("copy" to "Копирование текста и файлов", "forward" to "Пересылка", "screenshot" to "Снимки и запись экрана")) {
+                val rule = rules.optJSONObject(key) ?: continue
+                val blocked = rule.optBoolean("blocked")
+                val mine = rule.optBoolean("mine")
+                val requested = rule.optBoolean("requested")
+                val status = when {
+                    !blocked -> "Разрешено"
+                    mine && requested -> "Запрещено · есть запрос на разрешение"
+                    mine -> "Запрещено вами"
+                    requested -> "Запрещено · запрос отправлен"
+                    else -> "Запрещено участником"
+                }
+                rows.addView(ctx.label(title, 15f, 600), lp().apply { topMargin = dp(12) })
+                rows.addView(ctx.label(status, 13f, role = Theme.Role.MUTED))
+                val action = if (!blocked) "block" else if (mine) "allow" else "request"
+                val buttonTitle = when (action) {
+                    "block" -> "Запретить"
+                    "allow" -> "Разрешить"
+                    else -> "Запросить разрешение"
+                }
+                val button = PillButton(ctx, buttonTitle, primary = false)
+                button.contentDescription = "$title, $buttonTitle"
+                button.isEnabled = !busy && state.optBoolean("can_set_copy_protection") && !(blocked && !mine && requested)
+                if (button.isEnabled) actions += button
+                button.setOnClickListener {
+                    busy = true
+                    actions.forEach { it.isEnabled = false }
+                    val p = JSONObject().put("conversation_id", conversationId).put("rule", key).put("action", action)
+                        .put("revision", state.optLong("copy_protection_revision"))
+                    CoreClient.call("set_copy_protection", p) { v, e ->
+                        busy = false
+                        if (e == null) render(v as JSONObject)
+                        else {
+                            act.toast(e.message)
+                            CoreClient.call("get_conversation", JSONObject().put("conversation_id", conversationId)) { fresh, _ ->
+                                render(fresh as? JSONObject ?: state)
+                            }
+                        }
+                    }
+                }
+                rows.addView(button, lp().apply { topMargin = dp(4) })
+            }
+        }
+        copyProtectionUpdated = ::render
+        sheet.onDismiss = { copyProtectionUpdated = null }
+        render(conv)
+        sheet.show()
     }
 
     /** Microphone first, then the camera for a video call (a refusal still allows a voice call). */
@@ -625,54 +732,68 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private fun refreshConversation(first: Boolean) {
         CoreClient.call("get_conversation", JSONObject().put("conversation_id", conversationId)) { v, e ->
             if (e != null) return@call act.toast(e.message)
-            conv = v as JSONObject
-            title.text = conv.str("title")
-            title.personColor(conv.str("title_color"), Theme.Role.TEXT)
-            avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId }, conv.str("avatar_path"))
-            val members = conv.optJSONArray("members") ?: JSONArray()
-            val channel = conv.str("kind") == "channel"
-            baseSubtitle = when (conv.str("kind")) {
-                "group" -> memberCount(conv.optInt("member_count")) + conv.optInt("online_count").takeIf { it > 0 }?.let { ", $it в сети" }.orEmpty()
-                "channel" -> if (conv.optBoolean("saved")) "Заметки для себя" else memberCount(conv.optInt("member_count"), true)
-                else -> conv.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }
-                    ?: members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
-            }
-            avatar.online = conv.optJSONObject("presence")?.optBoolean("online") == true
-            val system = conv.str("kind") == "system"
-            if (system) baseSubtitle = "Системные сообщения"
-            updateSubtitle()
-            val left = conv.optBoolean("left") || conv.optBoolean("archived") || system
-            val muted = conv.optLong("muted") != 0L
-            val muteComposer = left || muted || !conv.optBoolean("can_post", true)
-            // Calls are one-to-one, through a direct chat the peer can receive in.
-            val callable = conv.str("kind") == "direct" && !left && conv.optBoolean("can_post", true) && conv.str("peer_user_id").isNotEmpty()
-            if (callable) app.neochat.calls.CallManager.warmUp()
-            audioCall.visibility = if (callable) View.VISIBLE else View.GONE
-            videoCall.visibility = if (callable) View.VISIBLE else View.GONE
-            composer.visibility = if (muteComposer) View.GONE else View.VISIBLE
-            gone.visibility = if (muteComposer) View.VISIBLE else View.GONE
-            gone.text = when {
-                system -> "Сюда приходят коды входа и сообщения о новых устройствах"
-                conv.optBoolean("archived") -> if (channel) "Канал в архиве. Новые публикации недоступны" else "Группа в архиве. Новые сообщения недоступны"
-                conv.optBoolean("left") -> if (channel) "Вы вышли из канала" else "Вы вышли из этой группы"
-                muted -> "Вам запретили писать в этой группе"
-                channel -> "Публикуют только владелец и админы канала"
-                else -> "Писать здесь могут только владелец и админы"
-            }
-            if (muteComposer) hideKeyboard()
-            blocked = (conv.optJSONArray("key_changed_users")?.length() ?: 0) > 0 || !conv.optBoolean("can_send", true)
-            updateSend(false)
-            val n = conv.str("notice").takeIf { conv.opt("notice") is String }
-            noticeText.text = n ?: ""
-            noticeAction.visibility = if ((conv.optJSONArray("key_changed_users")?.length() ?: 0) > 0) View.VISIBLE else View.GONE
-            expand(notice, !n.isNullOrEmpty())
-            refreshPins()
-            if (first) {
-                val d = conv.str("draft")
-                if (d.isNotEmpty()) {
-                    edit.setText(d)
-                    edit.setSelection(d.length)
-                }
+            applyConversation(v as JSONObject, first)
+        }
+    }
+
+    private fun applyConversation(incoming: JSONObject, first: Boolean) {
+        if (incoming.optLong("copy_protection_revision") < conv.optLong("copy_protection_revision")) return
+        conv = incoming
+        copyProtectionUpdated?.invoke(conv)
+        updateScreenProtection()
+        edit.protectSelection = editing != null && copyBlocked("copy")
+        title.text = conv.str("title")
+        title.personColor(conv.str("title_color"), Theme.Role.TEXT)
+        avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId }, conv.str("avatar_path"))
+        val members = conv.optJSONArray("members") ?: JSONArray()
+        val channel = conv.str("kind") == "channel"
+        baseSubtitle = when (conv.str("kind")) {
+            "group" -> memberCount(conv.optInt("member_count")) + conv.optInt("online_count").takeIf { it > 0 }?.let { ", $it в сети" }.orEmpty()
+            "channel" -> if (conv.optBoolean("saved")) "Заметки для себя" else memberCount(conv.optInt("member_count"), true)
+            else -> conv.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }
+                ?: members.objects().firstOrNull { !it.optBoolean("me") }?.let { "@" + it.str("username") } ?: ""
+        }
+        avatar.online = conv.optJSONObject("presence")?.optBoolean("online") == true
+        val system = conv.str("kind") == "system"
+        if (system) baseSubtitle = "Системные сообщения"
+        updateSubtitle()
+        val left = conv.optBoolean("left") || conv.optBoolean("archived") || system
+        val muted = conv.optLong("muted") != 0L
+        val muteComposer = left || muted || !conv.optBoolean("can_post", true)
+        // Calls are one-to-one, through a direct chat the peer can receive in.
+        val callable = conv.str("kind") == "direct" && !left && conv.optBoolean("can_post", true) && conv.str("peer_user_id").isNotEmpty()
+        if (callable) app.neochat.calls.CallManager.warmUp()
+        audioCall.visibility = if (callable) View.VISIBLE else View.GONE
+        videoCall.visibility = if (callable) View.VISIBLE else View.GONE
+        composer.visibility = if (muteComposer) View.GONE else View.VISIBLE
+        gone.visibility = if (muteComposer) View.VISIBLE else View.GONE
+        gone.text = when {
+            system -> "Сюда приходят коды входа и сообщения о новых устройствах"
+            conv.optBoolean("archived") -> if (channel) "Канал в архиве. Новые публикации недоступны" else "Группа в архиве. Новые сообщения недоступны"
+            conv.optBoolean("left") -> if (channel) "Вы вышли из канала" else "Вы вышли из этой группы"
+            muted -> "Вам запретили писать в этой группе"
+            channel -> "Публикуют только владелец и админы канала"
+            else -> "Писать здесь могут только владелец и админы"
+        }
+        if (muteComposer) hideKeyboard()
+        blocked = (conv.optJSONArray("key_changed_users")?.length() ?: 0) > 0 || !conv.optBoolean("can_send", true)
+        updateSend(false)
+        val n = conv.str("notice").takeIf { conv.opt("notice") is String }
+        noticeText.text = n ?: ""
+        val keyChanged = (conv.optJSONArray("key_changed_users")?.length() ?: 0) > 0
+        val copyRequest = conv.optBoolean("copy_permission_requested")
+        noticeAction.visibility = if (keyChanged || copyRequest) View.VISIBLE else View.GONE
+        noticeAction.text = if (!keyChanged && copyRequest) "Копирование" else "Сверить код"
+        noticeAction.setOnClickListener {
+            if (!keyChanged && copyRequest) openCopyProtection() else Dialogs.conversationInfo(act, conversationId)
+        }
+        expand(notice, !n.isNullOrEmpty())
+        refreshPins()
+        if (first) {
+            val d = conv.str("draft")
+            if (d.isNotEmpty()) {
+                edit.setText(d)
+                edit.setSelection(d.length)
             }
         }
     }
@@ -680,7 +801,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     /** "печатает…" wins over presence and the member count for a few seconds. */
     private fun updateSubtitle() {
         val typing = Typing.text(conversationId, conv.str("kind") != "direct")
-        subtitle.text = typing ?: baseSubtitle
+        val streak = conv.optInt("streak")
+        subtitle.text = if (streak > 0) "🔥 $streak · ${typing ?: baseSubtitle}" else typing ?: baseSubtitle
         subtitle.role(if (typing != null || avatar.online) Theme.Role.ACCENT else Theme.Role.MUTED)
     }
 
@@ -920,9 +1042,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     // ---- a message leaving ----
 
     /**
-     * The farewell of a deleted message. The list animator owns the row: it fades, drifts to its
-     * own side and shrinks a little while the rows below glide up — the layout is never touched
-     * by hand, so the history cannot jump. Dust is drawn over the place the row leaves.
+     * The list animator alone owns removal: the row fades while neighbouring rows move.
+     * Dust is drawn over the departing row without changing its layout by hand.
      */
     private inner class DepartAnimator : androidx.recyclerview.widget.DefaultItemAnimator() {
         init {
@@ -933,27 +1054,13 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         }
 
         override fun animateRemove(holder: RecyclerView.ViewHolder): Boolean {
-            val v = holder.itemView
-            val out = (holder as? MessageHolder)?.row?.message?.optBoolean("outgoing") == true
-            dustAt(v)
-            // The base animator owns the fade and the RecyclerView bookkeeping, and puts alpha
-            // and translation back to neutral when it ends; bypassing or cancelling it leaves
-            // tmp-detached rows that crash the next layout. Scale and drift ride along on their
-            // own animator, over properties the base one does not touch.
-            val started = super.animateRemove(holder)
-            if (started && !Theme.reducedMotion) {
-                android.animation.ObjectAnimator.ofPropertyValuesHolder(
-                    v,
-                    android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X, 0.92f),
-                    android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y, 0.92f),
-                    android.animation.PropertyValuesHolder.ofFloat(View.TRANSLATION_X, if (out) ctx.dpf(28) else -ctx.dpf(28)),
-                ).apply {
-                    duration = removeDuration
-                    interpolator = Theme.surfaceCurve
-                    start()
-                }
-            }
-            return started
+            dustAt(holder.itemView)
+            // One owner for the row's alpha/translation and completion bookkeeping. A separate
+            // property animator would survive recycling or race the base move animation.
+            removeDuration = Theme.ms(300).toLong()
+            moveDuration = Theme.ms(280).toLong()
+            addDuration = Theme.ms(240).toLong()
+            return super.animateRemove(holder)
         }
     }
 
@@ -962,7 +1069,9 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         if (Theme.reducedMotion) return
         val r = android.graphics.Rect()
         if (!v.getGlobalVisibleRect(r)) return
-        listHolder.offsetDescendantRectToMyCoords(v, r)
+        val location = IntArray(2)
+        listHolder.getLocationOnScreen(location)
+        r.offset(-location[0], -location[1])
         val box = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
         val id = (v as? SwipeToReplyLayout)?.let { (it.getChildAt(1) as? BubbleRow)?.message?.str("id") }.orEmpty()
         listHolder.addView(DustBurst(ctx, box, id.hashCode()), flp(MATCH, MATCH))
@@ -1081,15 +1190,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val item = it as Item
             holder.swipe.reset()
             holder.row.bind(item)
-            val appear = holder.itemView
             val id = item.m.str("id")
-            // The list animator owns the row's fade and drift and restores them when it ends;
-            // cancelling it from a rebind crashes RecyclerView on tmp-detached rows. Only the
-            // scale and drift of our own farewell animator are put back here, plus the inner
-            // view, which the list animator never touches.
-            appear.scaleX = 1f
-            appear.scaleY = 1f
-            appear.translationX = 0f
+            // Only animate the inner row here; RecyclerView owns the holder's properties.
             val row = holder.row
             row.stopSprings(Prop.Y, Prop.SCALE)
             row.animate().cancel()
@@ -1300,6 +1402,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             photo.contentDescription = "Фото"
             photo.isClickable = true
             photo.setOnClickListener { tapMedia(m) }
+            // The cover melts from wherever the finger landed, not from the middle.
+            photo.setOnTouchListener { v, e ->
+                if (e.action == MotionEvent.ACTION_UP) photo.setOrigin(e.x / v.width.coerceAtLeast(1), e.y / v.height.coerceAtLeast(1))
+                false
+            }
             photo.setOnLongClickListener { menu(m, bubble); true }
             fileIcon.setOnClickListener { openFile(m) }
             fileAction.setOnClickListener { openFile(m) }
@@ -1357,7 +1464,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             text.setLineSpacing(0f, 1.2f)
             text.setOnLongClickListener { menu(m, bubble); true }
             text.setOnClickListener { tap { menu(m, bubble) } }
-            text.setOnTouchListener { v, e -> openLinkAt(v as TextView, e) || hiddenTextAt(v as MessageText, e) }
+            text.setOnTouchListener { v, e -> hiddenTextAt(v as MessageText, e) || openLinkAt(v, e) }
             pollQuestion.maxWidth = maxText
             bubble.addView(emojiRow, LayoutParams(WRAP, WRAP))
             bubble.addView(text, LayoutParams(WRAP, WRAP))
@@ -1396,6 +1503,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         fun bind(item: Item) {
             if (item.m.str("id") != m.str("id")) pendingTap?.let { removeCallbacks(it); pendingTap = null }
             m = item.m
+            photo.bindMessage(m.str("id"))
             val out = m.optBoolean("outgoing")
             val group = conv.str("kind") == "group"
             val kind = m.str("kind")
@@ -1502,15 +1610,17 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 photo.hidden = false
                 photo.onReveal = null
                 photo.note = when {
-                    once && seen -> if (shot) "Скриншот сделан · Просмотрено" else "Просмотрено"
+                    once && seen -> if (shot) "Скриншот сделан · Удалено" else "Удалено"
+                    once && f.optLong("ttl_ms") > 0 -> if (video) "Видео · таймер" else "Фото · таймер"
                     once -> if (video) "Видео" else "Фото"
                     else -> ""
                 }
                 photo.contentDescription = when {
-                    once && seen -> "Одноразовое $noun, просмотрено" + if (shot) ", был сделан скриншот" else ""
+                    once && seen -> "$noun удалено после просмотра" + if (shot) ", был сделан скриншот" else ""
+                    once && f.optLong("ttl_ms") > 0 -> "Самоудаляющееся $noun. Таймер запустится после открытия"
                     once -> "Одноразовое $noun. Нажмите, чтобы посмотреть один раз"
                     hiddenMark && closed -> "${if (video) "Видео" else "Фото"} скрыто. Нажмите, чтобы показать"
-                    hiddenMark -> "${if (video) "Видео" else "Фото"} показано. Нажмите, чтобы скрыть"
+                    hiddenMark -> "${if (video) "Видео" else "Фото"} показано. Нажмите, чтобы открыть в просмотрщике"
                     else -> if (video) "Видео" + if (length.isEmpty()) "" else ", $length" else "Фото"
                 }
                 when {
@@ -1528,7 +1638,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                         val cached = Photos.full.get(id)
                         photo.setImageBitmap(cached ?: Photos.thumb(m))
                         photo.hidden = true
-                        photo.bindReveal(reveals.of(id, closed), if (closed) 0f else 1f)
+                        photo.bindReveal(reveals.of(id, closed), if (revealTargets[id] ?: !closed) 1f else 0f)
                         if (!closed && cached == null) Photos.load(m) { bmp -> if (m.str("id") == id) photo.setImageBitmap(bmp) }
                     }
                     video -> {
@@ -1800,55 +1910,111 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private var viewerStop: (() -> Unit)? = null
     // A view-once file is watched behind FLAG_SECURE; this holds its id until the viewer closes.
     private var viewerOnce: String? = null
-    private var guarding = false
-    private var guardedByUser = false
+    private var viewerTimed = false
+    private var viewerTicker: Runnable? = null
+    private val viewerTimerHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var closingOnce = false
 
-    /**
-     * Keeps screenshots, screen recording and the recents preview away from the window while a
-     * view-once file is on the screen. The user's own «secure screen» setting is restored as it was.
-     */
-    private fun guardScreen(on: Boolean) {
-        if (on == guarding) return
-        if (on) {
-            guardedByUser = act.window.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0
-            act.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-        } else if (!guardedByUser) {
-            act.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+    /** An opened timed photo/video keeps its fixed deadline even after leaving the viewer. */
+    private fun startMediaCountdown(message: JSONObject, container: FrameLayout) {
+        val id = message.str("id")
+        val ttl = message.optJSONObject("file")?.optLong("ttl_ms") ?: 0L
+        if (ttl <= 0 || viewer !== container || viewerOnce != id || viewerTicker != null) return
+        val badge = LinearLayout(ctx).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(14), dp(8))
+            background = GradientDrawable().apply {
+                setColor(0xc8081424.toInt())
+                cornerRadius = ctx.dpf(20)
+            }
         }
-        guarding = on
+        val clock = ImageView(ctx).apply {
+            setImageResource(R.drawable.ic_clock)
+            imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+        }
+        badge.addView(clock, lp(dp(18), dp(18)))
+        val label = TextView(ctx).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = weightFace(600)
+        }
+        badge.addView(label, lp(WRAP, WRAP).apply { marginStart = dp(6) })
+        container.addView(badge, flp(WRAP, WRAP, Gravity.TOP or Gravity.START).apply {
+            setMargins(dp(12), column.paddingTop + dp(10), 0, 0)
+        })
+        CoreClient.call("media_timer_start", JSONObject().put("_account_id", accountId)
+            .put("message_id", id)) { result, error ->
+            if (viewer !== container) return@call
+            if (error != null) {
+                act.toast(error.message)
+                closeViewer()
+                return@call
+            }
+            val deadline = (result as JSONObject).optLong("expires_at")
+            if (deadline <= 0) return@call closeViewer()
+            val ticker = object : Runnable {
+                override fun run() {
+                    if (viewer !== container || viewerOnce != id) return
+                    val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(0)
+                    label.text = if (remaining >= 60_000) "%02d:%02d".format(remaining / 60_000, (remaining / 1000) % 60)
+                        else "%.1f с".format(java.util.Locale.US, remaining / 1000.0)
+                    badge.contentDescription = "Удаление через ${label.text}"
+                    if (remaining == 0L) {
+                        // The core physically destroys the encrypted and plaintext copies.
+                        CoreClient.call("media_viewed", JSONObject().put("_account_id", accountId)
+                            .put("message_id", id)) { _, _ -> }
+                        closeViewer()
+                    } else viewerTimerHandler.postDelayed(this, 100)
+                }
+            }
+            viewerTicker = ticker
+            viewerTimerHandler.post(ticker)
+        }
     }
 
-    /** A tap on a picture: a hidden one opens or closes right here, anything else goes to the viewer. */
+    private fun updateScreenProtection() {
+        if (shown) act.protectChat(root, conv.length() == 0 || copyBlocked("screenshot") || viewerOnce != null || closingOnce)
+    }
+
+    /** First tap reveals a hidden picture here; later taps open the viewer until the chat is left. */
     private fun tapMedia(m: JSONObject) {
         when {
             isViewed(m) -> act.toast(if (m.optJSONObject("file")?.optBoolean("shot") == true) "Скриншот сделан · Просмотрено" else "Просмотрено")
-            isHiddenMedia(m) -> toggleHidden(m)
+            isOnce(m) -> openNow(m)
+            isHiddenMedia(m) && !isMediaRevealed(m) -> revealHidden(m)
             else -> openNow(m)
         }
     }
 
+    private fun isMediaRevealed(m: JSONObject): Boolean = revealTargets[m.str("id")] ?: !isSpoiler(m)
+
     /** The menu's way in: a hidden picture is opened here first and then shown full screen. */
     private fun openMedia(m: JSONObject) {
         if (isViewed(m)) return act.toast(if (m.optJSONObject("file")?.optBoolean("shot") == true) "Скриншот сделан · Просмотрено" else "Просмотрено")
-        if (isHiddenMedia(m) && isSpoiler(m)) toggleHidden(m)
+        if (!isOnce(m) && isHiddenMedia(m) && !isMediaRevealed(m)) revealHidden(m)
         openNow(m)
     }
 
-    /**
-     * Opens or closes the cover of a hidden picture without leaving the chat. The motion starts
-     * at once; the core writes the mark and the rebind that follows carries the same motion on.
-     */
-    private fun toggleHidden(m: JSONObject) {
+    /** Reveal once per chat visit. A second tap, even before the core replies, opens the viewer. */
+    private fun revealHidden(m: JSONObject) {
+        if (isOnce(m) || isMediaRevealed(m)) return
         val id = m.str("id")
-        val closed = isSpoiler(m)
+        val request = (revealRequests[id] ?: 0) + 1
+        revealRequests[id] = request
+        revealTargets[id] = true
         Haptics.tick(root)
-        rowOf(id)?.animateReveal(if (closed) 1f else 0f)
-        // The original is fetched while the cover melts, so the reveal ends on a sharp picture.
-        if (closed) Photos.load(m) { bmp -> rowOf(id)?.showFull(bmp) }
-        CoreClient.call("media_shown", JSONObject().put("_account_id", accountId).put("message_id", id).put("on", closed)) { _, e ->
-            if (e == null) return@call
+        rowOf(id)?.animateReveal(1f)
+        Photos.load(m) { bmp -> rowOf(id)?.showFull(bmp) }
+        CoreClient.call("media_shown", JSONObject().put("_account_id", accountId).put("message_id", id).put("on", true)) { _, e ->
+            // A slow reveal write must not reopen the cover after burn_viewed already ran.
+            if (!shown) {
+                if (e == null) CoreClient.call("burn_viewed", JSONObject().put("_account_id", accountId).put("conversation_id", conversationId))
+                return@call
+            }
+            if (e == null || revealRequests[id] != request) return@call
             act.toast(e.message)
-            rowOf(id)?.animateReveal(if (closed) 0f else 1f)
+            revealTargets[id] = false
+            rowOf(id)?.animateReveal(0f)
         }
     }
 
@@ -1874,7 +2040,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     /** Opens the photo among all pictures of the chat; swiping left and right moves between them. */
     private fun openPhoto(m: JSONObject) {
         // A view-once file never joins the album, and neither does a picture still under its cover.
-        val photos = messages.filter { isImage(it) && !isOnce(it) && !(isHiddenMedia(it) && isSpoiler(it)) }
+        val photos = messages.filter { isImage(it) && !isOnce(it) && !(isHiddenMedia(it) && !isMediaRevealed(it)) }
         val at = photos.indexOfFirst { it.str("id") == m.str("id") }
         if (at < 0) showViewer(listOf(m), 0) else showViewer(photos, at)
     }
@@ -1889,7 +2055,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         hideKeyboard()
         val shown = photos.getOrElse(start) { photos.first() }
         viewerOnce = if (isOnce(shown)) shown.str("id") else null
-        guardScreen(viewerOnce != null)
+        viewerTimed = shown.optJSONObject("file")?.optLong("ttl_ms", 0L)?.let { it > 0 } == true
+        updateScreenProtection()
         val v = FrameLayout(ctx)
         v.setBackgroundColor(0xF2040914.toInt())
         v.isClickable = true
@@ -1915,14 +2082,22 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 h.id = id
                 h.img.reset()
                 h.img.setImageBitmap(Photos.full.get(id) ?: Photos.thumb(m))
-                if (Photos.full.get(id) != null) return
+                if (Photos.full.get(id) != null) {
+                    if (pos == start) v.post { startMediaCountdown(m, v) }
+                    return
+                }
                 CoreClient.call("download_file", JSONObject().put("message_id", id)) { r, e ->
                     if (e != null) return@call if (pos == start) act.toast("Не удалось открыть фото") else Unit
                     val path = (r as JSONObject).str("path")
                     val side = maxOf(ctx.resources.displayMetrics.widthPixels, ctx.resources.displayMetrics.heightPixels)
                     Thread {
                         val bmp = Photos.decode(path, side)
-                        act.runOnUiThread { if (bmp != null && h.id == id) h.img.setImageBitmap(bmp) }
+                        act.runOnUiThread {
+                            if (bmp != null && h.id == id) {
+                                h.img.setImageBitmap(bmp)
+                                if (pos == start) startMediaCountdown(m, v)
+                            }
+                        }
                     }.start()
                 }
             }
@@ -1939,7 +2114,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             counter.text = "${pos + 1} из ${photos.size}"
             val where = if (photos.size > 1) " ${pos + 1} из ${photos.size}" else ""
             val swipe = if (photos.size > 1) "Листайте влево и вправо, двойное касание увеличивает, " else ""
-            val once = if (viewerOnce == null) "" else " Это фото смотрят один раз: после закрытия оно исчезнет."
+            val once = when {
+                viewerOnce == null -> ""
+                viewerTimed -> " Это фото удалится по таймеру после первого открытия."
+                else -> " Это фото смотрят один раз: после закрытия оно исчезнет."
+            }
             v.contentDescription = "Просмотр фото$where. ${swipe}Нажмите, чтобы закрыть.$once"
         }
         describe(start)
@@ -1964,17 +2143,25 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         viewerStop?.invoke()
         viewerStop = null
         val once = viewerOnce
+        val timed = viewerTimed
         viewerOnce = null
-        guardScreen(false)
+        viewerTimed = false
+        viewerTicker?.let { tick -> viewerTimerHandler.removeCallbacks(tick) }
+        viewerTicker = null
+        closingOnce = once != null
         if (once != null) {
             // It has been seen: the core destroys both copies here and tells the other devices.
             Photos.forget(once)
-            CoreClient.call("media_viewed", JSONObject().put("_account_id", accountId).put("message_id", once)) { _, e ->
+            if (!timed) CoreClient.call("media_viewed", JSONObject().put("_account_id", accountId).put("message_id", once)) { _, e ->
                 if (e != null) act.toast(e.message)
             }
         }
         v.animate().cancel()
-        v.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction { root.removeView(v) }.start()
+        v.animate().alpha(0f).setDuration(Theme.ms(180)).withEndAction {
+            root.removeView(v)
+            if (once != null) closingOnce = false
+            updateScreenProtection()
+        }.start()
     }
 
     /** Fetches and decrypts the video, then plays it over the chat. */
@@ -1992,7 +2179,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         closeViewer()
         hideKeyboard()
         viewerOnce = if (isOnce(m)) m.str("id") else null
-        guardScreen(viewerOnce != null)
+        viewerTimed = m.optJSONObject("file")?.optLong("ttl_ms", 0L)?.let { it > 0 } == true
+        updateScreenProtection()
         val v = FrameLayout(ctx)
         v.setBackgroundColor(0xF2040914.toInt())
         v.isClickable = true
@@ -2064,6 +2252,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             length = mp.duration
             seek.max = length
             player.start()
+            startMediaCountdown(m, v)
             handler.post(tick)
         }
         player.setOnCompletionListener {
@@ -2176,9 +2365,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         val ok = m.str("kind") != "undecryptable"
         val gone = composer.visibility != View.VISIBLE
         if (ok && !gone && m.str("kind") != "call") pm.add("Ответить") { setReply(m) }
-        if (ok && m.str("text").isNotEmpty()) pm.add("Копировать текст") {
-            ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("NeoChat", m.str("text")))
-            if (android.os.Build.VERSION.SDK_INT < 33) act.toast("Текст скопирован")
+        if (ok && !copyBlocked("copy") && m.str("text").isNotEmpty()) pm.add("Копировать текст") {
+            if (!copyBlocked("copy")) {
+                ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("NeoChat", m.str("text")))
+                if (android.os.Build.VERSION.SDK_INT < 33) act.toast("Текст скопирован")
+            }
         }
         if (isImage(m) || isVideo(m)) pm.add(if (isVideo(m)) "Открыть видео" else "Открыть фото") { openMedia(m) }
         val postable = ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll")
@@ -2188,7 +2379,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 CoreClient.call("pin_message", JSONObject().put("message_id", m.str("id")).put("on", on)) { _, e -> if (e != null) act.toast(e.message) }
             }
         }
-        if (postable && !conv.optBoolean("saved") && !isOnce(m)) pm.add("В избранное") { savedCopy(m) }
+        if (postable && !conv.optBoolean("saved") && !isOnce(m) && !copyBlocked("forward") && !copyBlocked("copy")) pm.add("В избранное") { savedCopy(m) }
         if (!gone && m.optBoolean("outgoing") && m.str("status") in setOf("sent", "delivered", "read") && m.str("kind") in setOf("text", "file") && !isVoice(m) && !isCircle(m))
             pm.add("Изменить") { setEdit(m) }
         if (m.str("kind") == "poll" && m.optBoolean("outgoing") && m.optJSONObject("poll")?.optBoolean("closed") != true) pm.add("Завершить опрос") {
@@ -2199,12 +2390,12 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             else pm.add("Расшифровать") { Transcription.request(act, m) }
         }
         // A view-once file is never handed to another app and never kept; the core refuses it too.
-        if (m.str("kind") == "file" && !isOnce(m)) {
+        if (m.str("kind") == "file" && !isOnce(m) && !copyBlocked("copy")) {
             pm.add("Открыть файл") { openFile(m) }
             pm.add("Сохранить как…") { saveFile(m) }
         }
         if (m.str("status") == "failed") pm.add("Повторить отправку") { retry(m) }
-        if (ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll") && !isOnce(m))
+        if (ok && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll") && !isOnce(m) && !copyBlocked("forward"))
             pm.add("Переслать") { Dialogs.forward(act, listOf(m)) }
         if (m.optBoolean("outgoing") && m.str("status") != "failed" && m.str("kind") in setOf("text", "file", "poll"))
             pm.add("Удалить у всех", danger = true) {
@@ -2233,9 +2424,11 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     private fun openFile(m: JSONObject) {
+        if (copyBlocked("copy")) return
         act.toast("Расшифровываем файл…")
-        CoreClient.call("download_file", JSONObject().put("message_id", m.str("id"))) { v, e ->
+        CoreClient.call("download_file", JSONObject().put("message_id", m.str("id")).put("external", true)) { v, e ->
             if (e != null) return@call act.toast(e.message)
+            if (copyBlocked("copy")) return@call
             val path = (v as JSONObject).str("path")
             val f = m.optJSONObject("file") ?: JSONObject()
             val uri = FilesProvider.uriFor(ctx, File(path))
@@ -2250,6 +2443,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     private fun saveFile(m: JSONObject) {
+        if (copyBlocked("copy")) return
         val f = m.optJSONObject("file") ?: return
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
             .setType(f.str("mime").ifEmpty { "application/octet-stream" })
@@ -2257,8 +2451,9 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         act.startForResult(intent) { code, data ->
             val dest = data?.data
             if (code != Activity.RESULT_OK || dest == null) return@startForResult
-            CoreClient.call("download_file", JSONObject().put("message_id", m.str("id"))) { v, e ->
+            CoreClient.call("download_file", JSONObject().put("message_id", m.str("id")).put("external", true)) { v, e ->
                 if (e != null) return@call act.toast(e.message)
+                if (copyBlocked("copy")) return@call
                 val src = File((v as JSONObject).str("path"))
                 Thread {
                     val ok = runCatching {
@@ -2450,6 +2645,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private fun setEdit(m: JSONObject) {
         if (editing == null) savedDraft = edit.text.toString()
         editing = m
+        edit.protectSelection = copyBlocked("copy")
         replyTo = null
         composerBg.radius = ctx.dpf(24)
         composerBox.invalidate()
@@ -2470,6 +2666,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private fun leaveEdit() {
         if (editing == null) return
         editing = null
+        edit.protectSelection = false
         edit.setText(savedDraft)
         savedDraft = ""
         cancelReply?.contentDescription = "Отменить ответ"
@@ -2477,7 +2674,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     private fun cancelEdit() {
         leaveEdit()
-        composerBg.radius = ctx.dpf(31)
+        composerBg.radius = ctx.dpf(30)
         composerBox.invalidate()
         expand(replyBar, false)
         updateSend(true)
@@ -2486,7 +2683,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     private fun setReply(m: JSONObject?) {
         leaveEdit()
         replyTo = m
-        composerBg.radius = ctx.dpf(if (m != null) 24 else 31)
+        composerBg.radius = ctx.dpf(if (m != null) 24 else 30)
         composerBox.invalidate()
         (replyLine.background as GradientDrawable).setColor(Theme.p.accent)
         if (m != null) {
@@ -2684,8 +2881,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             photos && picks.all { it.image } -> Kind.PHOTO
             else -> Kind.FILE
         }
-        AttachSheet(act, picks, media, { added -> pickUris(again) { added(it) } }) { chosen, asPhotos, caption, hidden, oneTime ->
-            chosen.forEachIndexed { n, p -> sendPick(p, asPhotos, if (n == 0) caption else "", hidden, oneTime) }
+        AttachSheet(act, picks, media, { added -> pickUris(again) { added(it) } }) { chosen, asPhotos, caption, hidden, deletionMs ->
+            chosen.forEachIndexed { n, p -> sendPick(p, asPhotos, if (n == 0) caption else "", hidden, deletionMs) }
         }.show()
     }
 
@@ -2696,7 +2893,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
     }
 
     /** Copies the picked document to app storage, hands it to the core, then removes the copy. */
-    private fun sendPick(p: Pick, photo: Boolean, caption: String, hidden: Boolean = false, oneTime: Boolean = false) {
+    private fun sendPick(p: Pick, photo: Boolean, caption: String, hidden: Boolean = false, deletionMs: Long = 0) {
         val cr = ctx.contentResolver
         Thread {
             val dir = File(ctx.cacheDir, "outgoing").apply { mkdirs() }
@@ -2708,14 +2905,14 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                     tmp.delete()
                     return@runOnUiThread act.toast("Не удалось прочитать файл")
                 }
-                if (photo && p.video) return@runOnUiThread shrinkAndSend(tmp, p, caption, hidden, oneTime)
-                dispatchFile(tmp, p.mime, p.name, thumb, caption, null, hidden, oneTime)
+                if (photo && p.video) return@runOnUiThread shrinkAndSend(tmp, p, caption, hidden, deletionMs)
+                dispatchFile(tmp, p.mime, p.name, thumb, caption, null, hidden, deletionMs)
             }
         }.start()
     }
 
     /** A video sent as video is shrunk to H.264 + AAC when that is needed to fit the limit or to spare the traffic. */
-    private fun shrinkAndSend(tmp: File, p: Pick, caption: String, hidden: Boolean, oneTime: Boolean) {
+    private fun shrinkAndSend(tmp: File, p: Pick, caption: String, hidden: Boolean, deletionMs: Long) {
         var shown = -10
         VideoCompress.run(ctx, tmp, tmp.parentFile!!, onProgress = { pct ->
             if (pct - shown >= 10 || pct == 100) {
@@ -2738,19 +2935,20 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
             val mime = if (r.file != null) "video/mp4" else p.mime
             Thread {
                 val clip = Videos.info(out.absolutePath)
-                act.runOnUiThread { dispatchFile(out, mime, name, null, caption, clip, hidden, oneTime) }
+                act.runOnUiThread { dispatchFile(out, mime, name, null, caption, clip, hidden, deletionMs) }
             }.start()
         }
     }
 
     /** Hands a prepared file to the core and removes it afterwards. */
-    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?, caption: String = "", clip: VideoInfo? = null, hidden: Boolean = false, oneTime: Boolean = false) {
+    private fun dispatchFile(tmp: File, mime: String, name: String, thumb: Triple<String, Int, Int>?, caption: String = "", clip: VideoInfo? = null, hidden: Boolean = false, deletionMs: Long = 0) {
         if (accountId != CoreClient.accountId) { tmp.delete(); return }
         val p = JSONObject().put("_account_id", accountId).put("conversation_id", conversationId).put("path", tmp.absolutePath).put("mime", mime).put("name", name)
         if (caption.isNotEmpty()) p.put("caption", caption)
         // The core applies both marks to photos and videos only and keeps the poster off a view-once file.
         if (hidden) p.put("spoiler", true)
-        if (oneTime) p.put("once", true)
+        if (deletionMs == -1L) p.put("once", true)
+        else if (deletionMs > 0) p.put("ttl_ms", deletionMs)
         if (thumb != null) p.put("thumb", thumb.first).put("width", thumb.second).put("height", thumb.third)
         if (clip != null) {
             clip.thumb?.let { p.put("thumb", it) }
@@ -2813,6 +3011,7 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
 
     override fun onShown() {
         shown = true
+        updateScreenProtection()
         Notifier.visibleConversation = conversationId
         list.post { markRead() }
         Typing.listeners += typingChanged
@@ -2831,6 +3030,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
         saveDraft()
         // Leaving the chat is the last chance: whatever of a view-once file is still here goes now,
         // and every hidden picture and hidden text of this chat closes again.
+        revealTargets.clear()
+        revealRequests.clear()
         reveals.clear()
         inks.clear()
         openText.clear()
@@ -2857,7 +3058,8 @@ class ChatScreen(private val act: MainActivity, val conversationId: String) : Sc
                 root.removeCallbacks(reload)
                 root.postDelayed(reload, 60)
             }
-            "sync_reset" -> {
+            "streak_changed" -> if (ev.str("conversation_id") == conversationId) refreshConversation(false)
+            "sync_reset", "history_restored" -> {
                 root.removeCallbacks(reload)
                 root.postDelayed(reload, 60)
                 refreshConversation(false)

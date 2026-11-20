@@ -313,8 +313,8 @@ object Theme {
         }
     }
 
-    fun apply() {
-        root?.let { walk(it) }
+    fun apply(view: View? = root) {
+        view?.let { walk(it) }
         onModeApplied?.invoke(p.dark)
     }
 
