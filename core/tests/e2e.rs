@@ -531,8 +531,11 @@ fn linked_device_and_recovery() {
     alice.call("send_text", json!({"conversation_id": cid, "text": "снова привет"}));
     alice.sync();
     bob2.sync();
-    // History is not restored on the recovered device; only the new message arrives.
-    assert_eq!(bob2.texts(&cid), vec!["снова привет"]);
+    // The encrypted backup may already have restored earlier messages on the
+    // recovered device. New traffic must arrive, but the rejected unsafe probe must not.
+    let received = bob2.texts(&cid);
+    assert_eq!(received.last().map(String::as_str), Some("снова привет"));
+    assert!(!received.iter().any(|text| text == "кто ты?"));
     // The old device is revoked.
     assert!(bob.try_call("sync_now", json!({})).is_err() || !bob.call("status", json!({}))["logged_in"].as_bool().unwrap());
 }
