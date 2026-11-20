@@ -27,8 +27,8 @@ android {
         minSdk = 26
         targetSdk = 35
         testInstrumentationRunner = "app.neochat.ui.InteractionInstrumentation"
-        versionCode = 75
-        versionName = "0.7.6.5"
+        versionCode = 76
+        versionName = "0.7.6.6"
         buildConfigField("boolean", "NEOCHAT_DISABLE_ALPHA", disableAlphaUpdates.toString())
     }
 

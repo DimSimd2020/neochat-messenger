@@ -171,7 +171,7 @@ internal object OrganizationBadges {
             if (image == null && badge.icon.isNotEmpty()) requestIcon(badge.icon)
             val drawable = if (image != null) BitmapDrawable(view.resources, image) else
                 view.context.getDrawable(R.drawable.ic_people)?.mutate()?.apply { setTint(Theme.p.accent) } ?: continue
-            val size = view.context.dp(16)
+            val size = view.context.dp(22)
             drawable.setBounds(0, 0, size, size)
             text.append("\u00A0\uFFFC")
             text.setSpan(IconSpan(drawable, badge.name), text.length - 1, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
