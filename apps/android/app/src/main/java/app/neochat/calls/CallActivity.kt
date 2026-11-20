@@ -31,6 +31,7 @@ import app.neochat.ui.dp
 import app.neochat.ui.dpf
 import app.neochat.ui.flp
 import app.neochat.ui.lp
+import app.neochat.ui.organizationName
 import app.neochat.ui.str
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
@@ -261,8 +262,8 @@ class CallActivity : Activity() {
         val call = CallManager.call
         val peer = call.str("peer_name")
         avatar.set(peer, call.str("peer_user_id"), call.str("avatar_path"))
-        name.text = peer
-        topName.text = peer
+        name.organizationName(peer, call.str("peer_user_id"))
+        topName.organizationName(peer, call.str("peer_user_id"))
         val st = statusText()
         status.text = st
         topStatus.text = st

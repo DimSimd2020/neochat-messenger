@@ -98,7 +98,7 @@ fun bindChatRow(act: MainActivity, row: ListRow, c: JSONObject) {
     val title = c.str("title")
     row.avatar.set(title, c.str("peer_user_id").ifEmpty { c.str("id") }, c.str("avatar_path"))
     row.avatar.online = c.optJSONObject("presence")?.optBoolean("online") == true
-    row.title.text = title
+    row.title.organizationName(title, c.str("peer_user_id"))
     row.title.personColor(c.str("title_color"), Theme.Role.TEXT)
     row.groupIcon.visibility = if (c.str("kind") == "group") View.VISIBLE else View.GONE
     val streak = c.optInt("streak")
@@ -197,8 +197,9 @@ class ChatSwipe(
     }
 
     override fun onMove(rv: RecyclerView, a: RecyclerView.ViewHolder, b: RecyclerView.ViewHolder) = false
-    override fun getSwipeThreshold(vh: RecyclerView.ViewHolder) = 0.33f
-    override fun getSwipeEscapeVelocity(defaultValue: Float) = defaultValue * 4
+    override fun getSwipeThreshold(vh: RecyclerView.ViewHolder) = 0.5f
+    // Require the distance threshold even for a fast flick.
+    override fun getSwipeEscapeVelocity(defaultValue: Float) = Float.POSITIVE_INFINITY
 
     override fun onSwiped(vh: RecyclerView.ViewHolder, direction: Int) {
         val pos = vh.bindingAdapterPosition
@@ -227,7 +228,7 @@ class ChatSwipe(
     override fun onChildDraw(c: Canvas, rv: RecyclerView, vh: RecyclerView.ViewHolder, dx: Float, dy: Float, state: Int, active: Boolean) {
         val v = vh.itemView
         if (active) {
-            val past = kotlin.math.abs(dx) >= v.width * getSwipeThreshold(vh)
+            val past = kotlin.math.abs(dx) > rv.width * getSwipeThreshold(vh)
             if (past && armed !== vh) Haptics.threshold(v)
             armed = if (past) vh else if (armed === vh) null else armed
         }

@@ -134,6 +134,13 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/users/{id}/bundles", s.authed(s.handleClaimBundles))
 
 	m.HandleFunc("GET /v1/conversations", s.authed(s.handleListConversations))
+	m.HandleFunc("GET /v1/organizations", s.authed(s.handleOrganizations))
+	m.HandleFunc("GET /v1/organizations/{id}/members", s.authed(s.handleOrganizationMembers))
+	m.HandleFunc("POST /v1/organizations/{id}", s.authed(s.handleOrganizationUpdate))
+	m.HandleFunc("GET /v1/users/{user}/organization-badges", s.authed(s.handleOrganizationBadges))
+	m.HandleFunc("POST /v1/organization-badges", s.authed(s.handleOrganizationBadgesBatch))
+	m.HandleFunc("PUT /v1/organizations/{id}/icon", s.authed(s.handleSetOrganizationIcon))
+	m.HandleFunc("GET /v1/organization-icons/{id}", s.authed(s.handleOrganizationIcon))
 	m.HandleFunc("GET /v1/conversations/{id}", s.authed(s.handleGetConversation))
 	m.HandleFunc("POST /v1/conversations/direct", s.authed(s.handleDirect))
 	m.HandleFunc("POST /v1/conversations/groups", s.authed(s.handleCreateGroup))

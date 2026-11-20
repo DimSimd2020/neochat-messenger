@@ -26,7 +26,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: neochat serve|migrate")
+		fmt.Fprintln(os.Stderr, "usage: neochat serve|migrate|create-organization <name> <owner_username>")
 		os.Exit(2)
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -40,6 +40,15 @@ func main() {
 	defer db.Close()
 
 	switch os.Args[1] {
+	case "create-organization":
+		if len(os.Args) != 4 {
+			fatal(log, "create-organization", fmt.Errorf("expected a name and owner username"))
+		}
+		id, err := app.CreateOrganization(ctx, db, os.Args[2], os.Args[3])
+		if err != nil {
+			fatal(log, "create-organization", err)
+		}
+		fmt.Println(id)
 	case "migrate":
 		if err := app.Migrate(ctx, db, migrations.FS); err != nil {
 			fatal(log, "migrate", err)

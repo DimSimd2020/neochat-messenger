@@ -744,7 +744,7 @@ class ChatScreen(
         copyProtectionUpdated?.invoke(conv)
         updateScreenProtection()
         edit.protectSelection = editing != null && copyBlocked("copy")
-        title.text = conv.str("title")
+        title.organizationName(conv.str("title"), conv.str("peer_user_id"))
         title.personColor(conv.str("title_color"), Theme.Role.TEXT)
         avatar.set(conv.str("title"), conv.str("peer_user_id").ifEmpty { conversationId }, conv.str("avatar_path"))
         val members = conv.optJSONArray("members") ?: JSONArray()
@@ -804,7 +804,8 @@ class ChatScreen(
     private fun updateSubtitle() {
         val typing = Typing.text(conversationId, conv.str("kind") != "direct")
         val streak = conv.optInt("streak")
-        subtitle.text = if (streak > 0) "🔥 $streak · ${typing ?: baseSubtitle}" else typing ?: baseSubtitle
+        val shown = typing ?: baseSubtitle
+        subtitle.organizationName(if (streak > 0) "🔥 $streak · $shown" else shown, if (shown.startsWith("@")) conv.str("peer_user_id") else "")
         subtitle.role(if (typing != null || avatar.online) Theme.Role.ACCENT else Theme.Role.MUTED)
     }
 
@@ -1516,7 +1517,8 @@ class ChatScreen(
             av.setOnClickListener { act.openPage(PersonProfilePage(act,m.str("sender_user_id"))) }
             sender.setOnClickListener { act.openPage(PersonProfilePage(act,m.str("sender_user_id"))) }
             sender.visibility = if (group && !out && item.firstInRun) VISIBLE else GONE
-            sender.text = m.str("sender_name") + m.str("sender_tag").let { if (it.isEmpty()) "" else " · $it" }
+            sender.organizationName(m.str("sender_name"), if (sender.visibility == VISIBLE) m.str("sender_user_id") else "",
+                m.str("sender_tag").let { if (it.isEmpty()) "" else " · $it" })
             sender.personColor(m.str("sender_color"), Theme.Role.MUTED)
             (col.layoutParams as LayoutParams).gravity = if (out) Gravity.END else Gravity.START
             col.gravity = if (out) Gravity.END else Gravity.START
@@ -1546,7 +1548,7 @@ class ChatScreen(
             val rep = m.optJSONObject("reply_to")
             quote.visibility = if (rep != null) VISIBLE else GONE
             if (rep != null) {
-                quoteName.text = rep.str("sender_name")
+                quoteName.organizationName(rep.str("sender_name"), rep.str("sender_user_id"))
                 quoteText.text = if (rep.str("kind") == "file") "Файл" else rep.str("text").replace('\n', ' ')
             }
             val f = m.optJSONObject("file")
@@ -2490,6 +2492,7 @@ class ChatScreen(
                     val choices=(v as? JSONArray)?.objects().orEmpty();mentionRow.removeAllViews()
                     choices.take(6).forEach { candidate ->
                         val b=PillButton(ctx,"@"+candidate.str("username"),primary=false)
+                        b.label.organizationName("@"+candidate.str("username"), candidate.str("user_id"))
                         b.contentDescription="Упомянуть "+candidate.str("display_name")
                         b.setOnClickListener { if(edit.text.toString().take(edit.selectionStart.coerceAtLeast(0))==prefix) edit.text.replace(start,cursor,"@"+candidate.str("username")+" ") }
                         mentionRow.addView(b,lp(WRAP,dp(44)))
@@ -2697,7 +2700,7 @@ class ChatScreen(
                 m.str("kind") == "poll" -> "Опрос: " + m.str("text")
                 else -> m.str("text").replace('\n', ' ')
             }
-            replyName.text = "В ответ ${m.str("sender_name")}"
+            replyName.organizationName("В ответ ${m.str("sender_name")}", if (m.optBoolean("channel")) "" else m.str("sender_user_id"))
             replyText.text = t
             replyBar.contentDescription = "Ответ на сообщение ${m.str("sender_name")}: $t"
             edit.requestFocus()

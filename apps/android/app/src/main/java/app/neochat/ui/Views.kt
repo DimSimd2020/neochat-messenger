@@ -1010,8 +1010,8 @@ class SwipeToReplyLayout(
     }
     private var content: View? = null
     private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
-    private val threshold = ctx.dpf(64)
-    private val maxShift = ctx.dpf(96)
+    private val threshold = ctx.dpf(96)
+    private val maxShift = ctx.dpf(128)
     private var pointerId = MotionEvent.INVALID_POINTER_ID
     private var downX = 0f
     private var downY = 0f
@@ -1127,7 +1127,7 @@ class SwipeToReplyLayout(
                         return false
                     }
                 }
-                if (dragging) applyShift(shiftFor(capturedTx + dx))
+                if (dragging) applyShift(shiftFor(capturedTx + dx), abs(dx))
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 if (e.actionMasked == MotionEvent.ACTION_POINTER_UP && e.getPointerId(e.actionIndex) != pointerId) return true
@@ -1177,9 +1177,9 @@ class SwipeToReplyLayout(
         return sign * raw.coerceAtMost(maxShift)
     }
 
-    private fun applyShift(tx: Float) {
+    private fun applyShift(tx: Float, distance: Float) {
         content?.translationX = tx
-        val nowArmed = abs(tx) >= threshold
+        val nowArmed = distance >= threshold
         if (nowArmed && !crossed) {
             crossed = true
             replyHaptic()
@@ -1187,7 +1187,7 @@ class SwipeToReplyLayout(
         }
         armed = nowArmed
         applyIcon(tx)
-        halo.value = (abs(tx) / threshold).coerceAtMost(1f)
+        halo.value = (distance / threshold).coerceAtMost(1f)
         haloX = icon.x + icon.width / 2f
         invalidate()
     }

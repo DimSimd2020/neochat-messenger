@@ -260,7 +260,7 @@ func maxMembers(kind string) int {
 
 // checkMembers validates a new member list. `actor` adds people, so new members must be
 // related to the actor; people already in the group stay without that check.
-func (s *Server) checkMembers(r *http.Request, actor, owner, kind string, members []string, existing map[string]bool) ([]string, error) {
+func (s *Server) checkMembers(r *http.Request, actor, owner, kind string, members []string, existing map[string]bool, allowOwnerOnly bool) ([]string, error) {
 	set := map[string]bool{owner: true}
 	for _, m := range members {
 		if !isUUID(m) {
@@ -268,7 +268,7 @@ func (s *Server) checkMembers(r *http.Request, actor, owner, kind string, member
 		}
 		set[m] = true
 	}
-	if len(set) < 2 && kind != "channel" {
+	if len(set) < 2 && kind != "channel" && !allowOwnerOnly {
 		return nil, errf(400, "too_few_members", "В группе должно быть минимум два участника")
 	}
 	if len(set) > maxMembers(kind) {
@@ -309,11 +309,12 @@ func validState(st *signedState) (int64, error) {
 
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, a *authCtx) {
 	var req struct {
-		GroupID string      `json:"group_id"`
-		Kind    string      `json:"kind"`
-		Members []string    `json:"members"`
-		Admins  []string    `json:"admins"`
-		State   signedState `json:"state"`
+		GroupID        string      `json:"group_id"`
+		Kind           string      `json:"kind"`
+		Members        []string    `json:"members"`
+		Admins         []string    `json:"admins"`
+		State          signedState `json:"state"`
+		OrganizationID string      `json:"organization_id,omitempty"`
 	}
 	if err := readJSON(w, r, 128<<10, &req); err != nil {
 		s.fail(w, r, err)
@@ -327,7 +328,11 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, a *au
 		s.fail(w, r, errBadRequest)
 		return
 	}
-	members, err := s.checkMembers(r, a.UserID, a.UserID, req.Kind, req.Members, nil)
+	if req.OrganizationID != "" && !isUUID(req.OrganizationID) {
+		s.fail(w, r, errBadRequest)
+		return
+	}
+	members, err := s.checkMembers(r, a.UserID, a.UserID, req.Kind, req.Members, nil, req.OrganizationID != "")
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -335,6 +340,20 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, a *au
 	roles := rolesFor(a.UserID, members, req.Admins)
 	var notify []string
 	err = s.inTx(r.Context(), func(tx pgx.Tx) error {
+		if req.OrganizationID != "" {
+			var channel, group bool
+			err := tx.QueryRow(r.Context(), `SELECT channel_id IS NOT NULL, group_id IS NOT NULL FROM organizations
+				WHERE id=$1 AND owner_id=$2 FOR UPDATE`, req.OrganizationID, a.UserID).Scan(&channel, &group)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errNotFound
+			}
+			if err != nil {
+				return err
+			}
+			if (req.Kind == "channel" && channel) || (req.Kind == "group" && group) {
+				return errf(409, "organization_chat_exists", "Чат организации уже создан")
+			}
+		}
 		_, err := tx.Exec(r.Context(), `INSERT INTO conversations(id, kind, owner_id, revision, state_blob, state_sig) VALUES ($1,$5,$2,1,$3,$4)`,
 			req.GroupID, a.UserID, req.State.Blob, req.State.Signature, req.Kind)
 		if isUniqueViolation(err) {
@@ -348,6 +367,11 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request, a *au
 		}
 		for _, m := range members {
 			if _, err := tx.Exec(r.Context(), `INSERT INTO memberships(conversation_id, user_id, joined_revision, role) VALUES ($1,$2,1,$3)`, req.GroupID, m, roles[m]); err != nil {
+				return err
+			}
+		}
+		if req.OrganizationID != "" {
+			if err := setOrganizationChat(r.Context(), tx, req.OrganizationID, req.Kind, req.GroupID); err != nil {
 				return err
 			}
 		}
@@ -476,7 +500,7 @@ func (s *Server) handleMembership(w http.ResponseWriter, r *http.Request, a *aut
 				oldAdmins[x.user] = true
 			}
 		}
-		members, err := s.checkMembers(r, a.UserID, g.owner, g.kind, req.Members, existing)
+		members, err := s.checkMembers(r, a.UserID, g.owner, g.kind, req.Members, existing, false)
 		if err != nil {
 			return err
 		}

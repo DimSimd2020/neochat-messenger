@@ -346,7 +346,7 @@ class HomeScreen(private val act: MainActivity) : Screen {
             private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
 
             private fun pull(e: MotionEvent) {
-                val distance = ((e.rawY - y - slop).coerceAtLeast(0f) * 0.55f)
+                val distance = (e.rawY - y - slop).coerceAtLeast(0f) * 0.38f
                 val threshold = archiveHeight * 0.85f
                 val height = if (distance <= threshold) distance else threshold + (distance - threshold) * 0.12f
                 setArchiveHeight(height.toInt().coerceAtMost(archiveHeight - dp(4)))
@@ -565,12 +565,12 @@ class HomeScreen(private val act: MainActivity) : Screen {
     private fun bindContact(row: ListRow, c: JSONObject) {
         val name = c.str("display_name")
         row.avatar.set(name, c.str("user_id"), c.str("avatar_path"))
-        row.title.text = name
+        row.title.organizationName(name, c.str("user_id"))
         if (c.optBoolean("key_changed")) {
-            row.subtitle.text = "Ключ изменился — сверьте код"
+            row.subtitle.organizationName("Ключ изменился — сверьте код", "")
             row.subtitle.role(Theme.Role.WARNING)
         } else {
-            row.subtitle.text = "@" + c.str("username")
+            row.subtitle.organizationName("@" + c.str("username"), c.str("user_id"))
             row.subtitle.role(Theme.Role.MUTED)
         }
         row.time.text = ""

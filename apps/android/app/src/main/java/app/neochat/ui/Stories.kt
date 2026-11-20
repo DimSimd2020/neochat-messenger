@@ -140,7 +140,7 @@ internal class StoryRail(private val act: MainActivity) : HorizontalScrollView(a
         super.onDetachedFromWindow()
     }
 
-    private fun item(name: String, description: String, face: View): View {
+    private fun item(name: String, description: String, face: View, userId: String = ""): View {
         val cell = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -165,7 +165,8 @@ internal class StoryRail(private val act: MainActivity) : HorizontalScrollView(a
             gravity = Gravity.CENTER
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+            if (userId.isEmpty()) importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+            else organizationName(name, userId)
         }, lp().apply { topMargin = act.dp(4) })
         face.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         entries.addView(cell, lp(act.dp(72), WRAP))
@@ -192,7 +193,8 @@ internal class StoryRail(private val act: MainActivity) : HorizontalScrollView(a
                 val author = story.str("author")
                 val avatar = AvatarView(act, 44)
                 avatar.set(author, story.str("author_id"), story.str("avatar_path"))
-                item(author, "Истории: $author", avatar).setOnClickListener { act.openPage(StoryViewer(act, sequence, first)) }
+                val userId = if (story.optBoolean("mine")) "" else story.str("author_id")
+                item(author, "Истории: $author", avatar, userId).setOnClickListener { act.openPage(StoryViewer(act, sequence, first)) }
             }
         }
     }
@@ -1731,7 +1733,7 @@ internal class StoryViewer(act: MainActivity, private val stories: List<JSONObje
         if (story.optJSONObject("options")?.optBoolean("screenshots", true) == false)
             act.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         else Prefs.applySecure(act)
-        title.text = story.str("author")
+        title.organizationName(story.str("author"), if (story.optBoolean("mine")) "" else story.str("author_id"))
         quickActions.visibility = if (story.optBoolean("mine")) View.GONE else View.VISIBLE
         caption.visibility = View.VISIBLE
         caption.text = "Загрузка…"

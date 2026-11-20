@@ -150,7 +150,7 @@ object Dialogs {
             for (c in list) {
                 val row = ListRow(ctx, 44)
                 row.avatar.set(c.str("peer_name"), c.str("peer_user_id"), c.str("avatar_path"))
-                row.title.text = c.str("peer_name")
+                row.title.organizationName(c.str("peer_name"), c.str("peer_user_id"))
                 val at = c.optLong("at")
                 val sameDay = android.text.format.DateUtils.isToday(at)
                 row.subtitle.text = c.str("text") + " · " + (if (sameDay) today else fmt).format(java.util.Date(at))
@@ -243,8 +243,8 @@ object Dialogs {
                     val uid = c.str("user_id")
                     val row = ListRow(ctx, 44)
                     row.avatar.set(c.str("display_name"), uid, c.str("avatar_path"))
-                    row.title.text = c.str("display_name")
-                    row.subtitle.text = "@" + c.str("username")
+                    row.title.organizationName(c.str("display_name"), uid)
+                    row.subtitle.organizationName("@" + c.str("username"), uid)
                     row.setChecked(if (group) uid in selected else null)
                     row.contentDescription = c.str("display_name") + if (group && uid in selected) ", выбран" else ""
                     row.setOnClickListener {
@@ -394,7 +394,7 @@ object Dialogs {
             for (a in (v as? org.json.JSONArray)?.objects() ?: emptyList()) {
                 val row = ListRow(act, 44)
                 val name = a.str("display_name").ifEmpty { "Новый аккаунт" }
-                row.title.text = name
+                row.title.organizationName(name, a.str("user_id"))
                 row.avatar.set(name, a.str("account_id"), a.str("avatar_path"))
                 row.subtitle.text = listOfNotNull(
                     a.str("username").takeIf { it.isNotEmpty() }?.let { "@$it" },
@@ -508,14 +508,14 @@ object Dialogs {
                 val head = ListRow(ctx, 56)
                 head.isClickable = false
                 head.avatar.set(c.str("title"), c.str("peer_user_id").ifEmpty { cid }, c.str("avatar_path"))
-                head.title.text = c.str("title")
+                head.title.organizationName(c.str("title"), c.str("peer_user_id"))
                 head.title.textSize = 18f
                 val members = c.optJSONArray("members")?.objects() ?: emptyList()
                 if (c.str("kind") == "direct") {
                     val peer = c.str("peer_user_id")
                     val other = members.firstOrNull { !it.optBoolean("me") }
-                    head.subtitle.text = (other?.let { "@" + it.str("username") } ?: "") +
-                        (c.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }?.let { " · $it" } ?: "")
+                    head.subtitle.organizationName(other?.let { "@" + it.str("username") }.orEmpty(), peer,
+                        c.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }?.let { " · $it" }.orEmpty())
                     head.avatar.online = c.optJSONObject("presence")?.optBoolean("online") == true
                     add(head)
                     CoreClient.call("contact_info", JSONObject().put("user_id", peer)) { iv, ie ->
@@ -615,7 +615,7 @@ object Dialogs {
                     val uid = m.str("user_id")
                     val row = ListRow(ctx, 40)
                     row.avatar.set(m.str("display_name"), uid, m.str("avatar_path"))
-                    row.title.text = m.str("display_name")
+                    row.title.organizationName(m.str("display_name"), uid)
                     row.title.personColor(m.str("name_color"), Theme.Role.TEXT)
                     if (m.optBoolean("key_changed")) {
                         row.subtitle.text = "Ключ изменился — сверьте код в личном чате"
@@ -626,7 +626,7 @@ object Dialogs {
                         if (m.str("tag").isNotEmpty()) sub += " · " + m.str("tag")
                         if (m.optLong("muted_until") != 0L) sub += " · не может писать"
                         if (!m.optBoolean("me")) m.optJSONObject("presence")?.str("text")?.takeIf { it.isNotEmpty() }?.let { sub += " · $it" }
-                        row.subtitle.text = sub
+                        row.subtitle.organizationName(sub, if (sub.startsWith("@")) uid else "")
                     }
                     row.avatar.online = m.optJSONObject("presence")?.optBoolean("online") == true
                     row.contentDescription = "${row.title.text}, ${row.subtitle.text}"

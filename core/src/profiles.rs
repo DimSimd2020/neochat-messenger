@@ -31,6 +31,39 @@ pub fn name_color_in(conn: &rusqlite::Connection, user_id: &str) -> String {
 }
 
 impl Inner {
+    pub fn organization_icon(&self, p: &Value) -> Result<Value> {
+        let id = Uuid::parse_str(s(p, "icon_id")?).map_err(|_| Error::Invalid("Некорректный ID значка".into()))?;
+        let tmp = self.data_dir.join("tmp").join(format!("organization-icon-{}.png", Uuid::new_v4()));
+        let result = (|| {
+            self.api()?.download(&format!("/v1/organization-icons/{id}"), &self.access_token()?, &tmp, 48 << 10)?;
+            Ok(json!({"png": crate::keys::b64(&std::fs::read(&tmp)?)}))
+        })();
+        let _ = std::fs::remove_file(tmp);
+        result
+    }
+
+    pub fn set_organization_icon(&self, p: &Value) -> Result<Value> {
+        let id = Uuid::parse_str(s(p, "organization_id")?).map_err(|_| Error::Invalid("Некорректный ID организации".into()))?;
+        let file = Path::new(s(p, "path")?);
+        if std::fs::metadata(file)?.len() > 48 << 10 {
+            return Err(Error::Invalid("Значок: PNG до 48 КБ".into()));
+        }
+        self.api()?.upload(&format!("/v1/organizations/{id}/icon"), &self.access_token()?, file)?;
+        Ok(Value::Null)
+    }
+
+    pub fn organization_chats(&self, p: &Value) -> Result<Value> {
+        let me = self.me()?.0;
+        let kind = s(p, "kind")?;
+        if !matches!(kind, "group" | "channel") {
+            return Err(Error::Invalid("Выберите группу или канал".into()));
+        }
+        let db = self.db();
+        let mut st = db.conn.prepare("SELECT id, title FROM conversations WHERE owner_id=?1 AND kind=?2 AND hidden=0 AND left_group=0 ORDER BY title")?;
+        let rows = st.query_map([me.as_str(), kind], |r| Ok(json!({"id":r.get::<_,String>(0)?, "title":r.get::<_,String>(1)?})))?;
+        Ok(json!(rows.collect::<std::result::Result<Vec<_>,_>>()?))
+    }
+
     pub fn user_profile(&self, p: &Value) -> Result<Value> {
         let (me, _) = self.me()?;
         let uid = p["user_id"].as_str().unwrap_or(&me);

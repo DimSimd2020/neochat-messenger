@@ -246,24 +246,23 @@ impl Inner {
             return Err(Error::Invalid("Название: от 1 до 64 символов".into()));
         }
         let description = p["description"].as_str().unwrap_or("").trim().chars().take(255).collect::<String>();
+        let organization = p["organization_id"].as_str();
         let (me, _) = self.me()?;
         let mut members: BTreeSet<String> = ids(&p["member_ids"]);
         members.insert(me.clone());
-        let (min, max) = if channel { (1, MAX_CHANNEL) } else { (2, MAX_GROUP) };
+        let (min, max) = if channel { (1, MAX_CHANNEL) } else { (if organization.is_some() { 1 } else { 2 }, MAX_GROUP) };
         if members.len() < min || members.len() > max {
-            return Err(Error::Invalid(if channel { format!("В канале до {MAX_CHANNEL} подписчиков") } else { format!("В группе от 2 до {MAX_GROUP} участников") }));
+            return Err(Error::Invalid(if channel { format!("В канале до {MAX_CHANNEL} подписчиков") } else { format!("В группе от {min} до {MAX_GROUP} участников") }));
         }
         let admins: Vec<String> = ids(&p["admin_ids"]).into_iter().filter(|a| members.contains(a) && *a != me).collect();
         let gid = Uuid::new_v4().to_string();
         let st = GroupState { group_id: gid.clone(), revision: 1, prev_hash: [0; 32], owner_id: me.clone(), members: members.iter().cloned().collect(), signer_id: me.clone(), channel, admins: admins.clone() };
         let blob = st.encode()?;
         let sig = keys::sign_blob(&account, &blob)?;
-        let c = self.authed(
-            "POST",
-            "/v1/conversations/groups",
-            Some(&json!({"group_id": gid, "kind": if channel { "channel" } else { "group" }, "members": members, "admins": admins,
-                "state": {"revision": "1", "blob": b64(&blob), "signature": b64(&sig)}})),
-        )?;
+        let mut request = json!({"group_id": gid, "kind": if channel { "channel" } else { "group" }, "members": members, "admins": admins,
+            "state": {"revision": "1", "blob": b64(&blob), "signature": b64(&sig)}});
+        if let Some(id) = organization { request["organization_id"] = json!(id); }
+        let c = self.authed("POST", "/v1/conversations/groups", Some(&request))?;
         self.apply_conversation(&c)?;
         self.db().conn.execute("UPDATE conversations SET title=?2, description=?3 WHERE id=?1", params![gid, title, description])?;
         self.enqueue_control(&gid, "group_update", json!({"title": title, "description": description}))?;

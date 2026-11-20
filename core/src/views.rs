@@ -82,6 +82,7 @@ impl Inner {
                     .optional()?
                     .map(|(mut quote, sender)| {
                         quote["sender_color"] = json!(colors.entry(sender.clone()).or_insert_with(|| crate::profiles::name_color_in(&db.conn, &sender)).clone());
+                        quote["sender_user_id"] = json!(sender);
                         quote
                     }),
                 None => None,

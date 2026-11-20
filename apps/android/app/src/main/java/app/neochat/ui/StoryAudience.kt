@@ -166,7 +166,7 @@ internal class StoryAudience(
             val profile = value as? JSONObject ?: return@call
             val name = profile.str("display_name").ifEmpty { profile.str("username") }
             if (name.isEmpty()) return@call
-            author.text = name
+            author.organizationName(name, profile.str("user_id"))
             avatar.set(name, profile.str("user_id"), profile.str("avatar_path"))
             identity.visibility = VISIBLE
         }
@@ -305,7 +305,7 @@ internal class StoryAudience(
     private fun bindPerson(row: ListRow, chat: JSONObject) {
         val id = chat.str("peer_user_id")
         val name = chat.str("title")
-        row.title.text = name
+        row.title.organizationName(name, id)
         row.title.role(Theme.Role.ON_ACCENT)
         row.subtitle.visibility = GONE
         row.contentDescription = name

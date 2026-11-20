@@ -99,9 +99,9 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
         else if (ev.str("type") == "stories_changed" && category == "stories") select("stories", false) }
 
     private fun action(text:String,icon:Int,go:()->Unit) = PillButton(act,text,primary=false,icon=icon).apply { setOnClickListener { go() } }
-    private fun info(title:String,value:String,go:(()->Unit)?=null):LinearLayout {
+    private fun info(title:String,value:String,user:String="",go:(()->Unit)?=null):LinearLayout {
         val row = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16),dp(14),dp(16),dp(14)) }
-        row.addView(act.label(value,16f,400)); row.addView(act.label(title,12f,400,Theme.Role.MUTED),lp().apply { topMargin = dp(5) })
+        row.addView(act.label(value,16f,400).apply { if (user.isNotEmpty()) organizationName(value, user) }); row.addView(act.label(title,12f,400,Theme.Role.MUTED),lp().apply { topMargin = dp(5) })
         if (go!=null) { row.isFocusable = true; row.setOnClickListener { go() } }
         return row
     }
@@ -110,11 +110,11 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             if (e!=null) return@call
             profile = v as? JSONObject ?: return@call
             val own = profile.optBoolean("me"); val uid = profile.str("user_id")
-            name.text = profile.str("display_name").ifEmpty { "@"+profile.str("username") }
+            name.organizationName(profile.str("display_name").ifEmpty { "@"+profile.str("username") }, uid)
             name.personColor(profile.str("name_color"),Theme.Role.TEXT)
             cover.colors = ProfileStyle.colors(profile.str("header"),uid)
-            sub.text = if(own) "Ваш профиль" else "@"+profile.str("username")
-            avatar.set(name.text.toString(),uid,profile.str("avatar_path"))
+            sub.organizationName(if(own) "Ваш профиль" else "@"+profile.str("username"), if (own) "" else uid)
+            avatar.set(profile.str("display_name").ifEmpty { profile.str("username") },uid,profile.str("avatar_path"))
             details.removeAllViews()
             val actions = LinearLayout(act)
             if (own) {
@@ -128,7 +128,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
             details.addView(actions)
             val card = LinearLayout(act).apply { orientation=LinearLayout.VERTICAL; background=GlassDrawable(act,radius=act.dpf(24)) }
             val line = LinearLayout(act).apply { gravity=Gravity.CENTER_VERTICAL }
-            line.addView(info("Имя пользователя","@"+profile.str("username")) {
+            line.addView(info("Имя пользователя","@"+profile.str("username"),uid) {
                 (act.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("Имя пользователя","@"+profile.str("username"))); act.toast("Имя пользователя скопировано")
             },lp(0,WRAP,1f))
             line.addView(IconButton(act,R.drawable.ic_qr,"QR-код профиля").apply {
@@ -140,6 +140,7 @@ class PersonProfilePage(private val act: MainActivity, private val userId: Strin
                 setOnClickListener { CoreClient.call("resolve_contact",JSONObject().put("username",profile.str("username"))) { _,err -> if(err!=null) act.toast(err.message) else { act.toast("Контакт добавлен"); load() } } }
             })
             card.addView(line); card.addView(info("О себе",profile.str("bio").ifEmpty { "Не указано" }))
+            if (own) card.addView(info("Членство и приглашения", "Организации") { showOrganizations(act) { load() } })
             if (own) card.addView(info("Оформление","Цвет имени и шапка профиля") { editProfileStyle(act,profile) { load() } })
             if (!own) card.addView(info("Заметки · видны только вам",profile.str("note").ifEmpty { "Добавить заметку" }) { editNote() })
             details.addView(card,lp().apply { topMargin=dp(14) }); select(category,false)

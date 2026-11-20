@@ -223,7 +223,7 @@ class AttachSheet(
         val mine = ++token
         val uri = first.uri
         Thread {
-            val bmp = if (first.video) Videos.frame(act, uri, 900) else decodeUri(act, uri, 900)
+            val bmp = if (first.video) Videos.frame(act, uri, 900) else decodePhotoUri(act, uri, 900)
             act.runOnUiThread { if (mine == token && bmp != null) img.setImageBitmap(bmp) }
         }.start()
         if (first.video) {
@@ -273,21 +273,22 @@ class AttachSheet(
         previewBox.contentDescription = null
     }
 
-    private fun decodeUri(ctx: Context, uri: Uri, maxSide: Int): Bitmap? = runCatching {
-        val cr = ctx.contentResolver
-        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
-        var sample = 1
-        while (maxOf(o.outWidth, o.outHeight) / (sample * 2) >= maxSide) sample *= 2
-        val bmp = cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) } ?: return null
-        val deg = cr.openInputStream(uri)?.use {
-            when (ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-                ExifInterface.ORIENTATION_ROTATE_90 -> 90
-                ExifInterface.ORIENTATION_ROTATE_180 -> 180
-                ExifInterface.ORIENTATION_ROTATE_270 -> 270
-                else -> 0
-            }
-        } ?: 0
-        if (deg == 0) bmp else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(deg.toFloat()) }, true)
-    }.getOrNull()
 }
+
+internal fun decodePhotoUri(ctx: Context, uri: Uri, maxSide: Int): Bitmap? = runCatching {
+    val cr = ctx.contentResolver
+    val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
+    var sample = 1
+    while (maxOf(o.outWidth, o.outHeight) / (sample * 2) >= maxSide) sample *= 2
+    val bmp = cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) } ?: return null
+    val deg = cr.openInputStream(uri)?.use {
+        when (ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    } ?: 0
+    if (deg == 0) bmp else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(deg.toFloat()) }, true)
+}.getOrNull()

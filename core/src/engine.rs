@@ -317,6 +317,25 @@ impl Inner {
             "delete_contact" => self.delete_contact(p),
             "contact_info" => self.contact_info(p),
             "user_profile" => self.user_profile(p),
+            "organizations" => self.authed("GET", "/v1/organizations", None),
+            "organization_badges_batch" => self.authed("POST", "/v1/organization-badges", Some(p)),
+            "set_organization_icon" => self.set_organization_icon(p),
+            "organization_icon" => self.organization_icon(p),
+            "organization_badges" => {
+                let uid = uuid::Uuid::parse_str(s(p, "user_id")?).map_err(|_| Error::Invalid("Некорректный ID профиля".into()))?;
+                self.authed("GET", &format!("/v1/users/{uid}/organization-badges"), None)
+            }
+            "organization_members" | "organization_update" => {
+                let id = uuid::Uuid::parse_str(s(p, "organization_id")?).map_err(|_| Error::Invalid("Некорректный ID организации".into()))?;
+                if method == "organization_members" {
+                    self.authed("GET", &format!("/v1/organizations/{id}/members"), None)
+                } else {
+                    let mut body = p.clone();
+                    if let Some(fields) = body.as_object_mut() { fields.remove("organization_id"); }
+                    self.authed("POST", &format!("/v1/organizations/{id}"), Some(&body))
+                }
+            }
+            "organization_chats" => self.organization_chats(p),
             "profile_items" => self.profile_items(p),
             "set_profile_note" => self.set_profile_note(p),
             "profile_qr" => self.profile_qr(p),

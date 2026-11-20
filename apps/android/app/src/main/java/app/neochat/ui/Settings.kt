@@ -237,8 +237,8 @@ class SettingsPage(private val act: MainActivity, private val settingsOnly: Bool
             val user = s.str("username")
             val display = s.str("display_name").ifEmpty { user }
             avatar.set(display, s.str("user_id"), s.str("avatar_path"))
-            name.text = display
-            sub.text = "@$user" + s.str("number").takeIf { it.isNotEmpty() }?.let { " · ID $it" }.orEmpty()
+            name.organizationName(display, s.str("user_id"))
+            sub.organizationName("@$user", s.str("user_id"), s.str("number").takeIf { it.isNotEmpty() }?.let { " · ID $it" }.orEmpty())
             bio.text = s.str("bio")
             bio.visibility = if (s.str("bio").isEmpty()) View.GONE else View.VISIBLE
         }

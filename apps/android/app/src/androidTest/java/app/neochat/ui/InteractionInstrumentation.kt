@@ -66,17 +66,20 @@ class InteractionInstrumentation : Instrumentation() {
                     send(if (cancel) MotionEvent.ACTION_CANCEL else MotionEvent.ACTION_UP, x + dx, 48 + dy, 90)
                 }
                 try {
+                    gesture(220, 80)
+                    gesture(220, -80)
+                    check(replies == 0) { "Short swipe triggered a reply" }
                     // The bubble ends at x=80; the gesture starts in empty space.
-                    gesture(220, 90)
+                    gesture(220, 110)
                     check(replies == 1) { "Reply did not start outside the bubble" }
                     check(hitbox.translationX == 0f)
-                    gesture(220, -90)
+                    gesture(220, -110)
                     check(replies == 2) { "Opposite swipe did not reply" }
                     gesture(220, 12, 70)
                     check(replies == 2) { "Vertical scroll triggered a reply" }
-                    gesture(8, 90)
+                    gesture(8, 110)
                     check(replies == 2) { "System back edge triggered a reply" }
-                    gesture(220, 90, cancel = true)
+                    gesture(220, 110, cancel = true)
                     check(replies == 2) { "Cancelled gesture triggered a reply" }
                 } finally { Theme.forceReduced = oldReduced; row.reset() }
             }
@@ -858,14 +861,14 @@ class InteractionInstrumentation : Instrumentation() {
                 SystemClock.sleep(25)
                 waitForIdleSync()
             }
-            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 64)
+            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 135)
             runOnMainSync { check(wrap.height in 1 until activity.dp(72)) { "Archive did not follow the finger" } }
             capture("partial-pull")
-            touch(MotionEvent.ACTION_UP, 64); pause()
+            touch(MotionEvent.ACTION_UP, 135); pause()
             runOnMainSync { check(wrap.layoutParams.height == 0 && wrap.visibility == View.GONE) { "Short pull exposed the archive" } }
-            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 150); touch(MotionEvent.ACTION_CANCEL, 150); pause()
+            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 190); touch(MotionEvent.ACTION_CANCEL, 190); pause()
             runOnMainSync { check(wrap.layoutParams.height == 0 && wrap.visibility == View.GONE) { "Cancelled pull exposed the archive" } }
-            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 150); touch(MotionEvent.ACTION_UP, 150)
+            touch(MotionEvent.ACTION_DOWN, 0); touch(MotionEvent.ACTION_MOVE, 190); touch(MotionEvent.ACTION_UP, 190)
             SystemClock.sleep(500); waitForIdleSync()
             runOnMainSync {
                 check(wrap.height == activity.dp(72)) { "Full pull did not settle" }
