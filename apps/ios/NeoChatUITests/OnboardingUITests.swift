@@ -16,7 +16,8 @@ final class OnboardingUITests: XCTestCase {
         shot("01-login")
         // Fill the fields in sign-in mode: in registration mode the simulator covers the
         // password field with its own strong password, which typed text cannot replace.
-        let user = app.textFields["Никнейм"]
+        let user = app.textFields["Никнейм или почта"]
+        XCTAssertTrue(user.waitForExistence(timeout: 10))
         user.tap()
         let username = "ios_ci_\(Int.random(in: 100000...999999))"
         user.typeText(username)
