@@ -8,6 +8,7 @@
 //! offered whichever is newer, the alpha or the public build.
 
 use std::io::Read;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{Value, json};
@@ -54,7 +55,7 @@ impl Inner {
     /// alpha build, or None when nothing is published.
     /// `platforms` is the stable channel: clients that omit `channel` keep receiving it.
     /// `channels.beta` is served only when the client asks for beta.
-    fn update_entry(&self, platform: &str, channel: &str) -> Result<Option<(Value, String, bool)>> {
+    fn update_entry(&self, platform: &str, channel: &str, disable_alpha: bool) -> Result<Option<(Value, String, bool)>> {
         let server = self.update_server()?;
         let public = match Api::new(&server).call("GET", "/v1/app/manifest", None, None) {
             Err(Error::Api { status: 404, .. }) => None,
@@ -65,7 +66,7 @@ impl Inner {
         };
         // Alpha is optional: whatever goes wrong there (offline, not a tester, nothing published)
         // must not hide the public update.
-        let alpha = if self.logged_in() { self.authed("GET", "/v1/app/alpha/manifest", None).ok().and_then(|m| verified_manifest(&m, &self.update_key()).ok()) } else { None }
+        let alpha = if !disable_alpha && self.logged_in() { self.authed("GET", "/v1/app/alpha/manifest", None).ok().and_then(|m| verified_manifest(&m, &self.update_key()).ok()) } else { None }
             .map(|m| m["channels"]["alpha"][platform].clone())
             .filter(|e| !e.is_null());
         let Some((entry, alpha)) = pick(public, alpha) else { return Ok(None) };
@@ -76,7 +77,7 @@ impl Inner {
 
     pub fn check_update(&self, p: &Value) -> Result<Value> {
         let current = s(p, "version")?;
-        match self.update_entry(s(p, "platform")?, channel_of(p))? {
+        match self.update_entry(s(p, "platform")?, channel_of(p), p["disable_alpha"].as_bool().unwrap_or(false))? {
             Some((e, url, _)) if newer(e["version"].as_str().unwrap_or(""), current) => Ok(json!({
                 "available": true,
                 "version": e["version"],
@@ -91,8 +92,9 @@ impl Inner {
     /// Downloads the newer build into data_dir/updates and returns its path after the
     /// SHA-256 check; an already downloaded file with the right hash is reused.
     pub fn download_update(&self, p: &Value) -> Result<Value> {
+        let _update = self.update_lock.lock().unwrap_or_else(|e| e.into_inner());
         let current = s(p, "version")?;
-        let Some((e, _, alpha)) = self.update_entry(s(p, "platform")?, channel_of(p))? else {
+        let Some((e, _, alpha)) = self.update_entry(s(p, "platform")?, channel_of(p), p["disable_alpha"].as_bool().unwrap_or(false))? else {
             return Err(Error::Invalid("Обновлений нет".into()));
         };
         let version = e["version"].as_str().unwrap_or("");
@@ -107,22 +109,32 @@ impl Inner {
         let dir = self.data_dir.join("updates");
         std::fs::create_dir_all(&dir)?;
         let dest = dir.join(file);
-        if dest.exists() && sha256_file(&dest)? == want {
+        if sha256_file(&dest).is_ok_and(|hash| hash == want) {
             return Ok(json!({"path": dest.to_string_lossy(), "version": version, "tag": e["tag"]}));
-        }
-        // Old builds are no longer needed.
-        for old in std::fs::read_dir(&dir)?.flatten() {
-            let _ = std::fs::remove_file(old.path());
         }
         let part = dir.join(format!("{file}.part"));
         let server = self.update_server()?;
         let (path, token) = if alpha { (format!("/v1/app/alpha/files/{file}"), self.access_token()?) } else { (format!("/v1/app/files/{file}"), String::new()) };
-        Api::new(&server).download(&path, &token, &part, MAX_UPDATE)?;
-        if sha256_file(&part)? != want {
+        let result: Result<()> = (|| {
+            let total = e["size"].as_u64().filter(|&size| size > 0).unwrap_or(0);
+            let mut last = Instant::now();
+            self.emit(json!({"type":"update_progress","done":0,"total":total}));
+            let downloaded = Api::new(&server).download_progress(&path, &token, &part, MAX_UPDATE, |done, length| {
+                if last.elapsed() >= Duration::from_millis(100) {
+                    self.emit(json!({"type":"update_progress","done":done,"total":if total > 0 { total } else { length }}));
+                    last = Instant::now();
+                }
+            })?;
+            if (total > 0 && downloaded != total) || sha256_file(&part)? != want {
+                return Err(Error::Crypto("Файл обновления повреждён. Попробуйте загрузить его ещё раз".into()));
+            }
+            std::fs::rename(&part, &dest)?;
+            Ok(())
+        })();
+        if result.is_err() {
             let _ = std::fs::remove_file(&part);
-            return Err(Error::Crypto("Файл обновления повреждён. Попробуйте позже".into()));
         }
-        std::fs::rename(&part, &dest)?;
+        result?;
         Ok(json!({"path": dest.to_string_lossy(), "version": version, "tag": e["tag"]}))
     }
 }
@@ -328,9 +340,27 @@ Connection: close
         assert_eq!(check["version"], "9.9.9");
         assert_eq!(check["tag"], "alpha");
         assert!(check["url"].as_str().unwrap().ends_with("/v1/app/alpha/files/NeoChat-9.9.9-alpha-x64.msi"));
-        let got = tester.inner.download_update(&ask).unwrap();
+        // No-alpha clients must neither offer alpha nor request its authenticated manifest.
+        let alpha_requests = seen.lock().unwrap().iter().filter(|(p, _)| p == "/v1/app/alpha/manifest").count();
+        let public_only = json!({"platform": "windows", "version": "0.6.9.4", "disable_alpha": true});
+        assert_eq!(tester.inner.check_update(&public_only).unwrap()["available"], false);
+        assert!(tester.inner.download_update(&public_only).is_err());
+        assert_eq!(seen.lock().unwrap().iter().filter(|(p, _)| p == "/v1/app/alpha/manifest").count(), alpha_requests);
+        let updates = dir.join("updates");
+        std::fs::create_dir_all(&updates).unwrap();
+        let old = updates.join("NeoChat-0.6.9.4-x64.msi");
+        std::fs::write(&old, b"previous verified installer").unwrap();
+        let got = std::thread::scope(|scope| {
+            let first = scope.spawn(|| tester.inner.download_update(&ask).unwrap());
+            let second = scope.spawn(|| tester.inner.download_update(&ask).unwrap());
+            let got = first.join().unwrap();
+            assert_eq!(second.join().unwrap(), got);
+            got
+        });
         assert_eq!(got["tag"], "alpha");
         assert_eq!(std::fs::read(got["path"].as_str().unwrap()).unwrap(), BUILD);
+        assert!(old.exists());
+        assert_eq!(seen.lock().unwrap().iter().filter(|(path, _)| path.starts_with("/v1/app/alpha/files/")).count(), 1);
         // Already on that build: nothing more to offer.
         assert_eq!(tester.inner.check_update(&json!({"platform": "windows", "version": "9.9.9"})).unwrap()["available"], false);
         drop(tester);

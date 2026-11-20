@@ -18,6 +18,8 @@ mod markdown;
 mod math;
 mod keys;
 mod outbox;
+mod stories;
+mod streaks;
 mod pins;
 mod profiles;
 mod mentions;

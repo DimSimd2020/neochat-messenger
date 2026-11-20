@@ -124,6 +124,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 final class RootViewController: UIViewController {
     private var current: UIViewController?
     private var updateBanner: UIView?
+    private var updateProgress: UIProgressView?
+    private var updateDownloading = false
     private var dismissedUpdate = ""
     private var lastUpdateCheck = Date.distantPast
     private var pendingConversation: String?
@@ -149,12 +151,20 @@ final class RootViewController: UIViewController {
             guard let ev = n.userInfo as? JSON else { return }
             let t = ev.str("type")
             if t == "account_selected" {
+                self?.updateDownloading = false
+                self?.hideUpdateBanner()
                 Notifier.visibleConversation = nil
                 Typing.reset()
                 if self?.presentedViewController != nil {
                     self?.dismiss(animated: false) { self?.start() }
                 } else { self?.start() }
                 return
+            }
+            if t == "update_progress", let self, self.updateDownloading {
+                let total = ev.int64("total")
+                if total > 0 {
+                    self.updateProgress?.setProgress(min(1, Float(ev.int64("done")) / Float(total)), animated: !Theme.reducedMotion)
+                }
             }
             if t == "auth_required" || t == "device_revoked", self?.current is MainTabController {
                 if t == "device_revoked" { self?.toast("Это устройство отозвано. Новые сообщения сюда не придут") }
@@ -169,34 +179,59 @@ final class RootViewController: UIViewController {
         start()
     }
 
-    /// iOS cannot install an unsigned build itself: the banner opens the IPA link in Safari
-    /// so it can be installed with Scarlet. Checked at most hourly, or on request from settings.
+    /// Checked at most hourly, or on request from settings. The core verifies the IPA before sharing.
     func checkUpdate(manual: Bool = false) {
-        guard manual || (updateBanner == nil && Date().timeIntervalSince(lastUpdateCheck) > 3600),
+        guard !updateDownloading, manual || (updateBanner == nil && Date().timeIntervalSince(lastUpdateCheck) > 3600),
               let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return }
         lastUpdateCheck = Date()
-        Core.shared.call("check_update", ["platform": "ios", "version": version, "channel": Prefs.updateChannel]) { [weak self] r in
+        let params = ["platform": "ios", "version": version, "channel": Prefs.updateChannel]
+        Core.shared.call("check_update", params) { [weak self] r in
             switch r {
             case .failure(let e): if manual { self?.topToast(e.message) }
             case .success(let v):
-                guard let o = v as? JSON, o.bool("available"), let url = URL(string: o.str("url")) else {
+                guard let o = v as? JSON, o.bool("available") else {
                     if manual { self?.topToast("Установлена последняя версия \(version)") }
                     return
                 }
-                if manual { self?.offerUpdate(o.str("version"), url) }
+                if manual { self?.offerUpdate(o.str("version"), params) }
                 // A banner closed by hand stays closed for that version until the app restarts.
-                if manual || o.str("version") != self?.dismissedUpdate { self?.showUpdateBanner(o.str("version"), url) }
+                if manual || o.str("version") != self?.dismissedUpdate { self?.showUpdateBanner(o.str("version"), params) }
             }
         }
     }
 
-    private func offerUpdate(_ version: String, _ url: URL) {
+    private func offerUpdate(_ version: String, _ params: [String: String]) {
         var top: UIViewController = self
         while let p = top.presentedViewController { top = p }
         let a = UIAlertController(title: "Доступна версия \(version)", message: "Скачайте IPA и установите его через Scarlet поверх текущей версии.", preferredStyle: .alert)
         a.addAction(UIAlertAction(title: "Позже", style: .cancel))
-        a.addAction(UIAlertAction(title: "Скачать", style: .default) { _ in UIApplication.shared.open(url) })
+        a.addAction(UIAlertAction(title: "Скачать", style: .default) { [weak self] _ in self?.downloadUpdate(params) })
         top.present(a, animated: !Theme.reducedMotion)
+    }
+
+    private func downloadUpdate(_ params: [String: String]) {
+        guard !updateDownloading else { return }
+        updateDownloading = true
+        updateProgress?.isHidden = false
+        updateProgress?.setProgress(0, animated: false)
+        Core.shared.call("download_update", params) { [weak self] r in
+            guard let self else { return }
+            self.updateDownloading = false
+            self.updateProgress?.isHidden = true
+            switch r {
+            case .failure(let e): self.topToast(e.message)
+            case .success(let v):
+                guard let result = v as? JSON, !result.str("path").isEmpty else { return }
+                let ipa = URL(fileURLWithPath: result.str("path"))
+                Haptics.confirm()
+                var top: UIViewController = self
+                while let presented = top.presentedViewController, !presented.isBeingDismissed { top = presented }
+                let share = UIActivityViewController(activityItems: [ipa], applicationActivities: nil)
+                share.popoverPresentationController?.sourceView = top.view
+                share.popoverPresentationController?.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 1, height: 1)
+                top.present(share, animated: !Theme.reducedMotion)
+            }
+        }
     }
 
     private func topToast(_ text: String) {
@@ -206,13 +241,13 @@ final class RootViewController: UIViewController {
     }
 
     /// Drops in from above on a spring; the cross sends it back up.
-    private func showUpdateBanner(_ version: String, _ url: URL) {
+    private func showUpdateBanner(_ version: String, _ params: [String: String]) {
         guard updateBanner == nil else { return }
         let bar = UIView()
         bar.glass(20, strong: true)
         let text = label("Доступна версия \(version)", 15, .semibold)
         let open = PillButton("Скачать")
-        open.addAction(UIAction { _ in UIApplication.shared.open(url) }, for: .touchUpInside)
+        open.addAction(UIAction { [weak self] _ in self?.downloadUpdate(params) }, for: .touchUpInside)
         let close = UIButton(type: .system)
         close.setImage(UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)), for: .normal)
         close.tintColor = Theme.muted
@@ -229,15 +264,23 @@ final class RootViewController: UIViewController {
         row.alignment = .center
         row.spacing = 8
         row.setCustomSpacing(12, after: text)
-        row.translatesAutoresizingMaskIntoConstraints = false
-        bar.addSubview(row)
+        let progress = UIProgressView(progressViewStyle: .default)
+        progress.progressTintColor = Theme.accent
+        progress.accessibilityLabel = "Загрузка обновления"
+        progress.isHidden = !updateDownloading
+        updateProgress = progress
+        let body = UIStackView(arrangedSubviews: [row, progress])
+        body.axis = .vertical
+        body.spacing = 4
+        body.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(body)
         bar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bar)
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 18),
-            row.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -4),
-            row.topAnchor.constraint(equalTo: bar.topAnchor, constant: 8),
-            row.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -8),
+            body.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 18),
+            body.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -4),
+            body.topAnchor.constraint(equalTo: bar.topAnchor, constant: 8),
+            body.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -8),
             bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             bar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
             bar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
@@ -255,6 +298,7 @@ final class RootViewController: UIViewController {
     private func hideUpdateBanner() {
         guard let bar = updateBanner else { return }
         updateBanner = nil
+        updateProgress = nil
         bar.isUserInteractionEnabled = false
         guard !Theme.reducedMotion else { return bar.removeFromSuperview() }
         UIView.animate(withDuration: 0.2) { bar.alpha = 0 }

@@ -23,10 +23,11 @@ use crate::engine::Inner;
 use crate::error::{Error, Result};
 use crate::files;
 use crate::keys::{b64, random_bytes, sha256};
-use crate::store::{kv_get, kv_get_str, kv_set, now_ms};
+use crate::store::{kv_del, kv_get, kv_get_str, kv_set, now_ms};
 
 /// History is re-uploaded at most this often, and only after something changed.
 const UPLOAD_EVERY_MS: i64 = 10 * 60 * 1000;
+const RESTORE_RETRY_MS: i64 = 60_000;
 /// Server-side cap for one history backup.
 pub const MAX_HISTORY: u64 = 200 << 20;
 
@@ -162,6 +163,17 @@ impl Inner {
     /// Uploads the history when it changed and the last upload is old enough.
     pub fn maybe_upload_history(&self) -> Result<()> {
         let Some(key) = self.backup_key()? else { return Ok(()) };
+        let (pending, next) = {
+            let db = self.db();
+            (kv_get(&db.conn, "history_restore_pending")?.is_some(),
+                kv_get_str(&db.conn, "history_restore_retry_at")?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0))
+        };
+        if pending {
+            if now_ms() >= next && self.restore_history(&key)? {
+                self.history_restored();
+            }
+            return Ok(());
+        }
         let (last_at, last_mark, mark) = {
             let db = self.db();
             let last_at: i64 = kv_get_str(&db.conn, "history_uploaded_at")?.and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -178,7 +190,9 @@ impl Inner {
         if !force && (mark == last_mark || now_ms() - last_at < UPLOAD_EVERY_MS) {
             return Ok(());
         }
-        self.upload_history(&key)?;
+        if !self.upload_history(&key)? {
+            return Ok(());
+        }
         let db = self.db();
         crate::store::kv_del(&db.conn, "history_force")?;
         kv_set(&db.conn, "history_uploaded_at", now_ms().to_string().as_bytes())?;
@@ -186,7 +200,21 @@ impl Inner {
         Ok(())
     }
 
-    pub fn upload_history(&self, key: &[u8; 32]) -> Result<()> {
+    pub fn upload_history(&self, key: &[u8; 32]) -> Result<bool> {
+        let _history = self.history_lock.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let db = self.db();
+            if kv_get(&db.conn, "history_restore_pending")?.is_some() {
+                return Ok(false);
+            }
+            let has_history: bool = db.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE kind IN ('text','file','poll') AND status NOT IN ('queued','sending','failed'))
+                 OR EXISTS(SELECT 1 FROM deleted_messages)", [], |r| r.get(0),
+            )?;
+            if !has_history {
+                return Ok(false);
+            }
+        }
         let tmp = self.data_dir.join("tmp");
         let plain = tmp.join("history.jsonl");
         let enc = tmp.join("history.enc");
@@ -208,32 +236,52 @@ impl Inner {
         for p in [&plain, &enc, &out] {
             let _ = std::fs::remove_file(p);
         }
-        res
+        res.map(|()| true)
     }
 
     /// Downloads and imports the history backup, if the account has one.
-    pub fn restore_history(&self, key: &[u8; 32]) -> Result<()> {
+    pub fn restore_history(&self, key: &[u8; 32]) -> Result<bool> {
+        let _history = self.history_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = {
+            let db = self.db();
+            let pending = kv_get(&db.conn, "history_restore_pending")?.unwrap_or_else(|| uuid::Uuid::new_v4().as_bytes().to_vec());
+            kv_set(&db.conn, "history_restore_pending", &pending)?;
+            kv_set(&db.conn, "history_restore_retry_at", (now_ms() + RESTORE_RETRY_MS).to_string().as_bytes())?;
+            pending
+        };
         let tmp = self.data_dir.join("tmp");
         let down = tmp.join("history.down");
-        let enc = tmp.join("history.enc");
         let plain = tmp.join("history.jsonl");
-        let res = (|| {
+        let res: Result<bool> = (|| {
             let token = self.access_token()?;
             match self.api()?.download("/v1/accounts/current/history", &token, &down, MAX_HISTORY) {
-                Err(Error::Api { status: 404, .. }) => return Ok(()),
+                Err(Error::Api { status: 404, .. }) => return Ok(false),
                 r => r?,
             };
             let mut r = BufReader::new(File::open(&down)?);
             let mut nonce = [0u8; 19];
             r.read_exact(&mut nonce).map_err(|_| Error::Crypto("Копия переписки повреждена".into()))?;
-            std::io::copy(&mut r, &mut BufWriter::new(File::create(&enc)?))?;
-            files::decrypt_file(&enc, &plain, &subkey(key, "history")?, &nonce)?;
-            self.import_history(&plain)
+            files::decrypt_reader(r, &plain, &subkey(key, "history")?, &nonce)?;
+            self.import_history(&plain, key)?;
+            Ok(true)
         })();
-        for p in [&down, &enc, &plain] {
+        for p in [&down, &plain] {
             let _ = std::fs::remove_file(p);
         }
-        res?;
+        let restored = res?;
+        {
+            let db = self.db();
+            if kv_get(&db.conn, "backup_key")?.as_deref() == Some(key.as_slice())
+                && kv_get(&db.conn, "history_restore_pending")?.as_deref() == Some(pending.as_slice())
+            {
+                kv_del(&db.conn, "history_restore_pending")?;
+                kv_del(&db.conn, "history_restore_retry_at")?;
+            }
+        }
+        drop(_history);
+        if !restored {
+            return Ok(false);
+        }
         // Imported contacts need their current device lists before anyone can write to them.
         let ids: Vec<String> = {
             let db = self.db();
@@ -243,7 +291,21 @@ impl Inner {
         for id in ids {
             let _ = self.refresh_user(&id);
         }
-        Ok(())
+        Ok(true)
+    }
+
+    pub(crate) fn restore_account_history(&self) -> Result<Value> {
+        let key = self.backup_key()?.ok_or(Error::NotLoggedIn)?;
+        let restored = self.restore_history(&key)?;
+        if restored {
+            self.history_restored();
+        }
+        Ok(json!({"restored": restored}))
+    }
+
+    fn history_restored(&self) {
+        self.emit(json!({"type": "history_restored"}));
+        self.emit(json!({"type": "conversations_changed"}));
     }
 
     /// One JSON object per line, streamed so large histories never sit in memory.
@@ -303,9 +365,12 @@ impl Inner {
         Ok(())
     }
 
-    fn import_history(&self, path: &Path) -> Result<()> {
-        let me = kv_get_str(&self.db().conn, "user_id")?.unwrap_or_default();
+    fn import_history(&self, path: &Path, key: &[u8; 32]) -> Result<()> {
         let mut db = self.db();
+        if kv_get(&db.conn, "backup_key")?.as_deref() != Some(key.as_slice()) {
+            return Err(Error::NotLoggedIn);
+        }
+        let me = kv_get_str(&db.conn, "user_id")?.ok_or(Error::NotLoggedIn)?;
         let tx = db.conn.transaction()?;
         for line in BufReader::new(File::open(path)?).lines() {
             let v: Value = serde_json::from_str(&line?)?;
@@ -358,6 +423,84 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_restore_keeps_cloud_copy_and_retries_legacy_history() {
+        use std::net::TcpListener;
+
+        let dir = std::env::temp_dir().join(format!("neochat-restore-{}", uuid::Uuid::new_v4()));
+        let core = crate::engine::Core::open(&json!({"data_dir": dir, "db_key": "ab".repeat(32), "foreground": false}), Box::new(|_| {})).unwrap();
+        let key = [42; 32];
+        let legacy = dir.join("legacy.jsonl");
+        std::fs::write(&legacy, concat!(
+            "{\"t\":\"conversation\",\"id\":\"chat\",\"kind\":\"direct\",\"revision\":\"1\",\"members\":\"[]\"}\n",
+            "{\"t\":\"message\",\"id\":\"legacy\",\"conversation_id\":\"chat\",\"sender_user_id\":\"peer\",\"kind\":\"text\",\"body\":\"legacy message\",\"status\":\"received\"}\n",
+        )).unwrap();
+        let nonce = [3; 19];
+        let encrypted = dir.join("legacy.enc");
+        files::encrypt_with(&legacy, &encrypted, subkey(&key, "history").unwrap(), nonce).unwrap();
+        let mut payload = nonce.to_vec();
+        payload.extend(std::fs::read(encrypted).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut history_requests = 0;
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() { break; }
+                }
+                assert!(!request.starts_with("PUT /v1/accounts/current/history"), "an unread backup must never be overwritten");
+                let (status, bytes) = if request.starts_with("GET /v1/accounts/current/history ") {
+                    history_requests += 1;
+                    ("200 OK", if history_requests == 1 { &payload[..payload.len() - 1] } else { &payload[..] })
+                } else {
+                    ("404 Not Found", &b"{}"[..])
+                };
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+                stream.write_all(bytes).unwrap();
+                if history_requests == 2 { break; }
+            }
+        });
+        {
+            let db = core.inner.db();
+            for (name, value) in [
+                ("user_id", "me"), ("device_id", "device"), ("server", &base),
+                ("access_token", "fixture"), ("refresh_token", "fixture"),
+                ("access_expires_at", &(now_ms() + 600_000).to_string()),
+            ] {
+                kv_set(&db.conn, name, value.as_bytes()).unwrap();
+            }
+            kv_set(&db.conn, "backup_key", &key).unwrap();
+            kv_set(&db.conn, "history_restore_pending", b"1").unwrap();
+            db.conn.execute(
+                "INSERT INTO messages(id,conversation_id,sender_user_id,outgoing,kind,body,status,sent_at)
+                 VALUES ('local','chat','me',1,'text','local message','sent',1)", [],
+            ).unwrap();
+        }
+        assert!(matches!(core.inner.restore_history(&key), Err(Error::Crypto(_))));
+        assert!(!core.inner.upload_history(&key).unwrap());
+        core.inner.maybe_upload_history().unwrap();
+        {
+            let db = core.inner.db();
+            assert_eq!(kv_get(&db.conn, "history_restore_pending").unwrap().as_deref(), Some(&b"1"[..]));
+            assert_eq!(db.conn.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            kv_set(&db.conn, "history_restore_retry_at", b"0").unwrap();
+        }
+        core.inner.maybe_upload_history().unwrap();
+        {
+            let db = core.inner.db();
+            assert!(kv_get(&db.conn, "history_restore_pending").unwrap().is_none());
+            assert_eq!(db.conn.query_row("SELECT count(*) FROM messages WHERE id IN ('local','legacy')", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        }
+        server.join().unwrap();
+        drop(core);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn keys_are_stable_and_separate() {

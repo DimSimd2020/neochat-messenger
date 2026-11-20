@@ -76,6 +76,25 @@ CREATE TABLE IF NOT EXISTS messages (
     sent_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_conv ON messages(conversation_id, local_id);
+CREATE INDEX IF NOT EXISTS messages_streak ON messages(conversation_id, outgoing, sent_at)
+    WHERE kind IN ('text','file','poll') AND status IN ('received','sent','delivered','read');
+CREATE TABLE IF NOT EXISTS stories (
+    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, sender_user_id TEXT NOT NULL,
+    sent_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, caption TEXT NOT NULL,
+    file TEXT NOT NULL, style TEXT NOT NULL, options TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS stories_expiry ON stories(expires_at);
+CREATE TABLE IF NOT EXISTS story_routes (
+    story_id TEXT NOT NULL, conversation_id TEXT NOT NULL, PRIMARY KEY(story_id, conversation_id)
+);
+CREATE TABLE IF NOT EXISTS story_changes (
+    story_id TEXT NOT NULL, conversation_id TEXT NOT NULL, stamp TEXT NOT NULL, at INTEGER NOT NULL,
+    revision TEXT NOT NULL, deleted INTEGER NOT NULL, PRIMARY KEY(story_id, conversation_id)
+);
+CREATE TABLE IF NOT EXISTS story_feedback (
+    story_id TEXT NOT NULL, user_id TEXT NOT NULL, viewed INTEGER NOT NULL DEFAULT 0,
+    reaction TEXT, stamp TEXT NOT NULL DEFAULT '', PRIMARY KEY(story_id, user_id)
+);
 CREATE TABLE IF NOT EXISTS receipts (
     message_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL,
     PRIMARY KEY (message_id, user_id, kind)
@@ -156,6 +175,7 @@ impl Db {
             // Pin time of a pinned message (0 = not pinned); 1 on the notes chat flag of a conversation.
             "ALTER TABLE messages ADD COLUMN pinned_at INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE stories ADD COLUMN options TEXT NOT NULL DEFAULT '{}'",
         ] {
             let _ = conn.execute(sql, []);
         }

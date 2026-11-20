@@ -58,7 +58,11 @@ impl Inner {
                 }
             }
             let fg = self.foreground.load(Ordering::SeqCst);
-            self.wait(if fg { Duration::from_secs(30) } else { Duration::from_secs(300) });
+            let normal = if fg { 30_000i64 } else { 300_000i64 };
+            let delay = if self.logged_in() {
+                self.next_media_expiry().map(|deadline| (deadline - now_ms()).clamp(500, normal)).unwrap_or(normal)
+            } else { normal };
+            self.wait(Duration::from_millis(delay as u64));
         }
         if let Some(h) = ws {
             let _ = h.join();
@@ -78,7 +82,10 @@ impl Inner {
     fn run_cycle(self: &Arc<Self>) -> Result<usize> {
         let _g = self.cycle_lock.lock().unwrap_or_else(|e| e.into_inner());
         let res = (|| {
+            // Expired media must be erased and its viewed receipts queued before outgoing sync.
+            self.sweep_viewed_media();
             // Outgoing first: a just-typed message should not wait for the incoming feed.
+            self.sweep_stories()?;
             self.flush_outbox()?;
             let n = self.sync_events()?;
             // Messages that could not be decrypted get another try when it is due.
@@ -107,7 +114,7 @@ impl Inner {
         let mut stats = CycleStats::default();
         loop {
             let cursor = kv_get_str(&self.db().conn, "cursor")?.unwrap_or_default();
-            let res = match self.authed("GET", &format!("/v1/sync?cursor={cursor}&limit=100"), None) {
+            let res = match self.authed("GET", &format!("/v1/sync?cursor={cursor}&limit=100&copy_protection=1"), None) {
                 Err(e) if e.is_api("sync_reset_required") || e.is_api("cursor_expired") => {
                     // The server restored a backup or expired our feed: start a new cursor.
                     // Messages that were never delivered cannot be recovered.
@@ -119,6 +126,11 @@ impl Inner {
             };
             for ev in res["events"].as_array().cloned().unwrap_or_default() {
                 self.handle_event(&ev, &mut stats)?;
+            }
+            for item in res["copy_protection"].as_array().into_iter().flatten() {
+                if self.apply_copy_protection(s(item, "conversation_id")?, &item["copy_protection"])? {
+                    self.emit(json!({"type": "conversations_changed"}));
+                }
             }
             // The cursor advances only after every event in the batch is committed.
             if let Some(next) = res["next_cursor"].as_str() {
@@ -151,6 +163,13 @@ impl Inner {
         }
         match ev["kind"].as_str().unwrap_or("") {
             "message" => self.handle_message(ev, stats, false),
+            "copy_protection" => {
+                let payload = &ev["payload"];
+                if self.apply_copy_protection(s(payload, "conversation_id")?, &payload["copy_protection"])? {
+                    self.emit(json!({"type": "conversations_changed"}));
+                }
+                self.mark_processed(event_id)
+            }
             "membership" => {
                 let cid = ev["payload"]["conversation_id"].as_str().unwrap_or_default().to_string();
                 match self.fetch_conversation(&cid) {
@@ -195,14 +214,8 @@ impl Inner {
             }
             "history" => {
                 let fresh: i64 = kv_get_str(&self.db().conn, "history_fresh_until")?.and_then(|v| v.parse().ok()).unwrap_or(0);
-                if fresh > crate::store::now_ms() {
-                    if let Some(key) = self.backup_key()? {
-                        match self.restore_history(&key) {
-                            Ok(()) => self.emit(json!({"type": "conversations_changed"})),
-                            Err(e @ Error::Network(_)) => return Err(e),
-                            Err(_) => {}
-                        }
-                    }
+                if fresh > crate::store::now_ms() && self.backup_key()?.is_some() {
+                    kv_set(&self.db().conn, "history_restore_pending", event_id.as_bytes())?;
                 }
                 self.mark_processed(event_id)
             }
@@ -334,6 +347,7 @@ impl Inner {
         });
         let now = now_ms();
         let mut changed_conv = false;
+        let mut changed_stories = false;
         // Group and poll controls change state through helpers that lock the db: applied after commit.
         let mut control: Option<(String, Value)> = None;
         let mut deleted = None;
@@ -368,6 +382,15 @@ impl Inner {
                 changed_conv = true;
             }
             Ok(Some(p)) => match p.kind.as_str() {
+                "story" => {
+                    changed_stories = crate::stories::receive(&tx, &p, now)?;
+                }
+                "story_change" => {
+                    changed_stories = crate::stories::receive_change(&tx, &p, now)?;
+                }
+                "story_feedback" => {
+                    changed_stories = crate::stories::receive_feedback(&tx, &p, &me, now)?;
+                }
                 "text" | "file" | "poll" if tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM deleted_messages WHERE message_id=?1 AND conversation_id=?2 AND sender_user_id=?3)",
                     params![p.mid, conv, sender], |r| r.get::<_, bool>(0),
@@ -520,6 +543,9 @@ impl Inner {
         self.emit(json!({"type": "messages_changed", "conversation_id": conv}));
         if changed_conv {
             self.emit(json!({"type": "conversations_changed"}));
+        }
+        if changed_stories {
+            self.emit(json!({"type": "stories_changed"}));
         }
         if (stats.receipts.get(&conv).is_some_and(|v| !v.is_empty()) || stats.notify.remove(&conv)) && sender != me {
             let title = self.conversation_json(&conv).ok().and_then(|c| c["title"].as_str().map(str::to_string)).unwrap_or_default();

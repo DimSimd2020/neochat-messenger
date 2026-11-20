@@ -1,6 +1,6 @@
 //! Account state shared by the user's own devices: contacts (added, removed, own
 //! names, verification of the safety number), pinned and archived chats, and account
-//! preferences (quick reaction, read receipts).
+//! preferences (quick reaction, read receipts, QR card style).
 //!
 //! The document is a JSON map `{key: {"v": value, "at": ms}}`, sealed with a key
 //! derived from the password backup key, so the server stores an opaque blob with a
@@ -22,6 +22,7 @@ use crate::store::{kv_del, kv_get_str, kv_set, now_ms};
 /// Without a nudge from the server the document is still re-read this often.
 const PULL_EVERY_MS: i64 = 30 * 60 * 1000;
 pub const DEFAULT_QUICK_REACTION: &str = "❤️";
+const QR_STYLE_KEY: &str = "pref:qr_style";
 
 pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS account_state (
     key TEXT PRIMARY KEY, v TEXT NOT NULL, at INTEGER NOT NULL, dirty INTEGER NOT NULL DEFAULT 0
@@ -32,23 +33,56 @@ fn newer(a_at: i64, a_v: &str, b_at: i64, b_v: &str) -> bool {
     (a_at, a_v) > (b_at, b_v)
 }
 
+pub(crate) fn valid_qr_style(v: &Value) -> bool {
+    let Some(style) = v.as_object() else { return false };
+    if !matches!(v["pattern"].as_str(), Some("squares" | "dots" | "mosaic" | "rhombus"))
+        || !v["avatar"].is_boolean()
+        || !v["emoji"].as_array().is_some_and(|emoji| {
+            emoji.len() <= 3 && emoji.iter().all(|e| e.as_str().is_some_and(crate::social::valid_reaction))
+        })
+    {
+        return false;
+    }
+    match v["ink"].as_str() {
+        Some("ocean" | "sunset" | "forest" | "lilac" | "graphite") => style.len() == 4,
+        Some("custom" | "theme") => style.len() == 5 && v["colors"].as_array().is_some_and(|colors| {
+            colors.len() == 2 && colors.iter().all(|c| c.as_u64().is_some_and(|n| n <= 0xffffff))
+        }),
+        _ => false,
+    }
+}
+
+pub(crate) fn qr_style(c: &rusqlite::Connection) -> Result<Option<Value>> {
+    let style: Option<String> = c.query_row("SELECT v FROM account_state WHERE key=?1", [QR_STYLE_KEY], |r| r.get(0)).optional()?;
+    Ok(style.and_then(|v| serde_json::from_str(&v).ok()).filter(valid_qr_style))
+}
+
+fn enqueue_state(c: &rusqlite::Connection, key: &str, v: &Value) -> Result<()> {
+    c.execute(
+        "INSERT INTO account_state(key, v, at, dirty) VALUES (?1, ?2, ?3, 1)
+         ON CONFLICT(key) DO UPDATE SET v=excluded.v, at=MAX(excluded.at, account_state.at + 1), dirty=1",
+        params![key, v.to_string(), now_ms()],
+    )?;
+    Ok(())
+}
+
 impl Inner {
     /// Records a local change of `key` for the other devices and wakes the worker.
     pub fn touch(&self, key: &str) {
         let res = (|| {
             let db = self.db();
             let Some(v) = local_value(&db.conn, key)? else { return Ok(()) };
-            let prev: i64 = db.conn.query_row("SELECT at FROM account_state WHERE key=?1", [key], |r| r.get(0)).optional()?.unwrap_or(0);
-            db.conn.execute(
-                "INSERT INTO account_state(key, v, at, dirty) VALUES (?1, ?2, ?3, 1)
-                 ON CONFLICT(key) DO UPDATE SET v=excluded.v, at=excluded.at, dirty=1",
-                params![key, v.to_string(), now_ms().max(prev + 1)],
-            )?;
-            Ok::<_, Error>(())
+            enqueue_state(&db.conn, key, &v)
         })();
         if res.is_ok() {
             self.wake();
         }
+    }
+
+    pub(crate) fn set_qr_style(&self, style: &Value) -> Result<()> {
+        enqueue_state(&self.db().conn, QR_STYLE_KEY, style)?;
+        self.wake();
+        Ok(())
     }
 
     pub fn contact_touch(&self, user_id: &str) {
@@ -205,6 +239,8 @@ impl Inner {
                     changed.2 = true;
                 } else if k == "pref:read_receipts" {
                     kv_set(&tx, "read_receipts", if v.as_bool().unwrap_or(true) { b"1" } else { b"0" })?;
+                    changed.2 = true;
+                } else if k == QR_STYLE_KEY && valid_qr_style(v) {
                     changed.2 = true;
                 } else {
                     continue;

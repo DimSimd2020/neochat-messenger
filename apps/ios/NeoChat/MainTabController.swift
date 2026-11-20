@@ -40,6 +40,14 @@ final class ChatNavController: UINavigationController, UIGestureRecognizerDelega
     func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
         g !== interactivePopGestureRecognizer || (viewControllers.count > 1 && transitionCoordinator == nil)
     }
+
+    func navigationController(_ navigationController: UINavigationController, animationControllerFor operation: UINavigationController.Operation,
+                              from fromVC: UIViewController, to toVC: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+        guard !Theme.reducedMotion else { return nil }
+        let forward = operation == .push && fromVC is ChatsViewController && (toVC is ChatViewController || toVC is ChatTransitionPreviewController)
+        let back = operation == .pop && (fromVC is ChatViewController || fromVC is ChatTransitionPreviewController) && toVC is ChatsViewController
+        return forward || back ? ChatTransitionAnimator(entering: forward) : nil
+    }
 }
 
 /// Chats, contacts and profile behind a floating glass tab bar with a lens, as on Android.
@@ -213,6 +221,8 @@ final class RowCell: UITableViewCell {
     let time = label("", 13, color: Theme.muted)
     let badge = PaddedBadge()
     let pin = UIImageView(image: UIImage(systemName: "pin.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)))
+    let previewIcon = UIImageView()
+    let streak = label("", 12, .semibold, color: Theme.warning)
     let groupIcon = UIImageView(image: UIImage(systemName: "person.2.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)))
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -229,13 +239,20 @@ final class RowCell: UITableViewCell {
         groupIcon.isHidden = true
         groupIcon.setContentHuggingPriority(.required, for: .horizontal)
         groupIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let top = UIStackView(arrangedSubviews: [groupIcon, title, time])
+        streak.isHidden = true
+        streak.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let top = UIStackView(arrangedSubviews: [groupIcon, title, streak, time])
         top.alignment = .center
         top.spacing = 8
         pin.tintColor = Theme.muted
         pin.isHidden = true
         pin.setContentHuggingPriority(.required, for: .horizontal)
-        let bottom = UIStackView(arrangedSubviews: [subtitle, pin, badge])
+        previewIcon.tintColor = Theme.muted
+        previewIcon.contentMode = .scaleAspectFit
+        previewIcon.isHidden = true
+        previewIcon.widthAnchor.constraint(equalToConstant: 17).isActive = true
+        previewIcon.heightAnchor.constraint(equalToConstant: 17).isActive = true
+        let bottom = UIStackView(arrangedSubviews: [previewIcon, subtitle, pin, badge])
         bottom.spacing = 8
         bottom.alignment = .center
         let text = UIStackView(arrangedSubviews: [top, bottom])
@@ -513,7 +530,7 @@ final class ArchiveEntryView: UIControl {
     private let icon = ArchiveIconView()
     private let disc = UIView()
     private let title = label("Архив", 17, .semibold)
-    private let ring = CAShapeLayer()
+    let halo = GestureProgressView(radius: 21)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -523,15 +540,8 @@ final class ArchiveEntryView: UIControl {
         accessibilityTraits = .button
         disc.backgroundColor = Theme.accent.withAlphaComponent(0.16)
         disc.layer.cornerRadius = 26
-        ring.fillColor = UIColor.clear.cgColor
-        ring.strokeColor = Theme.accent.cgColor
-        ring.lineWidth = 2.5
-        ring.lineCap = .round
-        ring.strokeStart = 0
-        ring.strokeEnd = 0
-        layer.addSublayer(ring)
         accessibilityLabel = "Архив"
-        for v in [disc, icon, title] as [UIView] {
+        for v in [disc, halo, icon, title] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             v.isUserInteractionEnabled = false
             addSubview(v)
@@ -545,6 +555,10 @@ final class ArchiveEntryView: UIControl {
             icon.centerYAnchor.constraint(equalTo: disc.centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 26),
             icon.heightAnchor.constraint(equalToConstant: 26),
+            halo.centerXAnchor.constraint(equalTo: disc.centerXAnchor),
+            halo.centerYAnchor.constraint(equalTo: disc.centerYAnchor),
+            halo.widthAnchor.constraint(equalToConstant: 70),
+            halo.heightAnchor.constraint(equalToConstant: 70),
             title.leadingAnchor.constraint(equalTo: disc.trailingAnchor, constant: 14),
             title.centerYAnchor.constraint(equalTo: centerYAnchor),
             title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
@@ -557,24 +571,10 @@ final class ArchiveEntryView: UIControl {
         didSet { alpha = isHighlighted ? 0.7 : 1 }
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let center = disc.center
-        let radius = disc.bounds.width / 2 + 4
-        ring.frame = bounds
-        ring.path = UIBezierPath(arcCenter: center, radius: radius, startAngle: -.pi / 2, endAngle: 1.5 * .pi, clockwise: true).cgPath
-        ring.strokeColor = Theme.accent.cgColor
-    }
-
-    /// The ring fills while the row is pulled out; it fades once the row has opened.
-    func setPullProgress(_ progress: CGFloat) {
+    func setPullProgress(_ progress: CGFloat, showRing: Bool = true) {
         let p = min(1, max(0, progress))
         icon.progress = p
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        ring.strokeEnd = p
-        ring.opacity = Float(p > 0.02 && p < 1 ? 1 : 0)
-        CATransaction.commit()
+        halo.setProgress(showRing ? p : 0)
     }
 }
 
@@ -585,19 +585,23 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
     private var presenceTimer: Timer?
     private var archiveShown = false
     private var archivePullArmed = false
+    private var archiveThresholdCrossed = false
+    private let archiveImpact = UIImpactFeedbackGenerator(style: .light)
     private var adjustingArchive = false
     private let archiveButton = ArchiveEntryView()
     private let archiveHeader = UIView()
+    private let storyRail = StoryRailView()
+    private let storyRailHeight: CGFloat = 100
     private let filterTabs = LensTabBar(items: ["Все", "Личные", "Группы"].map { (title: $0, icon: "") }, textOnly: true)
     private let filterHeight: CGFloat = 68
     private var archiveVisibleHeight: CGFloat = 0
-    private lazy var archiveHeightMotion = Spring(0.32, 0.9, precision: 0.25) { [weak self] height in
+    private lazy var archiveHeightMotion = Spring(0.54, 0.92, precision: 0.25) { [weak self] height in
         guard let self else { return }
         let wasAdjusting = self.adjustingArchive
         self.adjustingArchive = true
         UIView.performWithoutAnimation {
             self.setArchiveHeaderHeight(min(self.archiveOpenHeight, max(0, height)))
-            self.archiveButton.setPullProgress(height / self.archiveOpenHeight)
+            self.archiveButton.setPullProgress(height / self.archiveOpenHeight, showRing: false)
             self.tableView.layoutIfNeeded()
         }
         self.adjustingArchive = wasAdjusting
@@ -629,7 +633,10 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
         }, for: .touchUpInside)
         archiveHeader.clipsToBounds = true
         archiveHeader.addSubview(filterTabs)
+        archiveHeader.addSubview(storyRail)
         archiveHeader.addSubview(archiveButton)
+        storyRail.host = self
+        storyRail.refresh()
         setArchiveHeaderHeight(0)
         tableView.alwaysBounceVertical = true
         // One recognizer owns the pull. Observing contentOffset here fought the
@@ -666,6 +673,7 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         refreshPresence()
+        storyRail.refresh()
         presenceTimer?.invalidate()
         presenceTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refreshPresence() }
     }
@@ -708,20 +716,27 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
             archiveHeightMotion.stop()
             archivePullTop = -tableView.adjustedContentInset.top
             archivePullArmed = false
+            archiveThresholdCrossed = false
+            archiveButton.halo.reset()
+            archiveImpact.prepare()
             fallthrough
         case .changed:
             guard archiveAvailable else { setArchiveShown(false); return }
             let p = min(1, max(0, gesture.translation(in: tableView).y / archiveTravel))
             adjustingArchive = true
             UIView.performWithoutAnimation {
-                self.setArchiveHeaderHeight(self.archiveOpenHeight * p)
+                self.setArchiveHeaderHeight(self.archiveOpenHeight * 0.87 * p)
                 self.tableView.contentOffset.y = self.archivePullTop
                 self.tableView.layoutIfNeeded()
             }
             adjustingArchive = false
             archiveButton.setPullProgress(p)
-            if !archivePullArmed && p >= 1 { archivePullArmed = true; replyHaptic() }
-            else if p < 0.85 { archivePullArmed = false }
+            archivePullArmed = p >= 1
+            if archivePullArmed && !archiveThresholdCrossed {
+                archiveThresholdCrossed = true
+                archiveImpact.impactOccurred(intensity: 0.85)
+                archiveButton.halo.complete()
+            }
         case .ended, .cancelled, .failed:
             let open = gesture.state == .ended && archivePullArmed
             archivePullArmed = false
@@ -734,7 +749,7 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
         guard archiveShown, !adjustingArchive, scrollView.isDragging || scrollView.isDecelerating else { return }
         let top = -tableView.adjustedContentInset.top
         // Let the header scroll away, then remove it once, preserving the visible rows.
-        guard tableView.contentOffset.y - top >= filterHeight + archiveOpenHeight else { return }
+        guard tableView.contentOffset.y - top >= filterHeight + storyRailHeight + archiveOpenHeight else { return }
         adjustingArchive = true
         let offset = tableView.contentOffset.y - archiveOpenHeight
         setArchiveShown(false)
@@ -751,10 +766,12 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
         let h = max(0, height)
         archiveVisibleHeight = h
         filterTabs.frame = CGRect(x: 0, y: 0, width: width, height: filterHeight)
+        storyRail.frame = CGRect(x: 0, y: filterHeight, width: width, height: storyRailHeight)
         archiveButton.isHidden = h < 1
-        archiveButton.frame = CGRect(x: 12, y: filterHeight + 4, width: width - 24, height: 72)
-        guard abs(archiveHeader.bounds.height - filterHeight - h) > 0.5 || abs(archiveHeader.bounds.width - width) > 0.5 else { return }
-        archiveHeader.frame = CGRect(x: 0, y: 0, width: width, height: filterHeight + h)
+        archiveButton.frame = CGRect(x: 12, y: filterHeight + storyRailHeight + 4, width: width - 24, height: 72)
+        let base = filterHeight + storyRailHeight
+        guard abs(archiveHeader.bounds.height - base - h) > 0.5 || abs(archiveHeader.bounds.width - width) > 0.5 else { return }
+        archiveHeader.frame = CGRect(x: 0, y: 0, width: width, height: base + h)
         tableView.tableHeaderView = archiveHeader
     }
 
@@ -762,7 +779,7 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
         let want = on && archiveAvailable
         let height: CGFloat = want ? archiveOpenHeight : 0
         if want == archiveShown && abs(archiveVisibleHeight - height) < 0.5 {
-            archiveButton.setPullProgress(want ? 1 : 0)
+            archiveButton.setPullProgress(want ? 1 : 0, showRing: false)
             return
         }
         archiveShown = want
@@ -770,7 +787,7 @@ final class ChatsViewController: ChatListViewController, UIGestureRecognizerDele
         archiveButton.transform = .identity
         if pop && want && !Theme.reducedMotion {
             archiveHeightMotion.to(height)
-            archiveButton.pop(from: 0.96, response: 0.38, damping: 0.72)
+            archiveButton.pop(from: 0.97, response: 0.48, damping: 0.86)
         } else if Theme.reducedMotion || adjustingArchive {
             archiveHeightMotion.snap(height)
         } else {

@@ -553,8 +553,10 @@ fn qr_login_history_and_two_factor() {
     let login = json!({"server": e.server, "username": aname, "password": "correct horse battery", "device_name": "tablet", "platform": "android"});
     assert!(third.try_call("login", login.clone()).unwrap_err().is_api("code_required"));
     alice.sync();
-    let notice = alice.texts("neochat-system").last().unwrap().clone();
-    let code: String = notice.chars().filter(char::is_ascii_digit).take(6).collect();
+    let code = alice.texts("neochat-system").into_iter().rev().find_map(|notice| {
+        let code = notice.strip_prefix("Код для входа: ")?.lines().next()?;
+        (code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())).then(|| code.to_string())
+    }).expect("missing sign-in code notice");
     let mut with_code = login.clone();
     with_code["code"] = code.into();
     third.call("login", with_code);
@@ -899,6 +901,67 @@ fn video_keeps_poster_and_length() {
     assert!(chats.as_array().unwrap().iter().any(|c| c["id"] == cid && c["last_preview"].as_str().unwrap_or("").starts_with("📎")), "{chats:?}");
     let dl = bob.call("download_file", json!({"message_id": m["id"]}));
     assert_eq!(std::fs::read(dl["path"].as_str().unwrap()).unwrap(), data);
+}
+
+#[test]
+fn conversation_copy_protection() {
+    let Some(e) = env() else { return };
+    let aname = uname("copy_alice");
+    let (alice, _) = register(&e, &aname);
+    let bname = uname("copy_bob");
+    let (mut bob, _) = register(&e, &bname);
+    alice.call("resolve_contact", json!({"username": bname}));
+    let chat = alice.call("open_direct", json!({"user_id": uid(&bob)}));
+    let cid = chat["id"].as_str().unwrap();
+    assert_eq!(chat["copy_protection"]["forward"]["blocked"], false);
+    let message = alice.call("send_text", json!({"conversation_id": cid, "text": "Проверка запретов"}));
+    let src = alice.dir.join("test-file");
+    std::fs::write(&src, b"test attachment").unwrap();
+    let file = alice.call("send_file", json!({"conversation_id": cid, "path": src.to_string_lossy(), "mime": "application/octet-stream"}));
+    alice.sync();
+    bob.sync();
+    let settings = |rule, action, revision| json!({"conversation_id": cid, "rule": rule, "action": action, "revision": revision});
+    let chat_params = json!({"conversation_id": cid});
+    let forward = json!({"message_id": message["id"], "conversation_id": cid});
+    let saved = json!({"message_id": message["id"]});
+    let file_params = json!({"message_id": file["id"]});
+    let external = json!({"message_id": file["id"], "external": true});
+    let dest = bob.dir.join("exported-file");
+    let export = json!({"message_id": file["id"], "dest": dest.to_string_lossy()});
+
+    alice.call("set_copy_protection", settings("forward", "block", 0));
+    bob.sync();
+    bob.reopen();
+    assert_eq!(bob.call("get_conversation", chat_params.clone())["copy_protection"]["forward"]["blocked"], true);
+    assert!(bob.try_call("forward_message", forward.clone()).is_err());
+    assert!(bob.try_call("save_message", saved.clone()).is_err());
+    assert!(bob.try_call("set_copy_protection", settings("forward", "allow", 1)).is_err());
+    assert_eq!(bob.call("set_copy_protection", settings("forward", "request", 1))["copy_protection"]["forward"]["requested"], true);
+    alice.sync();
+    let pending = alice.call("get_conversation", chat_params.clone());
+    assert_eq!(pending["copy_permission_requested"], true);
+    assert_eq!(pending["copy_protection"]["forward"]["mine"], true);
+
+    bob.call("set_copy_protection", settings("copy", "block", 2));
+    alice.sync();
+    alice.call("set_copy_protection", settings("forward", "allow", 3));
+    bob.sync();
+    assert_eq!(bob.call("get_conversation", chat_params.clone())["copy_protection"]["forward"]["requested"], false);
+    assert!(bob.try_call("download_file", external.clone()).is_err());
+    assert!(bob.try_call("export_file", export.clone()).is_err());
+    assert!(!dest.exists());
+    assert!(bob.try_call("save_message", saved).is_err());
+    let got = bob.call("download_file", file_params);
+    assert_eq!(std::fs::read(got["path"].as_str().unwrap()).unwrap(), b"test attachment");
+    bob.call("forward_message", forward);
+
+    bob.call("set_copy_protection", settings("screenshot", "block", 4));
+    alice.sync();
+    assert_eq!(alice.call("get_conversation", chat_params)["copy_protection"]["screenshot"]["blocked"], true);
+    bob.call("set_copy_protection", settings("copy", "allow", 5));
+    bob.call("download_file", external);
+    bob.call("export_file", export);
+    assert_eq!(std::fs::read(dest).unwrap(), b"test attachment");
 }
 
 #[test]
@@ -1330,6 +1393,54 @@ fn call_answered_on_one_device_stops_the_other() {
 }
 
 #[test]
+fn stories_reach_only_the_selected_accounts_and_stay_out_of_chat() {
+    let Some(e) = env() else { return };
+    let (alice, _) = register(&e, &uname("alice"));
+    let bname = uname("bob");
+    let (bob, _) = register(&e, &bname);
+    let cname = uname("carol");
+    let (carol, _) = register(&e, &cname);
+    alice.call("resolve_contact", json!({"username": bname}));
+    let dm = alice.call("open_direct", json!({"user_id": uid(&bob)}))["id"].as_str().unwrap().to_owned();
+    alice.call("resolve_contact", json!({"username": cname}));
+    alice.call("open_direct", json!({"user_id": uid(&carol)}));
+    let path = alice.dir.join("fixture.jpg");
+    let payload = b"fixture photo bytes";
+    std::fs::write(&path, payload).unwrap();
+    let style = json!({"text": "Привет", "text_y": 400, "lines": [[[10,20],[23,42]]],
+        "text_color": 0xffbb66, "text_align": 1, "text_font": 2, "text_background": 1,
+        "brushes": [{"color": 0xeeeeff, "kind": 2}],
+        "stickers": [{"emoji":"✨","x":500,"y":300}]});
+    let request = json!({"conversation_ids": [dm, dm], "hours": 6, "style": style,
+        "caption": "Подпись", "path": path.to_string_lossy(), "name": "fixture.jpg", "mime": "image/jpeg"});
+    let id = alice.call("publish_story", request.clone())["id"].as_str().unwrap().to_owned();
+    let mut invalid = request;
+    invalid["hours"] = json!(7);
+    assert!(alice.try_call("publish_story", invalid).is_err());
+    alice.sync();
+    bob.sync();
+    carol.sync();
+    let incoming = bob.call("list_stories", json!({}));
+    assert_eq!(incoming.as_array().unwrap().len(), 1);
+    assert_eq!(incoming[0]["id"], id);
+    assert_eq!(incoming[0]["caption"], "Подпись");
+    assert_eq!(incoming[0]["style"]["text_y"], 400);
+    assert_eq!(incoming[0]["style"]["text_color"], 0xffbb66);
+    assert_eq!(incoming[0]["style"]["text_align"], 1);
+    assert_eq!(incoming[0]["style"]["text_font"], 2);
+    assert_eq!(incoming[0]["style"]["text_background"], 1);
+    assert_eq!(incoming[0]["style"]["brushes"][0]["kind"], 2);
+    assert_eq!(incoming[0]["style"]["stickers"][0]["emoji"], "✨");
+    assert!(bob.messages(&dm).is_empty());
+    assert!(carol.call("list_stories", json!({})).as_array().unwrap().is_empty());
+    assert!(carol.try_call("open_story", json!({"story_id": id})).is_err());
+    for client in [&alice, &bob] {
+        let opened = client.call("open_story", json!({"story_id": id}));
+        assert_eq!(std::fs::read(opened["path"].as_str().unwrap()).unwrap(), payload);
+    }
+}
+
+#[test]
 fn own_devices_share_contacts_pins_settings_and_avatar() {
     let Some(e) = env() else { return };
     let aname = uname("alice");
@@ -1352,7 +1463,10 @@ fn own_devices_share_contacts_pins_settings_and_avatar() {
     let cid = alice.call("open_direct", json!({"user_id": bid}))["id"].as_str().unwrap().to_string();
     alice.call("verify_contact", json!({"user_id": bid}));
     alice.call("set_pinned", json!({"conversation_id": cid, "pinned": true}));
-    alice.call("set_settings", json!({"quick_reaction": "🔥", "read_receipts": false}));
+    let qr_style = json!({
+        "pattern": "mosaic", "ink": "custom", "colors": [0x356abc, 0xece0fb], "avatar": true, "emoji": ["🌙", "✨"],
+    });
+    alice.call("set_settings", json!({"quick_reaction": "🔥", "read_receipts": false, "qr_style": qr_style}));
     alice.sync();
     alice2.sync();
     let on2 = contact(&alice2, &bid).expect("contact synced");
@@ -1361,6 +1475,17 @@ fn own_devices_share_contacts_pins_settings_and_avatar() {
     let settings = alice2.call("get_settings", json!({}));
     assert_eq!(settings["quick_reaction"], "🔥");
     assert_eq!(settings["read_receipts"], false);
+    assert_eq!(settings["qr_style"], qr_style);
+    assert!(bob.call("get_settings", json!({}))["qr_style"].is_null());
+    let mut invalid_qr_style = qr_style.clone();
+    invalid_qr_style["emoji"] = json!(["not an emoji"]);
+    assert!(alice2.try_call("set_settings", json!({"qr_style": invalid_qr_style})).is_err());
+    assert_eq!(alice2.call("get_settings", json!({}))["qr_style"], qr_style);
+    let next_qr_style = json!({"pattern": "dots", "ink": "forest", "avatar": false, "emoji": []});
+    alice2.call("set_settings", json!({"qr_style": next_qr_style}));
+    alice2.sync();
+    alice.sync();
+    assert_eq!(alice.call("get_settings", json!({}))["qr_style"], next_qr_style);
 
     // The chat reaches the second device later; the pin made earlier applies to it.
     bob.call("resolve_contact", json!({"username": aname}));
@@ -1463,7 +1588,7 @@ fn spoilers_and_one_time_media() {
     alice.sync();
     bob.sync();
     assert_eq!(find(&alice, "hidden.jpg")["file"]["spoiler"], true);
-    // A second tap hides it again on this device.
+    // Explicit local reset remains supported; UI taps no longer use it to hide a photo.
     bob.call("media_shown", json!({"message_id": hm["id"], "on": false}));
     assert_eq!(find(&bob, "hidden.jpg")["file"]["spoiler"], true);
     bob.call("media_shown", json!({"message_id": hm["id"]}));

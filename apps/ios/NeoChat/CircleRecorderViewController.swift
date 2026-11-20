@@ -21,6 +21,7 @@ final class CircleRecorderViewController: UIViewController, AVCaptureFileOutputR
     private let record = RecordButton()
     private let flip = UIButton(type: .system)
     private let close = UIButton(type: .close)
+    private let mirror = UISwitch()
     private var recording = false
     private var finishing = false
     private var discard = false
@@ -67,6 +68,7 @@ final class CircleRecorderViewController: UIViewController, AVCaptureFileOutputR
             layer.videoGravity = .resizeAspectFill
             round.layer.addSublayer(layer)
             preview = layer
+            applyPreviewConnection()
         }
         for l in [track, ring] {
             l.fillColor = nil
@@ -92,7 +94,13 @@ final class CircleRecorderViewController: UIViewController, AVCaptureFileOutputR
         flip.addAction(UIAction { [weak self] _ in self?.switchCamera() }, for: .touchUpInside)
         record.accessibilityLabel = "Начать запись"
         record.addAction(UIAction { [weak self] _ in self?.toggle() }, for: .touchUpInside)
-        for v in [time, hint, record, flip, close] as [UIView] {
+        mirror.onTintColor = Theme.action
+        mirror.accessibilityLabel = "Отзеркаливание"
+        mirror.addAction(UIAction { [weak self] _ in self?.applyPreviewConnection() }, for: .valueChanged)
+        let mirrorRow = UIStackView(arrangedSubviews: [label("Отзеркаливание", 14, color: .white), mirror])
+        mirrorRow.alignment = .center
+        mirrorRow.spacing = 8
+        for v in [time, hint, record, flip, close, mirrorRow] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
@@ -100,6 +108,8 @@ final class CircleRecorderViewController: UIViewController, AVCaptureFileOutputR
             close.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             close.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             close.widthAnchor.constraint(equalToConstant: 44), close.heightAnchor.constraint(equalToConstant: 44),
+            mirrorRow.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            mirrorRow.centerYAnchor.constraint(equalTo: close.centerYAnchor),
             record.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             record.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -28),
             record.widthAnchor.constraint(equalToConstant: 76), record.heightAnchor.constraint(equalToConstant: 76),
@@ -174,20 +184,24 @@ final class CircleRecorderViewController: UIViewController, AVCaptureFileOutputR
         applyConnection()
     }
 
-    /// Upright, and mirrored for the front camera so that the recording looks like the viewfinder.
+    /// Keep the recorded file and the viewfinder upright.
     private func applyConnection() {
         if let c = output.connection(with: .video) {
             if c.isVideoOrientationSupported { c.videoOrientation = .portrait }
             if c.isVideoMirroringSupported {
                 c.automaticallyAdjustsVideoMirroring = false
-                c.isVideoMirrored = front
+                c.isVideoMirrored = false
             }
             if output.availableVideoCodecTypes.contains(.h264) { output.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.h264], for: c) }
         }
+        applyPreviewConnection()
+    }
+
+    private func applyPreviewConnection() {
         if let p = preview?.connection, p.isVideoOrientationSupported { p.videoOrientation = .portrait }
         if let p = preview?.connection, p.isVideoMirroringSupported {
             p.automaticallyAdjustsVideoMirroring = false
-            p.isVideoMirrored = front
+            p.isVideoMirrored = mirror.isOn
         }
     }
 

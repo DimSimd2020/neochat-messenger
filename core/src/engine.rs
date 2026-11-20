@@ -41,6 +41,9 @@ pub struct Inner {
     pub shutdown: AtomicBool,
     pub conn_state: AtomicU8,
     refresh_lock: Mutex<()>,
+    pub(crate) history_lock: Mutex<()>,
+    pub(crate) update_lock: Mutex<()>,
+    pub(crate) story_download_lock: Mutex<()>,
     pub ws_active: AtomicBool,
     /// Serializes sync cycles between the worker and `sync_now`.
     pub cycle_lock: Mutex<()>,
@@ -82,6 +85,9 @@ impl Core {
             shutdown: AtomicBool::new(false),
             conn_state: AtomicU8::new(STATE_OFFLINE),
             refresh_lock: Mutex::new(()),
+            history_lock: Mutex::new(()),
+            update_lock: Mutex::new(()),
+            story_download_lock: Mutex::new(()),
             ws_active: AtomicBool::new(false),
             cycle_lock: Mutex::new(()),
             presence: Mutex::new(HashMap::new()),
@@ -94,6 +100,7 @@ impl Core {
         let worker = std::thread::Builder::new().name("neocore-worker".into()).spawn(move || {
             w.record_installation();
             w.sweep_viewed_media();
+            let _ = w.sweep_stories();
             w.worker_loop();
         }).ok();
         Ok(Core { inner, worker })
@@ -285,6 +292,7 @@ impl Inner {
             "set_avatar" => self.set_avatar(p),
             "check_update" => self.check_update(p),
             "download_update" => self.download_update(p),
+            "restore_history" => self.restore_account_history(),
             "set_two_factor" => self
                 .authed("PUT", "/v1/accounts/current/settings", Some(&json!({"two_factor": p["enabled"].as_bool().unwrap_or(false)})))
                 .map(|_| Value::Null),
@@ -339,10 +347,18 @@ impl Inner {
             "close_poll" => self.close_poll(p),
             "list_conversations" => self.list_conversations(p),
             "get_conversation" => self.get_conversation(p),
+            "set_copy_protection" => self.set_copy_protection(p),
             "list_messages" => self.list_messages(p),
             "search_messages" => self.search_messages(p),
             "send_text" => self.send_text(p),
             "send_file" => self.send_file(p),
+            "publish_story" => self.publish_story(p),
+            "list_stories" => self.list_stories(p),
+            "open_story" => self.open_story(p),
+            "manage_story" => self.manage_story(p),
+            "story_audience" => self.story_audience(p),
+            "story_feedback" => self.story_feedback(p),
+            "comment_story" => self.comment_story(p),
             "retry_message" => self.retry_message(p),
             "retry_decrypt" => self.retry_decrypt(p),
             "delete_local_message" => self.delete_local_message(p),
@@ -351,6 +367,7 @@ impl Inner {
             "forward_message" => self.forward_message(p),
             "download_file" => self.download_file(p),
             "media_viewed" => self.media_viewed(p),
+            "media_timer_start" => self.media_timer_start(p),
             "media_shown" => self.media_shown(p),
             "burn_viewed" => self.burn_viewed(p),
             "stt_model" => self.stt_model(),
@@ -723,6 +740,7 @@ impl Inner {
             kv_set(&tx, "account_identity", &account.serialize())?;
             kv_set(&tx, "backup_key", &history_key)?;
             self.store_own_roster(&tx, &r.revision.to_string(), &nb, &ns, &account_key)?;
+            kv_set(&tx, "history_restore_pending", b"1")?;
             tx.commit()?;
         }
         let _ = self.upload_key_backup(pw);
@@ -802,6 +820,7 @@ impl Inner {
         kv_set(&tx, "account_identity", &account.serialize())?;
         kv_set(&tx, "backup_key", &history_key)?;
         kv_set(&tx, "pending_recovery_secret", &secret)?;
+        kv_set(&tx, "history_restore_pending", b"1")?;
         self.store_own_roster(&tx, &rev.to_string(), &blob, &sig, &account.identity_key().serialize())?;
         tx.commit()?;
         drop(db);
@@ -871,6 +890,7 @@ impl Inner {
             kv_set(&tx, "primary", b"1")?;
             kv_set(&tx, "account_identity", &account.serialize())?;
             kv_set(&tx, "backup_key", &backup_key)?;
+            kv_set(&tx, "history_restore_pending", b"1")?;
             self.store_tokens(&tx, &out["session"])?;
             for k in ["link_id", "link_secret", "link_transfer"] {
                 kv_del(&tx, k)?;
@@ -994,11 +1014,17 @@ impl Inner {
         Ok(json!({
             "read_receipts": kv_get_str(&db.conn, "read_receipts")?.as_deref() != Some("0"),
             "quick_reaction": kv_get_str(&db.conn, "quick_reaction")?.unwrap_or_else(|| crate::state::DEFAULT_QUICK_REACTION.into()),
+            "qr_style": crate::state::qr_style(&db.conn)?,
         }))
     }
 
     /// Account preferences; they follow the user to every own device.
     fn set_settings(&self, p: &Value) -> Result<Value> {
+        if let Some(style) = p.get("qr_style") {
+            if !crate::state::valid_qr_style(style) {
+                return Err(Error::Invalid("Некорректное оформление QR-кода".into()));
+            }
+        }
         if let Some(r) = p["quick_reaction"].as_str() {
             if !crate::social::valid_reaction(r.trim()) {
                 return Err(Error::Invalid("Быстрая реакция должна быть эмодзи".into()));
@@ -1018,6 +1044,9 @@ impl Inner {
         }
         for k in touched {
             self.touch(k);
+        }
+        if let Some(style) = p.get("qr_style") {
+            self.set_qr_style(style)?;
         }
         self.emit(json!({"type": "settings_changed"}));
         Ok(Value::Null)
@@ -1331,7 +1360,8 @@ pub fn display_name(first: &str, last: &str, username: &str) -> String {
 /// installation must not show the previous account's chats.
 fn set_history_owner(tx: &rusqlite::Connection, user_id: &str) -> Result<()> {
     if kv_get_str(tx, "history_owner")?.as_deref() != Some(user_id) {
-        tx.execute_batch("DELETE FROM receipts; DELETE FROM messages; DELETE FROM conversations; DELETE FROM contacts;")?;
+        tx.execute_batch("DELETE FROM receipts; DELETE FROM messages; DELETE FROM conversations; DELETE FROM contacts;
+            DELETE FROM stories; DELETE FROM story_routes; DELETE FROM story_changes; DELETE FROM story_feedback;")?;
         kv_set(tx, "history_owner", user_id.as_bytes())?;
     }
     Ok(())

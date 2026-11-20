@@ -896,6 +896,8 @@ func bindChatCell(_ cell: RowCell, _ c: JSON) {
     cell.title.text = c.str("title")
     cell.title.textColor = ProfileStyle.name(c.str("title_color")) ?? Theme.text
     cell.groupIcon.isHidden = kind != "group"
+    cell.streak.isHidden = kind != "direct" || c.int("streak") < 3
+    cell.streak.text = c.int("streak") >= 3 ? "🔥 \(c.int("streak"))" : ""
     cell.time.text = formatListTime(c.int64("last_activity"))
     cell.badge.set(c.int("unread"),mentions:c.int("mention_count"),chat:c.str("id"))
     cell.pin.isHidden = !(c.bool("pinned") && c.int("unread") == 0)
@@ -905,6 +907,18 @@ func bindChatCell(_ cell: RowCell, _ c: JSON) {
     if !draft.isEmpty { preview = "Черновик: " + draft; color = Theme.accent }
     if let t = Typing.text(c.str("id"), group: kind != "direct") { preview = t; color = Theme.accent }
     if !(c["key_changed_users"] as? [Any] ?? []).isEmpty { preview = "Ключ собеседника изменился"; color = Theme.warning }
+    let mediaIcons: [(String, String)] = [
+        ("🖼 ", "photo.fill"), ("🎤 ", "waveform"), ("📹 ", "video.circle.fill"),
+        ("🎬 ", "play.rectangle.fill"), ("📷 ", "camera.fill")
+    ]
+    cell.previewIcon.isHidden = true
+    for (prefix, symbol) in mediaIcons where preview.hasPrefix(prefix) {
+        preview = String(preview.dropFirst(prefix.count))
+        cell.previewIcon.image = UIImage(systemName: symbol)
+        cell.previewIcon.isHidden = false
+        break
+    }
+    cell.previewIcon.tintColor = color
     cell.subtitle.text = preview
     cell.subtitle.textColor = color
     var a = [c.str("title")]

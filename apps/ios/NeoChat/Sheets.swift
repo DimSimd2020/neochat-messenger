@@ -520,24 +520,8 @@ final class SettingsViewController: SheetViewController {
             },
         ], footer: "В уведомлении видно только название чата, без текста сообщения.")
 
-        let theme = UISegmentedControl(items: ["Устройство", "День", "Ночь"])
-        theme.selectedSegmentIndex = Theme.mode.rawValue
-        theme.addAction(UIAction { _ in Theme.mode = Theme.Mode(rawValue: theme.selectedSegmentIndex) ?? .system }, for: .valueChanged)
-        let sizes: [(Double, String)] = [(15, "Мелкий"), (17, "Обычный"), (19, "Крупный"), (21, "Очень крупный")]
-        let size = NavRow("textformat.size", "Размер текста", value: sizes.first { CGFloat($0.0) == Prefs.textSize }?.1 ?? "Обычный") {}
-        size.addAction(UIAction { [weak self, weak size] _ in
-            guard let self, let size else { return }
-            self.choose("Размер текста в чатах", sizes, current: Double(Prefs.textSize), from: size) { v, name in
-                Prefs.set("text_size", v)
-                size.value.text = name
-            }
-        }, for: .touchUpInside)
-        section("Оформление", [
-            padded(theme),
-            NavRow("paintpalette", "Оформление интерфейса") { [weak self] in self?.push(AppearanceViewController()) },
-            size,
-            SwitchRow("face.smiling", "Крупные эмодзи без текста", on: Prefs.bigEmoji) { Prefs.set("big_emoji", $0) },
-            SwitchRow("figure.walk", "Уменьшить анимацию", on: UserDefaults.standard.bool(forKey: "reduce_motion")) { Prefs.set("reduce_motion", $0) },
+        section("Кастомизация", [
+            NavRow("slider.horizontal.3", "Тема, переходы и анимации") { [weak self] in self?.push(CustomizationViewController()) },
         ])
 
         let sort = NavRow("arrow.up.arrow.down", "Сортировка чатов", value: chatSorts.first { $0.0 == Prefs.chatSort }?.1 ?? "") {}
@@ -568,7 +552,18 @@ final class SettingsViewController: SheetViewController {
             cache?.value.text = self?.sizeOf(self?.cacheDirs() ?? [])
             self?.toast("Кэш очищен")
         }, for: .touchUpInside)
-        section("Данные", [cache], footer: "Удаляет временные файлы и расшифрованные копии фото. Переписка остаётся.")
+        let restore = NavRow("clock.arrow.circlepath", "Восстановить переписку") { [weak self] in
+            self?.toast("Проверяем зашифрованную копию переписки…")
+            Core.shared.call("restore_history") { [weak self] result in
+                switch result {
+                case .failure(let e): self?.toast(e.message)
+                case .success(let value):
+                    let restored = (value as? JSON)?.bool("restored") == true
+                    self?.toast(restored ? "Копия переписки загружена" : "Сохранённой копии пока нет")
+                }
+            }
+        }
+        section("Данные", [cache, restore], footer: "Удаляет временные файлы и расшифрованные копии фото. Переписка остаётся.")
 
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         let channel = NavRow("arrow.triangle.2.circlepath", "Сообщать об обновлениях:", value: Prefs.updateChannel) {}
@@ -1027,19 +1022,19 @@ final class AttachViewController: SheetViewController {
     private var files: [OutgoingFile]
     private let asPhotos: Bool
     private let more: (@escaping ([OutgoingFile]) -> Void) -> Void
-    private let send: ([OutgoingFile], Bool, String, Bool, Bool) -> Void
+    private let send: ([OutgoingFile], Bool, String, Bool, Int) -> Void
     private let preview = UIStackView()
     private let caption = Field("Подпись")
     private var asFileRow: UIStackView?
     private var spoilerRow: UIStackView?
-    private var onceRow: UIStackView?
+    private var onceRow: NavRow?
     private var asFile: Bool
     private var spoiler = false
-    private var once = false
+    private var timerMs = 0 // 0: never; -1: once; positive: countdown after opening
     private var sent = false
     private var loadToken = 0
 
-    init(files: [OutgoingFile], asPhotos: Bool, more: @escaping (@escaping ([OutgoingFile]) -> Void) -> Void, send: @escaping ([OutgoingFile], Bool, String, Bool, Bool) -> Void) {
+    init(files: [OutgoingFile], asPhotos: Bool, more: @escaping (@escaping ([OutgoingFile]) -> Void) -> Void, send: @escaping ([OutgoingFile], Bool, String, Bool, Int) -> Void) {
         self.files = files
         self.asPhotos = asPhotos
         self.asFile = !asPhotos
@@ -1067,7 +1062,7 @@ final class AttachViewController: SheetViewController {
         stack.addArrangedSubview(row)
         // A spoiler and a view-once mark belong to a picture or a video, never to a document.
         let spoilerLine = switchRow("Скрыть до нажатия", on: spoiler) { [weak self] on in self?.spoiler = on }
-        let onceLine = switchRow("Просмотреть один раз", on: once) { [weak self] on in self?.once = on }
+        let onceLine = NavRow("timer", "Удаление медиа", value: "Никогда") { [weak self] in self?.pickTimer() }
         spoilerRow = spoilerLine
         onceRow = onceLine
         stack.addArrangedSubview(spoilerLine)
@@ -1099,7 +1094,7 @@ final class AttachViewController: SheetViewController {
         guard !sent, !files.isEmpty else { return }
         sent = true
         let media = allMedia && photosNow
-        send(files, photosNow, (caption.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines), media && spoiler, media && once)
+        send(files, photosNow, (caption.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines), media && spoiler, media ? timerMs : 0)
         dismiss(animated: !Theme.reducedMotion)
     }
 
@@ -1119,7 +1114,7 @@ final class AttachViewController: SheetViewController {
         onceRow?.isHidden = !photos
         if !photos {
             spoiler = false
-            once = false
+            timerMs = 0
         }
         if photos && files.allSatisfy({ $0.isVideo }) {
             title = files.count == 1 ? "Отправить видео" : "Отправить видео: \(files.count)"
@@ -1131,6 +1126,39 @@ final class AttachViewController: SheetViewController {
         }
         preview.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if photos { addImagePreview() } else { addFileRows() }
+    }
+
+    private func pickTimer() {
+        let options: [(Int, String)] = [
+            (0, "Никогда"), (-1, "Один просмотр"), (3_000, "3 секунды"),
+            (5_000, "5 секунд"), (10_000, "10 секунд"), (30_000, "30 секунд"),
+            (60_000, "1 минута"), (300_000, "5 минут"), (3_600_000, "1 час"), (86_400_000, "24 часа")
+        ]
+        let sheet = UIAlertController(title: "Удаление после открытия", message: "Таймер запускается только после первого открытия. Закрытие не останавливает отсчёт.", preferredStyle: .actionSheet)
+        for (value, name) in options {
+            sheet.addAction(UIAlertAction(title: (value == timerMs ? "✓ " : "") + name, style: .default) { [weak self] _ in
+                self?.timerMs = value
+                self?.onceRow?.value.text = name
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Свое время…", style: .default) { [weak self] _ in
+            let editor = UIAlertController(title: "Секунды до удаления", message: "От 1 до 86400 секунд", preferredStyle: .alert)
+            editor.addTextField { $0.keyboardType = .numberPad; $0.placeholder = "Например, 90" }
+            editor.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+            editor.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self, weak editor] _ in
+                guard let raw = editor?.textFields?.first?.text, let seconds = Int(raw), (1...86400).contains(seconds) else {
+                    self?.toast("Введите время от 1 до 86400 секунд")
+                    return
+                }
+                self?.timerMs = seconds * 1_000
+                self?.onceRow?.value.text = "\(seconds) с"
+            })
+            self?.present(editor, animated: !Theme.reducedMotion)
+        })
+        sheet.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = onceRow
+        sheet.popoverPresentationController?.sourceRect = onceRow?.bounds ?? .zero
+        present(sheet, animated: !Theme.reducedMotion)
     }
 
     private func addImagePreview() {

@@ -114,6 +114,10 @@ impl Api {
 
     /// Streams a response body into `dest`, refusing more than `max` bytes.
     pub fn download(&self, path: &str, token: &str, dest: &Path, max: u64) -> Result<u64> {
+        self.download_progress(path, token, dest, max, |_, _| {})
+    }
+
+    pub(crate) fn download_progress(&self, path: &str, token: &str, dest: &Path, max: u64, mut progress: impl FnMut(u64, u64)) -> Result<u64> {
         let resp = self
             .agent
             .get(&format!("{}{}", self.base, path))
@@ -125,6 +129,7 @@ impl Api {
             let text = resp.body_mut().read_to_string().unwrap_or_default();
             return Err(api_error(status, &text));
         }
+        let length = resp.headers().get("Content-Length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
         let mut reader = resp.body_mut().with_config().limit(max + 1).reader();
         let mut out = std::fs::File::create(dest)?;
         let mut buf = vec![0u8; 64 * 1024];
@@ -139,6 +144,7 @@ impl Api {
                 return Err(Error::Crypto("Файл больше допустимого размера".into()));
             }
             out.write_all(&buf[..n])?;
+            progress(total, length);
         }
         out.sync_all()?;
         Ok(total)
