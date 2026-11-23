@@ -1,57 +1,54 @@
+
 # NeoChat
 
-Лёгкий мессенджер: Qt/C++ на компьютере, Kotlin на Android, Swift на iOS и Go на сервере. Полноценный веб-клиент чата проектируется; подтверждение почты проходит через стандартную страницу Firebase.
+**Post-quantum encrypted, cross-platform messenger built with native clients and a shared Rust core.**
 
-.
-## Документы
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/DimSimd2020/neochat-messenger)](https://github.com/DimSimd2020/neochat-messenger/releases)
 
-Начать с [карты документации](docs/README.md).
+---
 
-- [Клиент для iOS и сборка IPA](apps/ios/README.md)
-- [Firebase Cloud Messaging для Android](docs/19-firebase-push.md) — настройка клиента, подключение рабочего сервера и проверки доставки.
-- [Подтверждённая почта, v0.6.8.1](docs/20-email-verification.md) — регистрация, привязка и доставка Android без постоянной службы по умолчанию; рабочая реализация до публикации.
-- [Несколько аккаунтов](docs/21-multi-account.md) — переключатель в нативных клиентах, отдельные хранилища и доставка уведомлений.
-- [Оформление интерфейса, v0.6.9.1](docs/22-appearance-themes.md) — четыре готовые темы и две свои: цвет фона и до пяти точек градиента.
-- [Повтор расшифровки, v0.6.9.3](docs/23-decryption-retry.md) — шифртекст нерасшифрованного сообщения сохраняется, повтор каждые 20 минут и кнопка «Повторить расшифровку».
-- [Закрытый канал alpha, v0.6.9.4](docs/24-alpha-channel.md) — диагностические сборки только для выбранных аккаунтов, вне git и вне публичного обновления.
-- [Служебные строки группы и ограничение участников, v0.6.9.11](docs/25-group-notices-and-mute.md) — «X был добавлен владельцем Y», мьют владельцем и админами.
-- [Закреплённые сообщения и «Избранное», v0.6.9.11](docs/26-pins-and-saved.md) — несколько закрепов, цепочка по панели, заметки себе.
-- [Цвет имени и оформление профиля, v0.6.9.11](docs/27-profile-style.md) — цвет имени везде, шапка-градиент в профиле.
-- [Отправка видео, v0.6.9.11](docs/28-video.md) — постер и длина в карточке файла, плеер в приложениях.
-- [Анимированные эмодзи, v0.6.9.11](docs/29-animated-emoji.md) — Animated Noto Emoji (CC BY 4.0) в сообщениях из одних эмодзи.
-- [Голосовые сообщения, кружки и расшифровка, v0.7.0](docs/30-voice-circles-stt.md) — запись, воспроизведение, локальная модель речи, сжатие видео, вложения до 50 МиБ.
-- [Формулы LaTeX в чате, v0.7.1](docs/31-latex-formulas.md) — $x^2$ и $$…$$ в сообщениях, разбор и вёрстка в ядре, шрифт XITS Math (SIL OFL).
-- [Оформление QR-кода и стекло плашек, v0.7.2](docs/32-qr-styles-and-glass.md) — узор, цвет и фото в QR-коде, полупрозрачные кнопки, геометрия главного экрана, плавность переходов.
-- [Просмотр фото и видео на компьютере, v0.7.2.5](docs/33-desktop-viewer-menu-and-player.md) — меню по правой кнопке на открытой фотографии, альбом беседы и встроенный плеер видео на Windows MFPlay.
-- [Скрытые фото, видео и текст, v0.7.3 / 0.7.3.1](docs/34-hidden-media.md) — «Скрыто» и «Просмотреть один раз»: контракт вложения, уничтожение копий, защита окна от съёмки и её границы на каждой платформе; живая обложка спойлера и скрытый текст `||…||`.
-- [Оформление текста и прощание сообщения, v0.7.3.1](docs/35-text-formatting-and-farewell.md) — пункты оформления в меню выделения и плавное исчезновение удалённого сообщения на Android и компьютере.
-- [Настройки копирования в беседе, v0.7.4](docs/protocol/copy-protection.md) — независимые запреты, запросы на разрешение и возможности защиты экрана на каждой платформе.
-- [Визуальный эскиз](docs/design/preview.html) — локальный макет интерфейса, без подключения к серверу.
-- [Отдельный просмотр Android](docs/design/android.html) — тот же интерактивный макет в ширине телефона, независимо от размера окна браузера.
-- [Правила работы над проектом](AGENTS.md)
-- [Точка входа для Claude](CLAUDE.md)
+## Overview
+
+NeoChat is an open-source messaging platform focused on privacy, low latency, and native performance across desktop and mobile devices. It combines a shared cryptographic and protocol core in Rust with native UI clients and a self-hostable backend.
+
+## Key Features
+
+- **Post-Quantum End-to-End Encryption** — Modern cryptographic primitives designed to protect conversations against both classical and quantum threats.
+- **Native Cross-Platform Clients** — Dedicated native apps for Desktop (C++ / Qt 6), Android (Kotlin), and iOS (Swift) with feature parity across platforms.
+- **On-Device Speech-to-Text** — Local voice message transcription without sending audio to third-party cloud APIs.
+- **Rich Media & Messaging** — Animated emoji, high-efficiency photo/media decoding, saved messages, group chats, and real-time sync across devices.
+- **Self-Hostable Architecture** — Full server and infrastructure stack included for independent deployment.
+
+## Repository Structure
 
 
-## Выпуск обновления
+neochat-messenger/
+├── apps/       # Native client applications (Desktop Qt/C++, Android Kotlin, iOS Swift)
+├── core/       # Shared cryptographic, networking, and protocol core (Rust)
+├── server/     # Backend messaging server (Go)
+├── infra/      # Deployment configurations and infrastructure tooling
+├── assets/     # Animated emoji and static media resources
+├── scripts/    # Build, packaging, and release automation scripts
+└── docs/       # Architecture, protocol, and developer documentation
 
-Текущие стабильные сборки — Android 0.7.2.4, Windows 0.7.1, iOS 0.7.1. Их получают клиенты без
-переключателя и с выбором stable. В канале beta лежит 0.7.3 для всех трёх платформ: скрытые фото и
-видео — «Скрыто» и «Просмотреть один раз» ([что это и какие у защиты границы](docs/34-hidden-media.md)).
-Выпуск 0.7.3.1 (Android и Windows): живая обложка скрытого фото, скрытый текст, пункты оформления
-в меню выделения и плавное удаление сообщений ([оформление и прощание](docs/35-text-formatting-and-farewell.md)).
-Предыдущие в beta: 0.7.2.6 — подтверждение почты через стандартную страницу Firebase, аварийный код
-восстановления возвращает ключи и историю, сохраняя аккаунт и отзывая старые устройства, Android
-продолжает установку после выдачи системного разрешения. Выпуск 0.6.7:
-[профили, упоминания, архив, сборки и проверки](docs/18-release-0.6.7.md). Предыдущая стабильная: [0.6.5.2](docs/17-release-0.6.5.2.md).
 
-Собрать `dist/NeoChat-<версия>-x64.msi`, `-android.apk` и `-ios-unsigned.ipa`. В `dist/` лежат только эти три файла на каждую версию: без логов, снимков, каталогов веток и промежуточных копий. Затем:
+## Getting Started
 
-- APK подписывается релизным ключом: `NEOCHAT_SIGNING` указывает на файл вида `E:/dev/keys/signing.properties` (`neochat-release.jks`, в репозиторий не попадает). Без него release собирается неподписанным, а CI останавливает сборку на отсутствующем секрете — подмены на ключ из репозитория больше нет. Схемы подписи — v2 и v3.
-- С 0.7.2.3 сборки снова подписаны релизным ключом. 0.1.0–0.5.0 подписаны им же и обновятся поверх; 0.6.0–0.7.2.2 подписаны публичным sideload-ключом из репозитория (ключ удалён), поэтому им нужна одна установка вручную. Дальше линейка ключа стабильна, обновления снова встают поверх.
-- Заметки окна «Что нового» хранятся в ядре (`core/src/whatsnew.rs`); новую версию нужно добавить туда.
+### Downloads
 
-```sh
-python infra/publish-update.py 0.7.1 "Что нового"
-```
+Prebuilt binaries and installers (including Windows MSI packages) are available on the [Releases](https://www.google.com/url?sa=E&source=gmail&q=https://github.com/DimSimd2020/neochat-messenger/releases) page.
 
-Третий аргумент — канал, `stable` по умолчанию. `beta` не заменяет стабильный манифест. Перед заменой скрипт сохраняет предыдущие `manifest.json` и `manifest.sig` и список сборок в `/var/backups/neochat-releases`, храня пять последних; сами сборки туда не пакутся. Скрипт подписывает манифест офлайн-ключом (`E:/dev/keys/update-signing.key`, в репозиторий не попадает) и кладёт файлы на сервер. Приложения 0.4.0 и новее находят обновление своего канала сами: Windows ставит и перезапускается, Android открывает установщик, iOS даёт ссылку на IPA для Scarlet. Переключатель канала есть с 0.6.7.2.
+### Building from Source
+
+Platform-specific build instructions, environment setup, and server deployment guides are maintained in the [`docs/`](https://www.google.com/search?q=docs/) directory.
+
+## License
+
+The source code of NeoChat is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)** — see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
+
+### Brand Assets & Trademarks (All Rights Reserved)
+
+The AGPL-3.0 license **does not** apply to the NeoChat name, logos, icons, wordmarks, or other brand assets (including, without limitation, `messenger-logo-*.png`, `messenger-logo-*.svg`, and any derived visual identity files in this repository).
+
+All rights to these brand assets are strictly reserved by the author (**All Rights Reserved**). In accordance with Section 7(e) of the AGPL-3.0, this license does not grant any rights under trademark law or copyright to copy, modify, redistribute, or use NeoChat's logos, icons, or brand elements for any purpose—commercial or non-commercial—without prior written permission from the copyright holder.
